@@ -110,6 +110,30 @@ def _history(
         )
         for metric in ordered
     )
+    statistics = fundamental_research_history_statistics(
+        points,
+        unit=definition.unit,
+        frequency=frequency,
+    )
+    return FundamentalResearchMetricHistory(
+        metric_key=metric_key,
+        display_name_es=definition.display_name_es,
+        unit=definition.unit,
+        frequency=frequency,
+        points=points,
+        statistics=statistics,
+    )
+
+
+def fundamental_research_history_statistics(
+    points: tuple[FundamentalResearchHistoryPoint, ...],
+    *,
+    unit: str,
+    frequency: DataFrequency,
+) -> FundamentalResearchHistoryStatistics:
+    """Calculate the published descriptive statistics for one ordered point series."""
+    if not points:
+        raise ValueError("fundamental history statistics require at least one point")
     values = tuple(point.value for point in points)
     first = points[0]
     latest = points[-1]
@@ -121,7 +145,7 @@ def _history(
     latest_change_rate: Decimal | None = None
     horizon_change_rate: Decimal | None = None
     compound_annual_growth_rate: Decimal | None = None
-    if definition.unit in _LEVEL_UNITS and previous is not None:
+    if unit in _LEVEL_UNITS and previous is not None:
         if previous.value > 0:
             latest_change_rate = latest.value / previous.value - 1
         if first.value > 0:
@@ -135,7 +159,7 @@ def _history(
             exponent = _DAYS_PER_YEAR / Decimal(elapsed_days)
             compound_annual_growth_rate = (latest.value / first.value) ** exponent - 1
 
-    statistics = FundamentalResearchHistoryStatistics(
+    return FundamentalResearchHistoryStatistics(
         point_count=len(points),
         first_period_end=first.period_end,
         previous_period_end=previous.period_end if previous is not None else None,
@@ -154,20 +178,13 @@ def _history(
         compound_annual_growth_rate=compound_annual_growth_rate,
         algorithm_version=HISTORY_ALGORITHM_VERSION,
     )
-    return FundamentalResearchMetricHistory(
-        metric_key=metric_key,
-        display_name_es=definition.display_name_es,
-        unit=definition.unit,
-        frequency=frequency,
-        points=points,
-        statistics=statistics,
-    )
 
 
 __all__ = [
     "AaplFundamentalResearchHistoryService",
     "FundamentalResearchHistoryError",
     "SecIssuerFundamentalResearchHistoryService",
+    "fundamental_research_history_statistics",
 ]
 
 

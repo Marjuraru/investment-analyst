@@ -517,6 +517,22 @@ solo se calcula para series anuales de nivel —USD, USD por acción o acciones�
 y utiliza días transcurridos. Las series trimestrales no se anualizan porque los flujos discretos
 pueden ser estacionales.
 
+El endpoint `/api/fundamental-research-horizons` consulta
+`fundamental-annual-horizons-result-v1` para una muestra explícita de métricas y horizontes
+anuales. Acepta `asset_id`, `known_at`, `end_period_end` (cierre ancla `YYYY-MM-DD`),
+`metric_keys` (una a seis claves separadas por comas) y `horizons` (subconjunto de `3,5,10`; por
+defecto los tres). No admite `frequency`: la vista es sólo anual y rechaza cualquier parámetro
+desconocido, lista vacía o elemento con espacios. La respuesta conserva una serie de hasta once
+cierres por métrica y filas por horizonte con estado `complete`, `anchor_unavailable`,
+`insufficient_history` o `nonconsecutive_periods`; sólo las completas publican estadísticas. La
+consulta es read-only, no adquiere proveedores y usa la caché firmada acotada existente.
+
+En la interfaz, la acción «Horizontes anuales» dentro de Investigación fundamental toma el cierre
+anual mostrado como valor inicial editable, permite elegir entre una y seis métricas y los
+horizontes 3/5/10, y sólo consulta al pulsar el botón. La tabla muestra períodos reales, estado,
+variación y CAGR cuando es admisible; la evidencia exacta se despliega como JSON y se exporta sin
+transformación. Cambiar activo, corte, ancla o frecuencia invalida el resultado visible.
+
 El endpoint `/api/fundamental-analysis` envuelve a su vez el historial exacto y añade ocho secciones
 versionadas no solapadas. La cobertura cuenta métricas disponibles en el último período, series
 históricas y comparaciones posibles; no es un score. También expone el estado de la clasificación

@@ -3,6 +3,7 @@
 import json
 from collections import Counter, defaultdict
 from collections.abc import Collection, Mapping
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Context, Decimal, localcontext
 from typing import Protocol
@@ -61,6 +62,8 @@ class _ObservationRepository(Protocol):
         frequency: DataFrequency | None = None,
         quality: DataQuality | None = None,
         available_to: datetime | None = None,
+        period_end_from: date | None = None,
+        period_end_to: date | None = None,
     ) -> list[NormalizedObservation]:
         """Return stored observations in repository order."""
         ...
@@ -88,6 +91,26 @@ class AmbiguousFundamentalResearchRevisionError(FundamentalResearchError):
 
 class FundamentalResearchComputationError(FundamentalResearchError):
     """Raised when a published metric cannot be calculated safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class FundamentalResearchEvidence:
+    """Deterministic revision-selected SEC evidence for one bounded window."""
+
+    observations_examined: int
+    observations_eligible: int
+    selected: Mapping[tuple[str, date], NormalizedObservation]
+    superseded: Mapping[tuple[str, date], int]
+
+    @property
+    def selected_count(self) -> int:
+        """Return the number of exact selected observations."""
+        return len(self.selected)
+
+    @property
+    def superseded_count(self) -> int:
+        """Return the number of superseded revisions."""
+        return sum(self.superseded.values())
 
 
 class SecIssuerFundamentalResearchService:
@@ -208,6 +231,60 @@ class SecIssuerFundamentalResearchService:
                 latest_period_end=periods[-1].period_end if periods else None,
             ),
         )
+
+    def select_annual_evidence(
+        self,
+        *,
+        known_at: datetime,
+        start_period_end: date,
+        end_period_end: date,
+        field_names: frozenset[str],
+    ) -> FundamentalResearchEvidence:
+        """Select exact annual revisions for a bounded window without metric formulas."""
+        self._storage.require_open()
+        request = AaplFundamentalResearchRequest(
+            known_at=known_at,
+            frequency=DataFrequency.ANNUAL,
+            start_period_end=start_period_end,
+            end_period_end=end_period_end,
+        )
+        observations = self._storage.observations.list(
+            asset_id=self._configuration.asset_id,
+            source_id=self._configuration.companyfacts_source_id,
+            field_names=field_names,
+            frequency=DataFrequency.ANNUAL,
+            quality=DataQuality.VALID,
+            available_to=known_at,
+            period_end_from=start_period_end,
+            period_end_to=end_period_end,
+        )
+        eligible = [
+            observation
+            for observation in observations
+            if _is_eligible(
+                observation,
+                request,
+                configuration=self._configuration,
+                transformation_version=self._transformation_version,
+                research_fields=field_names,
+            )
+        ]
+        selected, superseded = _resolve_revisions(eligible)
+        return FundamentalResearchEvidence(
+            observations_examined=len(observations),
+            observations_eligible=len(eligible),
+            selected=selected,
+            superseded=superseded,
+        )
+
+
+def calculate_fundamental_research_metric(
+    definition: FundamentalResearchMetricDefinition,
+    facts: Mapping[str, NormalizedObservation],
+    frequency: DataFrequency,
+) -> tuple[FundamentalResearchMetricValue | None, str]:
+    """Calculate one published metric from exact selected observations."""
+    return _calculate_metric(definition, facts, frequency)
 
 
 def _is_eligible(
@@ -628,8 +705,10 @@ __all__ = [
     "AaplFundamentalResearchService",
     "FundamentalResearchComputationError",
     "FundamentalResearchError",
+    "FundamentalResearchEvidence",
     "MalformedFundamentalResearchObservationError",
     "SecIssuerFundamentalResearchService",
+    "calculate_fundamental_research_metric",
 ]
 
 

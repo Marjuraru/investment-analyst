@@ -44,6 +44,13 @@ from investment_analyst.analytics.fundamentals.analysis_models import (
 from investment_analyst.analytics.fundamentals.analysis_service import (
     SecIssuerFundamentalAnalysisService,
 )
+from investment_analyst.analytics.fundamentals.annual_horizon_models import (
+    FundamentalAnnualHorizonsRequest,
+    FundamentalAnnualHorizonsResult,
+)
+from investment_analyst.analytics.fundamentals.annual_horizon_service import (
+    SecIssuerFundamentalAnnualHorizonService,
+)
 from investment_analyst.analytics.fundamentals.research_history_models import (
     AaplFundamentalResearchHistoryResult,
     FundamentalResearchHistoryResult,
@@ -1291,6 +1298,24 @@ class InvestmentAnalystApplication:
                 SecIssuerFundamentalResearchService(storage, configuration)
             ).query(request)
 
+    def query_sec_fundamental_annual_horizons(
+        self,
+        request: FundamentalAnnualHorizonsRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> FundamentalAnnualHorizonsResult:
+        """Calculate explicit annual horizons for one catalog-backed SEC issuer."""
+        configuration = resolve_sec_configuration(
+            self._runtime.provider_resolver,
+            asset_id=asset_id,
+        )
+        with self._open_read_only(location) as storage:
+            return SecIssuerFundamentalAnnualHorizonService(
+                storage,
+                configuration,
+            ).query(request)
+
     def query_aapl_fundamental_analysis(
         self,
         request: AaplFundamentalResearchRequest,
@@ -1359,7 +1384,7 @@ class InvestmentAnalystApplication:
                 fundamental_source_id = None
         return asset, capabilities, market_source_id, fundamental_source_id
 
-    def _open_valuation_read(self, location: StorageLocationRequest):
+    def _open_read_only(self, location: StorageLocationRequest):
         """Open the workspace once with the shared explicit read-only mode."""
         return self._runtime.open_storage(
             location,
@@ -1376,7 +1401,7 @@ class InvestmentAnalystApplication:
         asset, capabilities, market_source_id, fundamental_source_id = (
             self._corporate_valuation_context(request.asset_id)
         )
-        with self._open_valuation_read(location) as storage:
+        with self._open_read_only(location) as storage:
             return CorporateValuationService(
                 storage,
                 capabilities=capabilities,
@@ -1400,7 +1425,7 @@ class InvestmentAnalystApplication:
         asset, capabilities, market_source_id, fundamental_source_id = (
             self._corporate_valuation_context(query.asset_id)
         )
-        with self._open_valuation_read(location) as storage:
+        with self._open_read_only(location) as storage:
             return CorporateValuationFilingService(
                 storage,
                 capabilities=capabilities,
@@ -1424,7 +1449,7 @@ class InvestmentAnalystApplication:
         asset, capabilities, market_source_id, fundamental_source_id = (
             self._corporate_valuation_context(request.asset_id)
         )
-        with self._open_valuation_read(location) as storage:
+        with self._open_read_only(location) as storage:
             return CorporateValuationFilingService(
                 storage,
                 capabilities=capabilities,

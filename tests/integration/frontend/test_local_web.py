@@ -64,6 +64,10 @@ from investment_analyst.analytics.fundamental_trend_models import (
 from investment_analyst.analytics.fundamentals.analysis_models import (
     AaplFundamentalAnalysisResult,
 )
+from investment_analyst.analytics.fundamentals.annual_horizon_models import (
+    FundamentalAnnualHorizonsRequest,
+    FundamentalAnnualHorizonsResult,
+)
 from investment_analyst.analytics.fundamentals.research_history_models import (
     AaplFundamentalResearchHistoryResult,
 )
@@ -432,6 +436,9 @@ class _FakeApplication:
         self.research_history_requests: list[AaplFundamentalResearchRequest] = []
         self.research_history_asset_ids: list[str] = []
         self.research_history_locations: list[StorageLocationRequest] = []
+        self.annual_horizon_requests: list[FundamentalAnnualHorizonsRequest] = []
+        self.annual_horizon_asset_ids: list[str] = []
+        self.annual_horizon_locations: list[StorageLocationRequest] = []
         self.analysis_requests: list[AaplFundamentalResearchRequest] = []
         self.analysis_asset_ids: list[str] = []
         self.analysis_locations: list[StorageLocationRequest] = []
@@ -969,6 +976,45 @@ class _FakeApplication:
                         )
                     },
                     "series": [],
+                }
+            ),
+        )
+
+    def query_sec_fundamental_annual_horizons(
+        self,
+        request: FundamentalAnnualHorizonsRequest,
+        *,
+        asset_id: str,
+        location: StorageLocationRequest,
+    ) -> FundamentalAnnualHorizonsResult:
+        self.annual_horizon_requests.append(request)
+        self.annual_horizon_asset_ids.append(asset_id)
+        self.annual_horizon_locations.append(location)
+        return cast(
+            FundamentalAnnualHorizonsResult,
+            _JsonResult(
+                {
+                    "schema_version": "fundamental-annual-horizons-result-v1",
+                    "asset_id": asset_id,
+                    "source_id": "sec-edgar:fixture:companyfacts",
+                    "request": request.model_dump(mode="json"),
+                    "algorithm_version": "fundamental-fixed-annual-horizons-v1",
+                    "series": [],
+                    "coverage": {
+                        "observations_examined": 0,
+                        "observations_eligible": 0,
+                        "observations_selected": 0,
+                        "observations_superseded": 0,
+                        "source_periods": 0,
+                        "series_returned": len(request.metric_keys),
+                        "points_returned": 0,
+                        "horizon_rows_returned": len(request.metric_keys) * len(request.horizons),
+                        "complete_horizons": 0,
+                        "incomplete_horizons": len(request.metric_keys) * len(request.horizons),
+                        "skipped_counts": {},
+                    },
+                    "traceability_verified": True,
+                    "limitations": [],
                 }
             ),
         )
@@ -3538,6 +3584,120 @@ def test_local_api_serves_and_refreshes_enabled_amd_fundamentals_independently(
     assert application.analysis_asset_ids == ["equity:us:amd"]
     assert application.fundamental_refresh_requests[0].asset_id == "equity:us:amd"
     assert application.fundamental_refresh_locations[0].workspace == workspace.resolve()
+
+
+def test_local_api_serves_fundamental_annual_horizons_with_strict_parameters(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    workspace = tmp_path / "workspace"
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=workspace,
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    metric_keys = (
+        "fundamental.research.diluted_eps,"
+        "fundamental.research.free_cash_flow,"
+        "fundamental.research.return_on_assets_ending_balance"
+    )
+
+    with _server(AaplLocalWebApplication(controller, None)) as (_, root):
+        query = urlencode(
+            {
+                "asset_id": "equity:us:amd",
+                "known_at": "2026-10-29T19:47:00Z",
+                "end_period_end": "2025-12-27",
+                "metric_keys": metric_keys,
+                "horizons": "3,5,10",
+            }
+        )
+        status, payload, _ = _json_request(
+            Request(f"{root}/api/fundamental-research-horizons?{query}")
+        )
+        unsupported = urlencode(
+            {
+                "asset_id": "equity:us:amd",
+                "known_at": "2026-10-29T19:47:00Z",
+                "end_period_end": "2025-12-27",
+                "metric_keys": metric_keys,
+                "frequency": "annual",
+            }
+        )
+        unsupported_status, unsupported_payload, _ = _json_request(
+            Request(f"{root}/api/fundamental-research-horizons?{unsupported}")
+        )
+        bad_horizon = urlencode(
+            {
+                "asset_id": "equity:us:amd",
+                "known_at": "2026-10-29T19:47:00Z",
+                "end_period_end": "2025-12-27",
+                "metric_keys": metric_keys,
+                "horizons": "4",
+            }
+        )
+        bad_horizon_status, bad_horizon_payload, _ = _json_request(
+            Request(f"{root}/api/fundamental-research-horizons?{bad_horizon}")
+        )
+        padded = urlencode(
+            {
+                "asset_id": "equity:us:amd",
+                "known_at": "2026-10-29T19:47:00Z",
+                "end_period_end": "2025-12-27",
+                "metric_keys": (
+                    "fundamental.research.free_cash_flow, fundamental.research.diluted_eps"
+                ),
+            }
+        )
+        padded_status, padded_payload, _ = _json_request(
+            Request(f"{root}/api/fundamental-research-horizons?{padded}")
+        )
+        future_anchor = urlencode(
+            {
+                "asset_id": "equity:us:amd",
+                "known_at": "2025-12-26T23:59:00Z",
+                "end_period_end": "2025-12-27",
+                "metric_keys": "fundamental.research.free_cash_flow",
+            }
+        )
+        future_status, future_payload, _ = _json_request(
+            Request(f"{root}/api/fundamental-research-horizons?{future_anchor}")
+        )
+        crypto_status, crypto_payload, _ = _json_request(
+            Request(
+                f"{root}/api/fundamental-research-horizons?"
+                + urlencode(
+                    {
+                        "asset_id": "crypto:btc-usd",
+                        "known_at": "2026-10-29T19:47:00Z",
+                        "end_period_end": "2025-12-27",
+                        "metric_keys": "fundamental.research.free_cash_flow",
+                    }
+                )
+            )
+        )
+
+    assert status == 200
+    assert payload["schema_version"] == "fundamental-annual-horizons-result-v1"
+    assert payload["asset_id"] == "equity:us:amd"
+    assert payload["request"]["end_period_end"] == "2025-12-27"
+    assert payload["request"]["horizons"] == [3, 5, 10]
+    assert payload["request"]["metric_keys"] == sorted(metric_keys.split(","))
+    assert application.annual_horizon_asset_ids == ["equity:us:amd"]
+    assert application.annual_horizon_requests[0].end_period_end == date(2025, 12, 27)
+    assert application.annual_horizon_locations[0].workspace == workspace.resolve()
+    assert unsupported_status == 400
+    assert unsupported_payload["error"]["code"] == "invalid_request"
+    assert bad_horizon_status == 400
+    assert bad_horizon_payload["error"]["code"] == "invalid_request"
+    assert padded_status == 400
+    assert padded_payload["error"]["code"] == "invalid_request"
+    assert future_status == 400
+    assert future_payload["error"]["code"] == "invalid_request"
+    assert crypto_status == 400
+    assert crypto_payload["error"]["code"] == "invalid_request"
 
 
 def test_read_caches_are_bounded_to_data_before_the_next_run_attempt(tmp_path: Path) -> None:

@@ -1664,6 +1664,7 @@ function renderFundamentalResearch(payload) {
   setExportAvailable("export-fundamental-research-csv", periods.length > 0);
   if (!periods.length) {
     resetFundamentalResearch();
+    resetAnnualHorizons({ clearAnchor: true, clearMetrics: true });
     empty.textContent = "No hay métricas fundamentales disponibles para este corte histórico.";
     empty.classList.remove("hidden");
     return;
@@ -1742,12 +1743,272 @@ function renderFundamentalResearch(payload) {
   coverage.className = `quality-chip ${
     payload.coverage.latest_period_metrics === payload.coverage.expected_metrics ? "good" : "warn"
   }`;
+  populateAnnualHorizonMetrics(research.definitions || []);
+  if (research.request?.frequency === "annual" && !annualHorizonsAnchorDirty) {
+    const anchor = String(latest.period_end || "").slice(0, 10);
+    if (anchor) byId("annual-horizons-anchor").value = anchor;
+  }
 }
+
+const ANNUAL_HORIZONS_DEFAULT_METRICS = Object.freeze([
+  "fundamental.research.free_cash_flow",
+  "fundamental.research.diluted_eps",
+  "fundamental.research.return_on_assets_ending_balance",
+]);
+
+const ANNUAL_HORIZON_STATUS_LABELS = Object.freeze({
+  complete: "Completo",
+  anchor_unavailable: "Falta el cierre ancla",
+  insufficient_history: "Historia insuficiente",
+  nonconsecutive_periods: "Períodos no consecutivos",
+});
+
+let annualHorizonsPayload = null;
+let annualHorizonsRequestSequence = 0;
+let annualHorizonsSnapshot = null;
+let annualHorizonsAnchorDirty = false;
+
+function invalidateAnnualHorizonsResult() {
+  annualHorizonsRequestSequence += 1;
+  annualHorizonsSnapshot = null;
+  annualHorizonsPayload = null;
+  byId("annual-horizons-table-body").replaceChildren();
+  byId("annual-horizons-evidence").textContent = "";
+  byId("annual-horizons-status").textContent = "Sin consultar.";
+  setExportAvailable("export-annual-horizons-json", false);
+}
+
+function resetAnnualHorizons({ clearAnchor = false, clearMetrics = false } = {}) {
+  invalidateAnnualHorizonsResult();
+  if (clearAnchor) {
+    byId("annual-horizons-anchor").value = "";
+    annualHorizonsAnchorDirty = false;
+  }
+  if (clearMetrics) {
+    byId("annual-horizons-metrics").replaceChildren();
+    byId("query-annual-horizons").disabled = true;
+  }
+}
+
+function populateAnnualHorizonMetrics(definitions) {
+  const select = byId("annual-horizons-metrics");
+  const available = new Set(definitions.map((definition) => definition.metric_key));
+  const previous = new Set(
+    [...select.selectedOptions]
+      .map((option) => option.value)
+      .filter((metricKey) => available.has(metricKey)),
+  );
+  const selected = previous.size
+    ? previous
+    : new Set(ANNUAL_HORIZONS_DEFAULT_METRICS.filter((metricKey) => available.has(metricKey)));
+  if (selected.size === 0) {
+    definitions.slice(0, 3).forEach((definition) => selected.add(definition.metric_key));
+  }
+  select.replaceChildren(
+    ...definitions.map((definition) => {
+      const option = document.createElement("option");
+      option.value = definition.metric_key;
+      option.textContent = definition.display_name_es;
+      option.selected = selected.has(definition.metric_key);
+      return option;
+    }),
+  );
+  byId("query-annual-horizons").disabled = select.options.length === 0;
+}
+
+function setAnnualHorizonsBusy(busy) {
+  byId("annual-horizons-panel").setAttribute("aria-busy", String(busy));
+  byId("query-annual-horizons").disabled =
+    busy || byId("annual-horizons-metrics").options.length === 0;
+}
+
+function annualHorizonsSelectedYears() {
+  return [
+    { value: 3, checked: byId("annual-horizons-3").checked },
+    { value: 5, checked: byId("annual-horizons-5").checked },
+    { value: 10, checked: byId("annual-horizons-10").checked },
+  ]
+    .filter((item) => item.checked)
+    .map((item) => item.value);
+}
+
+function annualHorizonsCagrText(row) {
+  if (row.status !== "complete") return "—";
+  if (row.cagr_reason === "calculated") {
+    return `CAGR ${formatRangeChange(numericValue(row.statistics.compound_annual_growth_rate))}`;
+  }
+  if (row.cagr_reason === "unit_not_eligible") return "No aplica a ratios";
+  if (row.cagr_reason === "nonpositive_endpoint") {
+    return "No calculable: extremo no positivo";
+  }
+  return "—";
+}
+
+function annualHorizonsTableRow(series, row) {
+  const tr = document.createElement("tr");
+  const metric = document.createElement("th");
+  metric.scope = "row";
+  metric.textContent = series.definition.display_name_es;
+  tr.appendChild(metric);
+
+  const statusCell = document.createElement("td");
+  statusCell.appendChild(
+    createElement(
+      "span",
+      `quality-chip ${row.status === "complete" ? "good" : "warn"}`,
+      ANNUAL_HORIZON_STATUS_LABELS[row.status] || row.status,
+    ),
+  );
+  tr.appendChild(statusCell);
+  tr.appendChild(
+    createElement(
+      "td",
+      "",
+      `${row.horizon_years} intervalos · ${formatInteger(row.observed_points)}/${formatInteger(
+        row.required_points,
+      )} cierres`,
+    ),
+  );
+  tr.appendChild(
+    createElement(
+      "td",
+      "",
+      row.period_ends.length ? formatCalendarDate(row.period_ends[0]) : "—",
+    ),
+  );
+  tr.appendChild(
+    createElement(
+      "td",
+      "",
+      row.period_ends.length ? formatCalendarDate(row.period_ends[row.period_ends.length - 1]) : "—",
+    ),
+  );
+  tr.appendChild(
+    createElement("td", "", row.elapsed_days === null ? "—" : formatInteger(row.elapsed_days)),
+  );
+  tr.appendChild(
+    createElement(
+      "td",
+      "",
+      row.statistics?.horizon_change === null || row.statistics?.horizon_change === undefined
+        ? "—"
+        : `${row.statistics.horizon_change} ${series.definition.unit}`,
+    ),
+  );
+  tr.appendChild(createElement("td", "", annualHorizonsCagrText(row)));
+  return tr;
+}
+
+function renderAnnualHorizons(payload) {
+  annualHorizonsPayload = payload;
+  const rows = [];
+  let complete = 0;
+  let total = 0;
+  let points = 0;
+  for (const series of payload.series || []) {
+    points += (series.points || []).length;
+    for (const row of series.horizons || []) {
+      total += 1;
+      if (row.status === "complete") complete += 1;
+      rows.push(annualHorizonsTableRow(series, row));
+    }
+  }
+  byId("annual-horizons-table-body").replaceChildren(...rows);
+  byId("annual-horizons-evidence").textContent = JSON.stringify(payload, null, 2);
+  setExportAvailable("export-annual-horizons-json", (payload.series || []).length > 0);
+  const roaSelected = (payload.series || []).some(
+    (series) =>
+      series.definition?.metric_key === "fundamental.research.return_on_assets_ending_balance",
+  );
+  byId("annual-horizons-status").textContent =
+    `${payload.asset_id} · ancla ${payload.request?.end_period_end || "—"} · `
+    + `${formatInteger(complete)}/${formatInteger(total)} horizontes completos · `
+    + `${formatInteger(points)} puntos candidatos.`
+    + (roaSelected ? " ROA usa saldos de cierre, no promedio." : "");
+}
+
+async function queryAnnualHorizons() {
+  const assetId = selectedMarketAsset;
+  const knownAt = byId("report-known-at").value.trim();
+  const anchor = byId("annual-horizons-anchor").value;
+  const metrics = [...byId("annual-horizons-metrics").selectedOptions].map(
+    (option) => option.value,
+  );
+  const years = annualHorizonsSelectedYears();
+  const status = byId("annual-horizons-status");
+  if (!anchor) {
+    status.textContent = "Seleccione un cierre anual de referencia.";
+    return;
+  }
+  if (metrics.length < 1 || metrics.length > 6) {
+    status.textContent = "Seleccione entre una y seis métricas.";
+    return;
+  }
+  if (!years.length) {
+    status.textContent = "Seleccione al menos un horizonte.";
+    return;
+  }
+  const requestKey = `${assetId}|${knownAt}|${anchor}|${metrics.join(",")}|${years.join(",")}`;
+  const sequence = ++annualHorizonsRequestSequence;
+  annualHorizonsSnapshot = requestKey;
+  annualHorizonsPayload = null;
+  byId("annual-horizons-table-body").replaceChildren();
+  byId("annual-horizons-evidence").textContent = "";
+  setExportAvailable("export-annual-horizons-json", false);
+  status.textContent = "Consultando horizontes anuales…";
+  setAnnualHorizonsBusy(true);
+  const parameters = new URLSearchParams({
+    asset_id: assetId,
+    known_at: knownAt,
+    end_period_end: anchor,
+    metric_keys: metrics.join(","),
+    horizons: years.join(","),
+  });
+  try {
+    const payload = await api(`/api/fundamental-research-horizons?${parameters.toString()}`);
+    if (sequence !== annualHorizonsRequestSequence || annualHorizonsSnapshot !== requestKey) {
+      return;
+    }
+    renderAnnualHorizons(payload);
+  } catch (error) {
+    if (sequence !== annualHorizonsRequestSequence || annualHorizonsSnapshot !== requestKey) {
+      return;
+    }
+    status.textContent = error.message;
+  } finally {
+    if (sequence === annualHorizonsRequestSequence && annualHorizonsSnapshot === requestKey) {
+      setAnnualHorizonsBusy(false);
+    }
+  }
+}
+
+function exportAnnualHorizonsJson() {
+  if (!annualHorizonsPayload) return;
+  const asset = safeFilePart(annualHorizonsPayload.asset_id);
+  const anchor = annualHorizonsPayload.request?.end_period_end || "sin-ancla";
+  downloadText(
+    `horizontes-anuales-${asset}-${anchor}.json`,
+    `${JSON.stringify(annualHorizonsPayload, null, 2)}\n`,
+    "application/json",
+  );
+}
+
+byId("query-annual-horizons").addEventListener("click", () => {
+  void queryAnnualHorizons();
+});
+byId("export-annual-horizons-json").addEventListener("click", exportAnnualHorizonsJson);
+byId("annual-horizons-anchor").addEventListener("input", () => {
+  annualHorizonsAnchorDirty = true;
+  invalidateAnnualHorizonsResult();
+});
+byId("annual-horizons-metrics").addEventListener("change", invalidateAnnualHorizonsResult);
+byId("annual-horizons-3").addEventListener("change", invalidateAnnualHorizonsResult);
+byId("annual-horizons-5").addEventListener("change", invalidateAnnualHorizonsResult);
+byId("annual-horizons-10").addEventListener("change", invalidateAnnualHorizonsResult);
 
 function factsByField(period) {
   return new Map((period?.facts || []).map((fact) => [fact.field_name, fact]));
 }
-
 function fundamentalPeriodLabel(period, short = false) {
   const reference = period?.facts?.[0];
   const fiscalYear = reference?.fiscal_year;
@@ -1994,6 +2255,7 @@ function setFundamentalBusy(busy) {
 function selectFundamentalFrequency(frequency) {
   selectedFundamentalFrequency = frequency === "annual" ? "annual" : "quarterly";
   byId("report-frequency").value = selectedFundamentalFrequency;
+  resetAnnualHorizons({ clearAnchor: true });
   for (const button of document.querySelectorAll(".frequency-button")) {
     const active = button.dataset.frequency === selectedFundamentalFrequency;
     button.classList.toggle("active", active);
@@ -2072,6 +2334,7 @@ async function queryFundamentalResearch(deferredRequest = null) {
     setExportAvailable("export-fundamental-research-csv", false);
     resetFundamentalResearch();
     resetCompanyProfile();
+    resetAnnualHorizons({ clearAnchor: true, clearMetrics: true });
     const empty = byId("fundamental-research-empty");
     empty.textContent = error.message;
     empty.classList.remove("hidden");
