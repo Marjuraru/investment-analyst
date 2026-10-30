@@ -90,12 +90,16 @@ from investment_analyst.analytics.market.comparison_models import (
 )
 from investment_analyst.analytics.valuation import (
     CorporateValuationError,
+    CorporateValuationFilingOptions,
+    CorporateValuationFilingQuery,
     CorporateValuationHistory,
     CorporateValuationHistoryRequest,
     CorporateValuationHistoryRule,
     CorporateValuationHistoryRuleEvaluation,
     CorporateValuationHistoryRuleRequest,
     CorporateValuationRequest,
+    CorporateValuationSelectedFilingRequest,
+    CorporateValuationSelectedFilingSnapshot,
     CorporateValuationSnapshot,
 )
 from investment_analyst.application.aapl_bootstrap import BootstrapIncompleteError
@@ -398,6 +402,24 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> CorporateValuationSnapshot:
         """Return a read-only point-in-time corporate valuation."""
+        ...
+
+    def query_corporate_valuation_filings(
+        self,
+        query: CorporateValuationFilingQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationFilingOptions:
+        """Return read-only annual filing contexts for one asset."""
+        ...
+
+    def query_corporate_valuation_selected_filing(
+        self,
+        request: CorporateValuationSelectedFilingRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationSelectedFilingSnapshot:
+        """Return one read-only selected-filing valuation."""
         ...
 
     def query_corporate_valuation_history(
@@ -796,7 +818,11 @@ class _WebOperations(Protocol):
         ...
 
     def valuation(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
-        """Return one read-only latest-annual corporate valuation."""
+        """Return one read-only latest-annual or selected-filing valuation."""
+        ...
+
+    def valuation_filings(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return bounded read-only annual filing contexts."""
         ...
 
     def market_intraday(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
@@ -1069,6 +1095,63 @@ class AaplLocalController:
         return self._signed_read(
             query,
             lambda: self._application.query_corporate_valuation(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
+        )
+
+    def corporate_valuation_filings_request(
+        self,
+        query: CorporateValuationFilingQuery,
+    ) -> CorporateValuationFilingOptions:
+        """Read bounded annual contexts without providers or writer acquisition."""
+        read_query = ReadDependencyQuery(
+            family=ReadDependencyFamily.VALUATION,
+            endpoint="/api/v1/valuation/filings",
+            asset_ids=(query.asset_id,),
+            source_ids=self._descriptor_source_ids(query.asset_id),
+            known_at=query.known_at,
+            selector=(
+                f"valuation_date={query.valuation_date.isoformat()}"
+                f";start_date={query.start_date.isoformat()}"
+                f";end_date={query.end_date.isoformat()}"
+                f";offset={query.offset};limit={query.limit}"
+            ),
+        )
+        return self._signed_read(
+            read_query,
+            lambda: self._application.query_corporate_valuation_filings(
+                query,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
+        )
+
+    def corporate_valuation_selected_filing_request(
+        self,
+        request: CorporateValuationSelectedFilingRequest,
+    ) -> CorporateValuationSelectedFilingSnapshot:
+        """Read one selected-filing valuation without providers or writer acquisition."""
+        selector = request.selector()
+        read_query = ReadDependencyQuery(
+            family=ReadDependencyFamily.VALUATION,
+            endpoint="/api/v1/valuation",
+            asset_ids=(request.asset_id,),
+            source_ids=self._descriptor_source_ids(request.asset_id),
+            known_at=request.known_at,
+            selector=(
+                f"valuation_date={request.valuation_date.isoformat()}"
+                f";basis={request.basis}"
+                f";annual_period_end={selector.annual_period_end.isoformat()}"
+                f";filing_accession_number={selector.filing_accession_number}"
+                f";filing_accepted_at={selector.filing_accepted_at.isoformat()}"
+                f";filing_form={selector.filing_form}"
+                f";fiscal_year={selector.fiscal_year}"
+                f";fiscal_period={selector.fiscal_period}"
+            ),
+        )
+        return self._signed_read(
+            read_query,
+            lambda: self._application.query_corporate_valuation_selected_filing(
                 request,
                 location=StorageLocationRequest(workspace=self._workspace),
             ),
@@ -2435,21 +2518,88 @@ class AaplLocalWebApplication:
         )
 
     def valuation(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
-        """Validate and query the isolated latest-annual valuation contract."""
-        allowed = {"asset_id", "known_at", "valuation_date", "basis"}
+        """Validate latest-annual or explicit selected-filing valuation."""
+        selector_parameters = {
+            "annual_period_end",
+            "filing_accession_number",
+            "filing_accepted_at",
+            "filing_form",
+            "fiscal_year",
+            "fiscal_period",
+        }
+        allowed = {"asset_id", "known_at", "valuation_date", "basis"} | selector_parameters
         if set(parameters) - allowed:
             raise ValueError("valuation query contains unsupported parameters")
         asset_id = _one_parameter(parameters, "asset_id", required=True)
         self._market_asset(asset_id)
+        known_at = _aware_datetime(_one_parameter(parameters, "known_at", required=True))
+        valuation_date = date.fromisoformat(
+            _one_parameter(parameters, "valuation_date", required=True)
+        )
+        basis = _one_parameter(parameters, "basis", required=False) or "latest_annual"
+        if basis == "selected_annual_filing":
+            missing = selector_parameters - set(parameters)
+            if missing:
+                raise ValueError("selected filing basis requires the complete filing selector")
+            selected = CorporateValuationSelectedFilingRequest(
+                asset_id=asset_id,
+                known_at=known_at,
+                valuation_date=valuation_date,
+                annual_period_end=date.fromisoformat(
+                    _one_parameter(parameters, "annual_period_end", required=True)
+                ),
+                filing_accession_number=_one_parameter(
+                    parameters, "filing_accession_number", required=True
+                ),
+                filing_accepted_at=_aware_datetime(
+                    _one_parameter(parameters, "filing_accepted_at", required=True)
+                ),
+                filing_form=_one_parameter(parameters, "filing_form", required=True),
+                fiscal_year=_one_parameter(parameters, "fiscal_year", required=True),
+                fiscal_period=_one_parameter(parameters, "fiscal_period", required=True),
+            )
+            return self._controller.corporate_valuation_selected_filing_request(
+                selected
+            ).to_json_dict()
+        if basis != "latest_annual":
+            raise ValueError("valuation basis must be latest_annual or selected_annual_filing")
+        if selector_parameters & set(parameters):
+            raise ValueError("filing selector parameters require basis=selected_annual_filing")
         request = CorporateValuationRequest(
+            asset_id=asset_id,
+            known_at=known_at,
+            valuation_date=valuation_date,
+            basis="latest_annual",
+        )
+        return self._controller.corporate_valuation_request(request).to_json_dict()
+
+    def valuation_filings(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Validate and list available annual filing contexts for one asset."""
+        allowed = {
+            "asset_id",
+            "known_at",
+            "valuation_date",
+            "start_date",
+            "end_date",
+            "offset",
+            "limit",
+        }
+        if set(parameters) - allowed:
+            raise ValueError("valuation filings query contains unsupported parameters")
+        asset_id = _one_parameter(parameters, "asset_id", required=True)
+        self._market_asset(asset_id)
+        query = CorporateValuationFilingQuery(
             asset_id=asset_id,
             known_at=_aware_datetime(_one_parameter(parameters, "known_at", required=True)),
             valuation_date=date.fromisoformat(
                 _one_parameter(parameters, "valuation_date", required=True)
             ),
-            basis=_one_parameter(parameters, "basis", required=False) or "latest_annual",
+            start_date=date.fromisoformat(_one_parameter(parameters, "start_date", required=True)),
+            end_date=date.fromisoformat(_one_parameter(parameters, "end_date", required=True)),
+            offset=int(_one_parameter(parameters, "offset", required=False) or "0"),
+            limit=int(_one_parameter(parameters, "limit", required=False) or "50"),
         )
-        return self._controller.corporate_valuation_request(request).to_json_dict()
+        return self._controller.corporate_valuation_filings_request(query).model_dump(mode="json")
 
     def valuation_history(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate the bounded read-only materialized valuation history query."""
@@ -2934,8 +3084,16 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                     server.application.cazatiburones_institutional_observations(parameters),
                 )
                 return
+            if parsed.path == "/api/v1/valuation/filings":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=10)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.valuation_filings(parameters),
+                )
+                return
             if parsed.path == "/api/v1/valuation":
-                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=12)
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(HTTPStatus.OK, server.application.valuation(parameters))
                 return

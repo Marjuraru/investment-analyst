@@ -1130,6 +1130,18 @@ no reciben la sección. Se carga bajo demanda mediante
 `GET /api/v1/valuation`; muestra precio y edad, ejercicio/filing, moneda/factor, estados por métrica,
 fórmula e IDs de inputs. La exportación JSON conserva los textos Decimal exactos.
 
+La consulta mantiene «Último anual» como camino por defecto. El grupo «Ejercicio explícito» ofrece
+una acción voluntaria «Elegir ejercicio y filing»; sólo al abrirla se solicita
+`GET /api/v1/valuation/filings` y se leen todas las páginas necesarias con `limit=200`, sin presentar
+una página como universo completo. Cada opción muestra año, período, cierre, accession, forma,
+disponibilidad y campos presentes; no se selecciona automáticamente la de mayor cobertura ni se
+ordena por ella. «Consultar ejercicio seleccionado» envía `basis=selected_annual_filing` con el
+selector literal completo y cambia el encabezado a «Ejercicio seleccionado», conservando la fecha del
+precio y el motivo de cada ausencia. «Volver a último anual» restaura el camino original. Cambiar de
+activo, de corte global o de fecha de valoración invalida la selección y las opciones cargadas; la
+historia materializada y la regla histórica siguen usando exclusivamente `latest_annual`. La consulta
+seleccionada es read-only y no persiste métricas.
+
 Al cambiar de activo, `resetListedCompanyReport()` limpia también las cuatro tarjetas de ratios
 (margen neto, crecimiento de ingresos, pasivos/activos y variación del resultado) y sus títulos, de
 modo que un reporte fallido no deja valores del activo anterior.

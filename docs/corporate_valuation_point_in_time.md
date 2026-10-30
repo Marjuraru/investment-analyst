@@ -7,10 +7,11 @@ TTM, estimaciones, consenso ni DCF.
 ## Consulta y alcance
 
 `GET /api/v1/valuation` requiere `asset_id`, `known_at` UTC y `valuation_date` (`YYYY-MM-DD`);
-`basis` solo admite `latest_annual`. La ruta abre el workspace en modo read-only, no toma el writer
-y no llama a Alpaca, SEC ni otro proveedor. La interfaz carga el panel «Valoración» bajo demanda y
-permite exportar el snapshot JSON exacto; el redondeo de moneda, ratio y porcentaje ocurre solo en
-la presentación.
+`basis` admite `latest_annual` (por defecto) y `selected_annual_filing`, que exige además el selector
+completo descrito abajo. La ruta abre el workspace en modo read-only, no toma el writer y no llama a
+Alpaca, SEC ni otro proveedor. La interfaz carga el panel «Valoración» bajo demanda y permite
+exportar el snapshot JSON exacto; el redondeo de moneda, ratio y porcentaje ocurre solo en la
+presentación.
 
 La v1 aplica únicamente a `listed_company` + `corporate` con mercado diario, SEC configurada y un
 contrato central de unidad del título. Apple, AMD y las dieciocho acciones ordinarias declaran
@@ -52,6 +53,48 @@ versiones, ratios ADR, moneda ni el significado de las métricas, y cada input c
 sólo por los hechos monetarios, nunca por el primer elemento de la colección. Si una acción nativa
 pertenece a una taxonomía distinta de la monetaria, el resultado es
 `accounting_basis_mismatch`; si no hay hechos monetarios, `report_currency` queda ausente.
+
+## Selección explícita de ejercicio y filing
+
+`GET /api/v1/valuation/filings` lista únicamente contextos anuales SEC ya persistidos y visibles en
+`known_at`. Exige `asset_id`, `known_at` UTC, `valuation_date` y un rango inclusivo de cierre
+`start_date`/`end_date`; pagina con `offset` y `limit` (por defecto 50, máximo 200). Responde con el
+contrato `corporate-valuation-filing-options-v1`: `request`, `total`, paginación y opciones compactas.
+Cada opción declara el selector literal —`annual_period_end`, `filing_accession_number`,
+`filing_accepted_at`, `filing_form`, `fiscal_year` y `fiscal_period`—, los roles de campo presentes y
+las taxonomías observadas. No incluye raws, documentos, lineage completo ni los once cálculos, y no
+ordena por cobertura: el orden es cierre descendente, disponibilidad descendente y el resto del
+selector ascendente. Una página no representa el universo completo; el cliente debe leer todas las
+páginas solicitadas.
+
+`filing_accepted_at` identifica la disponibilidad del contexto persistido (la tupla que ya agrupa la
+selección `latest_annual`), no un timestamp de aceptación SEC inventado. Dos disponibilidades del
+mismo accession se muestran separadas y no se fusionan, corrigen ni eligen por ser más completas.
+
+`GET /api/v1/valuation?basis=selected_annual_filing` exige los seis campos del selector, además de
+`asset_id`, `known_at` y `valuation_date`; un selector parcial, parámetros de selección en modo
+`latest_annual` o una base desconocida se rechazan. Sólo entran observaciones `VALID`, anuales, del
+activo, source, cierre, disponibilidad, accession, forma, año y período exactos, visibles en
+`known_at` y con `annual_period_end <= valuation_date`. Una selección bien formada sin evidencia
+visible devuelve `fundamentals_unavailable`; nunca se sustituye por otro filing o ejercicio. Los
+duplicados equivalentes conservan la resolución determinista vigente y una contradicción semántica
+falla cerrado.
+
+El precio y la base del título siguen usando `valuation_date` y `known_at`: elegir un ejercicio 2024
+no elige un precio 2024. La respuesta
+`corporate-valuation-selected-filing-snapshot-v1` reutiliza las once fórmulas, claves, estados,
+inputs y evidencias existentes; sólo cambia el vintage publicado a
+`corporate-valuation-selected-annual-filing-v1-decimal34` y
+`corporate-valuation-selected-annual-filing-definition-v1`, con la limitación explícita de ejercicio
+elegido, no último anual ni TTM. Cada `result_id` es UUIDv8 y liga `basis=selected_annual_filing`, el
+selector completo, los inputs reales, el precio y la base ADR; `known_at` y `computed_at` no alteran
+la identidad si la evidencia es idéntica. `available_at` sigue siendo el máximo de inputs y evidencia
+ADR.
+
+La modalidad seleccionada es estrictamente efímera y read-only. No persiste métricas, no crea
+definiciones, no alimenta la historia materializada, el scheduler ni la cobertura global, y el
+pipeline persistente rechaza ese DTO antes de cualquier escritura. `latest_annual` conserva sus
+bytes, selector, IDs, versiones y persistencia sin cambios. ETFS y cripto siguen `not_applicable`.
 
 ## Base documentada acción↔ADS (`security-unit-basis-v2`)
 
@@ -142,13 +185,15 @@ codes cerrados incluyen configuración ausente, base del título, precio o filin
 revisión ambigua, período/fuente/frecuencia/base contable/moneda/unidad incompatible, input ausente,
 denominador inválido y EBITDA no disponible.
 
-Las métricas evaluadas se persisten como `MetricResult` con categoría `valuation`. El `result_id`
-UUIDv5 legacy incorpora activo, clave, `known_at`, fecha de valoración, base anual, período, precio,
-versión de unidad, IDs de inputs y algoritmo. En workspace v2 la identidad es UUIDv8, excluye el
-corte y liga la versión, el factor y el digest de la revisión ADR cuando existe. La misma evidencia
-y semántica reutiliza identidad; una revisión o input distinto crea historia append-only. Cada
-métrica referencia solo sus inputs transitivos exactos. Los estados no evaluables no se persisten
-como cero: permanecen en la proyección y en los contadores operativos.
+Sólo la modalidad `latest_annual` persiste. Las métricas evaluadas se guardan como `MetricResult` con
+categoría `valuation`. El `result_id` UUIDv5 legacy incorpora activo, clave, `known_at`, fecha de
+valoración, base anual, período, precio, versión de unidad, IDs de inputs y algoritmo. En workspace
+v2 la identidad es UUIDv8, excluye el corte y liga la versión, el factor y el digest de la revisión
+ADR cuando existe. La misma evidencia y semántica reutiliza identidad; una revisión o input distinto
+crea historia append-only. Cada métrica referencia solo sus inputs transitivos exactos. Los estados
+no evaluables no se persisten como cero: permanecen en la proyección y en los contadores operativos.
+La consulta `selected_annual_filing` reutiliza las fórmulas pero permanece efímera: sus IDs UUIDv8
+incluyen `basis` y el selector completo y no se escriben en el workspace.
 
 Los refresh de mercado cotizado, fundamentales SEC y el bootstrap Apple calculan o reutilizan la
 valoración después de persistir nueva evidencia, dentro de la misma conexión writer. No realizan

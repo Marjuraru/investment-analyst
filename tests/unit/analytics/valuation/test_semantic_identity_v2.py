@@ -19,7 +19,12 @@ from investment_analyst.analytics.cazatiburones.institutional_metric_models impo
 from investment_analyst.analytics.cazatiburones.institutional_weight_identity import (
     semantic_weight_result_id,
 )
+from investment_analyst.analytics.valuation.filing_models import (
+    CorporateValuationSelectedFilingRequest,
+)
 from investment_analyst.analytics.valuation.identity import (
+    filing_valuation_result_id_v2,
+    filing_valuation_result_parameters_v2,
     valuation_result_id_v2,
     valuation_result_parameters_v2,
 )
@@ -156,6 +161,77 @@ def test_adr_basis_evidence_binds_identity_without_binding_the_cut() -> None:
         basis_evidence=evidence,
     )
     assert parameters["security_unit_basis_evidence"]["revision"] == evidence.revision
+
+
+def test_filing_valuation_identity_binds_selector_and_excludes_the_cut() -> None:
+    request = CorporateValuationSelectedFilingRequest(
+        asset_id="equity:us:tsm",
+        known_at=_CUT_1,
+        valuation_date=date(2026, 4, 17),
+        annual_period_end=date(2024, 12, 31),
+        filing_accession_number="0001193125-25-000001",
+        filing_accepted_at=datetime(2025, 2, 15, 16, tzinfo=UTC),
+        filing_form="20-F",
+        fiscal_year="2024",
+        fiscal_period="FY",
+    )
+    observation_ids = (uuid4(),)
+    coordinates = {
+        "metric_key": "valuation.corporate.market_cap",
+        "valuation_as_of": _AS_OF,
+        "available_at": _AVAILABLE,
+        "unit": "USD",
+        "annual_period_start": None,
+        "annual_period_end": _AS_OF,
+        "security_basis_version": "security-unit-basis-v2:fixture",
+        "input_observation_ids": observation_ids,
+        "algorithm_version": "corporate-valuation-selected-annual-filing-v1-decimal34",
+        "formula": "close_price * shares_outstanding * market_units_per_reported_share",
+        "market_units_per_reported_share": Decimal("1"),
+    }
+
+    baseline = filing_valuation_result_id_v2(request=request, **coordinates)
+    later_cut = filing_valuation_result_id_v2(
+        request=request.model_copy(update={"known_at": _CUT_2}),
+        **coordinates,
+    )
+    changed_accession = filing_valuation_result_id_v2(
+        request=request.model_copy(update={"filing_accession_number": "0001193125-25-000002"}),
+        **coordinates,
+    )
+    changed_availability = filing_valuation_result_id_v2(
+        request=request.model_copy(
+            update={
+                "filing_accepted_at": datetime(2025, 2, 15, 20, tzinfo=UTC),
+            }
+        ),
+        **coordinates,
+    )
+    changed_inputs = filing_valuation_result_id_v2(
+        request=request,
+        **{**coordinates, "input_observation_ids": (uuid4(),)},
+    )
+    parameters = filing_valuation_result_parameters_v2(
+        request=request,
+        selector=request.selector(),
+        annual_period_start=None,
+        annual_period_end=_AS_OF,
+        security_basis_version="security-unit-basis-v2:fixture",
+        formula=coordinates["formula"],
+        market_units_per_reported_share=Decimal("1"),
+    )
+
+    assert baseline.version == 8
+    assert baseline == later_cut
+    assert baseline != changed_accession
+    assert baseline != changed_availability
+    assert baseline != changed_inputs
+    assert "known_at" not in parameters
+    assert parameters["basis"] == "selected_annual_filing"
+    assert parameters["filing_accession_number"] == "0001193125-25-000001"
+    assert parameters["filing_accepted_at"] == "2025-02-15T16:00:00+00:00"
+    assert parameters["fiscal_year"] == "2024"
+    assert parameters["fiscal_period"] == "FY"
 
 
 def test_activity_and_institutional_v2_identities_exclude_only_the_execution_cut() -> None:

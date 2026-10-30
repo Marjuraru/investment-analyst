@@ -1,5 +1,16 @@
 """Point-in-time, descriptive corporate valuation contracts and service."""
 
+from investment_analyst.analytics.valuation.filing_models import (
+    CorporateValuationFilingOption,
+    CorporateValuationFilingOptions,
+    CorporateValuationFilingQuery,
+    CorporateValuationFilingSelector,
+    CorporateValuationSelectedFilingRequest,
+    CorporateValuationSelectedFilingSnapshot,
+)
+from investment_analyst.analytics.valuation.filing_service import (
+    CorporateValuationFilingService,
+)
 from investment_analyst.analytics.valuation.history_models import (
     CorporateValuationHistory,
     CorporateValuationHistoryCoverage,
@@ -43,6 +54,11 @@ from investment_analyst.analytics.valuation.service import (
 __all__ = [
     "AmbiguousValuationEvidenceError",
     "CorporateValuationError",
+    "CorporateValuationFilingOption",
+    "CorporateValuationFilingOptions",
+    "CorporateValuationFilingQuery",
+    "CorporateValuationFilingSelector",
+    "CorporateValuationFilingService",
     "CorporateValuationHistory",
     "CorporateValuationHistoryCoverage",
     "CorporateValuationHistoryRequest",
@@ -54,6 +70,8 @@ __all__ = [
     "CorporateValuationHistoryRuleRequest",
     "CorporateValuationHistoryRuleService",
     "CorporateValuationRequest",
+    "CorporateValuationSelectedFilingRequest",
+    "CorporateValuationSelectedFilingSnapshot",
     "CorporateValuationService",
     "CorporateValuationPersistencePipeline",
     "CorporateValuationSnapshot",

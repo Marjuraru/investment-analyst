@@ -87,6 +87,10 @@ from investment_analyst.analytics.market.comparison_models import (
 )
 from investment_analyst.analytics.market.intraday_models import IntradayInterval
 from investment_analyst.analytics.valuation import (
+    CorporateValuationFilingOption,
+    CorporateValuationFilingOptions,
+    CorporateValuationFilingQuery,
+    CorporateValuationFilingSelector,
     CorporateValuationHistory,
     CorporateValuationHistoryCoverage,
     CorporateValuationHistoryRequest,
@@ -94,6 +98,8 @@ from investment_analyst.analytics.valuation import (
     CorporateValuationHistoryRuleEvaluation,
     CorporateValuationHistoryRuleRequest,
     CorporateValuationRequest,
+    CorporateValuationSelectedFilingRequest,
+    CorporateValuationSelectedFilingSnapshot,
     CorporateValuationSnapshot,
 )
 from investment_analyst.application.aapl_bootstrap_models import AaplWorkspaceBootstrapRequest
@@ -442,6 +448,10 @@ class _FakeApplication:
         self.bvl_refresh_locations: list[StorageLocationRequest] = []
         self.valuation_requests: list[CorporateValuationRequest] = []
         self.valuation_locations: list[StorageLocationRequest] = []
+        self.valuation_filing_queries: list[CorporateValuationFilingQuery] = []
+        self.valuation_filing_locations: list[StorageLocationRequest] = []
+        self.selected_filing_requests: list[CorporateValuationSelectedFilingRequest] = []
+        self.selected_filing_locations: list[StorageLocationRequest] = []
         self.valuation_history_requests: list[CorporateValuationHistoryRequest] = []
         self.valuation_history_locations: list[StorageLocationRequest] = []
         self.crypto_derivatives_requests: list[CryptoDerivativesQueryRequest] = []
@@ -522,6 +532,57 @@ class _FakeApplication:
                     "status": (
                         "not_applicable" if request.asset_id == "crypto:btc-usd" else "partial"
                     ),
+                    "metrics": [],
+                }
+            ),
+        )
+
+    def query_corporate_valuation_filings(
+        self,
+        query: CorporateValuationFilingQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationFilingOptions:
+        self.valuation_filing_queries.append(query)
+        self.valuation_filing_locations.append(location)
+        option = CorporateValuationFilingOption(
+            selector=CorporateValuationFilingSelector(
+                annual_period_end=date(2024, 12, 31),
+                filing_accession_number="0001193125-25-000001",
+                filing_accepted_at=datetime(2025, 2, 15, 16, tzinfo=UTC),
+                filing_form="20-F",
+                fiscal_year="2024",
+                fiscal_period="FY",
+            ),
+            available_field_roles=("net_income", "revenue", "shares_outstanding"),
+            taxonomies=("us-gaap",),
+        )
+        return CorporateValuationFilingOptions(
+            request=query,
+            total=1,
+            offset=query.offset,
+            limit=query.limit,
+            returned=1,
+            options=(option,),
+            limitations=("Ejercicio anual elegido explícitamente.",),
+        )
+
+    def query_corporate_valuation_selected_filing(
+        self,
+        request: CorporateValuationSelectedFilingRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationSelectedFilingSnapshot:
+        self.selected_filing_requests.append(request)
+        self.selected_filing_locations.append(location)
+        return cast(
+            CorporateValuationSelectedFilingSnapshot,
+            _JsonResult(
+                {
+                    "schema_version": "corporate-valuation-selected-filing-snapshot-v1",
+                    "asset_id": request.asset_id,
+                    "request": request.model_dump(mode="json"),
+                    "status": "not_evaluable",
                     "metrics": [],
                 }
             ),
@@ -1334,6 +1395,139 @@ def test_valuation_api_is_versioned_read_only_and_allows_non_applicable_assets(
     ]
 
 
+def test_valuation_filings_api_is_bounded_versioned_and_read_only(tmp_path: Path) -> None:
+    application = _FakeApplication()
+    workspace = tmp_path / "workspace"
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=workspace,
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+
+    with _server(web) as (_, root):
+        common = {
+            "asset_id": "equity:us:aapl",
+            "known_at": "2026-05-01T20:00:00Z",
+            "valuation_date": "2026-04-17",
+            "start_date": "2024-01-01",
+            "end_date": "2026-12-31",
+            "limit": "50",
+        }
+        status, payload, _ = _json_request(
+            Request(f"{root}/api/v1/valuation/filings?{urlencode(common)}")
+        )
+        invalid_status, invalid, _ = _json_request(
+            Request(f"{root}/api/v1/valuation/filings?{urlencode({**common, 'unknown': 'x'})}")
+        )
+        inverted_status, inverted, _ = _json_request(
+            Request(
+                f"{root}/api/v1/valuation/filings?"
+                f"{urlencode({**common, 'start_date': '2026-01-01', 'end_date': '2024-01-01'})}"
+            )
+        )
+        over_status, over, _ = _json_request(
+            Request(f"{root}/api/v1/valuation/filings?{urlencode({**common, 'limit': '201'})}")
+        )
+        missing_status, missing, _ = _json_request(
+            Request(
+                f"{root}/api/v1/valuation/filings?"
+                f"{urlencode({**common, 'asset_id': 'equity:us:missing'})}"
+            )
+        )
+
+    assert status == 200
+    assert payload["schema_version"] == "corporate-valuation-filing-options-v1"
+    assert payload["total"] == 1
+    assert payload["returned"] == 1
+    assert payload["options"][0]["selector"]["fiscal_year"] == "2024"
+    assert invalid_status == inverted_status == over_status == missing_status == 400
+    assert (
+        invalid["error"]["code"]
+        == inverted["error"]["code"]
+        == over["error"]["code"]
+        == missing["error"]["code"]
+        == "invalid_request"
+    )
+    assert application.valuation_filing_queries[0].start_date == date(2024, 1, 1)
+    assert application.valuation_filing_queries[0].limit == 50
+    assert application.valuation_filing_locations == [StorageLocationRequest(workspace=workspace)]
+
+
+def test_valuation_selected_filing_api_requires_the_complete_selector(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    workspace = tmp_path / "workspace"
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=workspace,
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    selector = {
+        "annual_period_end": "2024-12-31",
+        "filing_accession_number": "0001193125-25-000001",
+        "filing_accepted_at": "2025-02-15T16:00:00Z",
+        "filing_form": "20-F",
+        "fiscal_year": "2024",
+        "fiscal_period": "FY",
+    }
+    parameters = {
+        "asset_id": "equity:us:aapl",
+        "known_at": "2026-05-01T20:00:00Z",
+        "valuation_date": "2026-04-17",
+        "basis": "selected_annual_filing",
+        **selector,
+    }
+
+    with _server(web) as (_, root):
+        status, payload, _ = _json_request(
+            Request(f"{root}/api/v1/valuation?{urlencode(parameters)}")
+        )
+        partial = dict(parameters)
+        partial.pop("fiscal_period")
+        partial_status, partial_payload, _ = _json_request(
+            Request(f"{root}/api/v1/valuation?{urlencode(partial)}")
+        )
+        mixed_status, mixed, _ = _json_request(
+            Request(
+                f"{root}/api/v1/valuation?{urlencode({**parameters, 'basis': 'latest_annual'})}"
+            )
+        )
+        unknown_basis_status, unknown_basis, _ = _json_request(
+            Request(f"{root}/api/v1/valuation?{urlencode({**parameters, 'basis': 'forward'})}")
+        )
+        impossible_status, impossible, _ = _json_request(
+            Request(
+                f"{root}/api/v1/valuation?"
+                f"{urlencode({**parameters, 'known_at': '2025-02-15T15:00:00Z'})}"
+            )
+        )
+
+    assert status == 200
+    assert payload["schema_version"] == "corporate-valuation-selected-filing-snapshot-v1"
+    assert payload["request"]["basis"] == "selected_annual_filing"
+    assert len(application.selected_filing_requests) == 1
+    request = application.selected_filing_requests[0]
+    assert request.annual_period_end == date(2024, 12, 31)
+    assert request.filing_accepted_at == datetime(2025, 2, 15, 16, tzinfo=UTC)
+    assert request.selector().fiscal_period == "FY"
+    assert application.selected_filing_locations == [StorageLocationRequest(workspace=workspace)]
+    assert partial_status == mixed_status == unknown_basis_status == impossible_status == 400
+    assert (
+        partial_payload["error"]["code"]
+        == mixed["error"]["code"]
+        == unknown_basis["error"]["code"]
+        == impossible["error"]["code"]
+        == "invalid_request"
+    )
+
+
 def test_valuation_history_api_is_bounded_versioned_and_read_only(tmp_path: Path) -> None:
     application = _FakeApplication()
     workspace = tmp_path / "workspace"
@@ -1842,6 +2036,12 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'id="valuation-evidence" tabindex="0"' in html
     assert 'id="valuation-history-metric"' in html
     assert 'id="export-valuation-history-json"' in html
+    assert 'id="valuation-filing-picker"' in html
+    assert 'id="valuation-filing-option"' in html
+    assert 'id="query-valuation-filing"' in html
+    assert 'id="valuation-filing-reset"' in html
+    assert 'id="valuation-basis-title"' in html
+    assert 'id="valuation-mode-note"' in html
     assert "data-valuation-only" in html
     assert 'id="crypto-derivatives-panel"' in html
     assert "data-crypto-derivatives-only" in html
@@ -1980,6 +2180,19 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "api(`/api/v1/valuation-history?${parameters.toString()}`)" in javascript
     assert "descriptor.has_corporate_valuation" in javascript
     assert "api(`/api/v1/valuation?${parameters.toString()}`)" in javascript
+    assert "api(`/api/v1/valuation/filings?${parameters.toString()}`)" in javascript
+    assert 'basis: "selected_annual_filing"' in javascript
+    assert "function loadValuationFilingOptions" in javascript
+    assert "function queryValuationFiling" in javascript
+    assert "function resetValuationToLatest" in javascript
+    assert "function invalidateValuationFilingSelection" in javascript
+    assert "Ejercicio seleccionado" in javascript
+    assert "último anual ni TTM" in javascript
+    assert "sin ranking por cobertura" in javascript
+    assert 'byId("valuation-filing-picker").addEventListener("toggle"' in javascript
+    assert 'byId("valuation-filing-option").addEventListener("change"' in javascript
+    assert 'byId("query-valuation-filing").addEventListener("click"' in javascript
+    assert 'select.value = "";' in javascript
     assert '"long_sma_input_observation_ids"' in javascript
     assert '"third_sma_input_observation_ids"' in javascript
     assert '"observation_id"' in javascript

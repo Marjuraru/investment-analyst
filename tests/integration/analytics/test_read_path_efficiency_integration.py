@@ -8,6 +8,7 @@ import threading
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 from investment_analyst.analytics.market.bar_models import HistoricalBarQuery
 from investment_analyst.analytics.market.bar_schemas import ALPACA_SOURCE_ID
@@ -16,12 +17,30 @@ from investment_analyst.analytics.market.history_service import (
     summarize_market_history_v2,
 )
 from investment_analyst.analytics.market.history_v2 import HistoricalMarketDataV2Service
+from investment_analyst.analytics.valuation import (
+    CorporateValuationFilingQuery,
+    CorporateValuationFilingService,
+    CorporateValuationSelectedFilingRequest,
+)
+from investment_analyst.application.analysis_capabilities import analysis_capabilities_for
 from investment_analyst.application.facade import InvestmentAnalystApplication
 from investment_analyst.application.runtime import StorageLocationRequest
 from investment_analyst.application.universe_coverage import UniverseCoverageApplication
 from investment_analyst.application.universe_coverage_models import UniverseCoverageRequest
+from investment_analyst.catalog.provider_configuration import (
+    resolve_alpaca_configuration,
+    resolve_sec_configuration,
+)
+from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
 from investment_analyst.catalog.service import AssetCatalogService
+from investment_analyst.core.models import (
+    DataFrequency,
+    DataQuality,
+    NormalizedObservation,
+    RawRecord,
+)
 from investment_analyst.frontend.local_web import AaplLocalHttpServer
+from investment_analyst.providers.fundamentals.sec_fact_models import get_sec_fact_definition
 from investment_analyst.providers.market.alpaca_normalizer import (
     ASSET_ID,
     bar_to_observations,
@@ -35,6 +54,9 @@ from investment_analyst.storage.read_dependency_signature import (
     ReadDependencyFamily,
     ReadDependencyKind,
     ReadDependencyQuery,
+)
+from investment_analyst.storage.workspace_v2_repositories import (
+    WorkspaceV2ObservationRepository,
 )
 from investment_analyst.workspace.service import WorkspaceService
 
@@ -287,6 +309,232 @@ def test_v2_market_projection_matches_v1_and_hydrates_only_the_latest_bar(
         ),
     )
     assert parallel.assets[1].model_dump() == result.assets[0].model_dump()
+
+
+_FILING_FACTS = (
+    ("fundamental.revenue", "100000", "USD"),
+    ("fundamental.net_income", "20000", "USD"),
+    ("fundamental.stockholders_equity", "80000", "USD"),
+    ("fundamental.shares_outstanding", "1000", "shares"),
+)
+
+
+def _seed_annual_facts(
+    storage: LocalStorage,
+    *,
+    asset_id: str,
+    source_id: str,
+    available_at: datetime,
+    accession_number: str,
+    period_end: date,
+    values: tuple[tuple[str, str, str], ...] = _FILING_FACTS,
+) -> None:
+    period_at = datetime.combine(period_end, datetime.min.time(), tzinfo=UTC)
+    observations: list[NormalizedObservation] = []
+    raw_records: list[RawRecord] = []
+    for field_name, value, unit in values:
+        definition = get_sec_fact_definition(field_name)
+        raw_id = uuid4()
+        key = {
+            "accession_number": accession_number,
+            "taxonomy": definition.taxonomy,
+            "tag": definition.tag,
+            "unit": unit,
+            "period": period_end.isoformat(),
+            "companyfacts_record_id": str(raw_id),
+            "submissions_record_id": str(uuid4()),
+            "form": "10-K",
+            "fiscal_year": "2025",
+            "fiscal_period": "FY",
+        }
+        observations.append(
+            NormalizedObservation(
+                observation_id=uuid4(),
+                raw_record_id=raw_id,
+                asset_id=asset_id,
+                field_name=field_name,
+                value=Decimal(value),
+                unit=unit,
+                frequency=DataFrequency.ANNUAL,
+                observed_at=period_at,
+                period_end=period_at,
+                available_at=available_at,
+                normalized_at=available_at,
+                source={
+                    "source_id": source_id,
+                    "record_key": json.dumps(key, separators=(",", ":"), sort_keys=True),
+                    "retrieved_at": available_at,
+                },
+                quality=DataQuality.VALID,
+                transformation_version="sec-companyfacts-normalizer-v2",
+            )
+        )
+        raw_records.append(
+            RawRecord(
+                record_id=raw_id,
+                asset_id=asset_id,
+                source={
+                    "source_id": source_id,
+                    "record_key": json.dumps(
+                        {"companyfacts_record_id": str(raw_id)},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    "retrieved_at": available_at,
+                },
+                event_time=period_at,
+                available_at=available_at,
+                received_at=available_at,
+                payload={"fixture": field_name},
+                schema_version="sec-companyfacts-snapshot-v1",
+            )
+        )
+    storage.raw_records.save_many(raw_records)
+    storage.observations.save_many(observations)
+
+
+def _filing_service(
+    storage: LocalStorage,
+    catalog: AssetCatalogService,
+) -> CorporateValuationFilingService:
+    asset = catalog.get(ASSET_ID)
+    resolver = ProviderAssetContextResolver(catalog)
+    return CorporateValuationFilingService(
+        storage,
+        capabilities=analysis_capabilities_for(asset),
+        market_source_id=resolve_alpaca_configuration(resolver, asset_id=ASSET_ID).source_id,
+        fundamental_source_id=resolve_sec_configuration(
+            resolver, asset_id=ASSET_ID
+        ).companyfacts_source_id,
+        price_currency=asset.quote_currency,
+        security_unit_factor=asset.security_unit_factor,
+        security_unit_basis=asset.security_unit_basis,
+        security_unit_basis_version=asset.security_unit_basis_version,
+        security_unit_market_adjustment=asset.security_unit_market_adjustment,
+        security_unit_basis_revisions=asset.security_unit_basis_revisions,
+    )
+
+
+def test_filing_selection_read_path_is_bounded_and_reopen_stable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    initialized = WorkspaceService().initialize(tmp_path / "workspace", format_version=2)
+    storage_paths = StoragePaths.from_workspace_root(
+        initialized.paths.root,
+        format_version=2,
+        workspace_id=initialized.manifest.workspace_id,
+    )
+    catalog = AssetCatalogService.load_default()
+    resolver = ProviderAssetContextResolver(catalog)
+    sec_source = resolve_sec_configuration(resolver, asset_id=ASSET_ID).companyfacts_source_id
+    market_source = resolve_alpaca_configuration(resolver, asset_id=ASSET_ID).source_id
+    assert market_source == ALPACA_SOURCE_ID
+    accepted_at = datetime(2026, 1, 30, 12, tzinfo=UTC)
+    known_at = datetime(2026, 2, 1, tzinfo=UTC)
+    query = CorporateValuationFilingQuery(
+        asset_id=ASSET_ID,
+        known_at=known_at,
+        valuation_date=date(2026, 1, 31),
+        start_date=date(2024, 1, 1),
+        end_date=date(2026, 12, 31),
+    )
+    request = CorporateValuationSelectedFilingRequest(
+        asset_id=ASSET_ID,
+        known_at=known_at,
+        valuation_date=date(2026, 1, 31),
+        annual_period_end=date(2025, 9, 27),
+        filing_accession_number="0000320193-25-000079",
+        filing_accepted_at=accepted_at,
+        filing_form="10-K",
+        fiscal_year="2025",
+        fiscal_period="FY",
+    )
+    hydrated: list[NormalizedObservation] = []
+    original_list = WorkspaceV2ObservationRepository.list
+
+    def counted_list(self, **filters):
+        rows = original_list(self, **filters)
+        hydrated.extend(rows)
+        return rows
+
+    monkeypatch.setattr(WorkspaceV2ObservationRepository, "list", counted_list)
+
+    def seed_foreign_corpus(storage: LocalStorage, first: int, last: int) -> None:
+        for index in range(first, last):
+            _seed_annual_facts(
+                storage,
+                asset_id=f"equity:us:foreign-{index:03d}",
+                source_id=sec_source,
+                available_at=accepted_at,
+                accession_number=f"0000000000-25-{index:06d}",
+                period_end=date(2025, 9, 27),
+            )
+        _seed_annual_facts(
+            storage,
+            asset_id=ASSET_ID,
+            source_id="sec-edgar:foreign:companyfacts",
+            available_at=accepted_at,
+            accession_number="0000000000-25-999999",
+            period_end=date(2025, 9, 27),
+        )
+
+    def assert_calls_are_local(previous: int, *, expected: int) -> int:
+        new_rows = hydrated[previous:]
+        assert len(new_rows) == expected
+        assert {row.asset_id for row in new_rows} == {ASSET_ID}
+        assert {row.source.source_id for row in new_rows} == {sec_source}
+        return len(hydrated)
+
+    with LocalStorage(storage_paths) as storage:
+        _stage_bar(
+            storage.store.raw_staging,
+            _bar(0),
+            retrieved_at=_BASE + timedelta(hours=2),
+        )
+        _seed_annual_facts(
+            storage,
+            asset_id=ASSET_ID,
+            source_id=sec_source,
+            available_at=accepted_at,
+            accession_number="0000320193-25-000079",
+            period_end=date(2025, 9, 27),
+        )
+        seed_foreign_corpus(storage, 0, 10)
+        service = _filing_service(storage, catalog)
+        options = service.query_options(query)
+        first = service.query(
+            request,
+            computed_at=datetime(2026, 2, 1, 21, tzinfo=UTC),
+        )
+        assert options.total == 1
+        assert first.coverage.evaluated == 5
+        baseline_ids = tuple(item.result_id for item in first.metrics)
+        baseline_values = tuple(item.value for item in first.metrics)
+        first_mark = assert_calls_are_local(0, expected=len(_FILING_FACTS) * 2)
+
+        seed_foreign_corpus(storage, 10, 100)
+        options_10x = service.query_options(query)
+        second = service.query(
+            request,
+            computed_at=datetime(2026, 2, 1, 21, 5, tzinfo=UTC),
+        )
+        assert options_10x.total == 1
+        assert tuple(item.result_id for item in second.metrics) == baseline_ids
+        assert tuple(item.value for item in second.metrics) == baseline_values
+        assert_calls_are_local(first_mark, expected=len(_FILING_FACTS) * 2)
+
+    reopened = LocalStorage(storage_paths)
+    with reopened:
+        warmed = _filing_service(reopened, catalog).query(
+            request,
+            computed_at=datetime(2026, 2, 1, 21, 10, tzinfo=UTC),
+        )
+        assert tuple(item.result_id for item in warmed.metrics) == baseline_ids
+        assert tuple(item.value for item in warmed.metrics) == baseline_values
+        assert_calls_are_local(
+            len(hydrated) - len(_FILING_FACTS),
+            expected=len(_FILING_FACTS),
+        )
 
 
 def test_read_dependency_signature_binds_code_and_catalog_revisions(

@@ -90,6 +90,9 @@ from investment_analyst.analytics.market.history_service import HistoricalMarket
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
 from investment_analyst.analytics.market.statistics_pipeline import MarketStatisticsPipeline
 from investment_analyst.analytics.valuation import (
+    CorporateValuationFilingOptions,
+    CorporateValuationFilingQuery,
+    CorporateValuationFilingService,
     CorporateValuationHistory,
     CorporateValuationHistoryRequest,
     CorporateValuationHistoryRuleEvaluation,
@@ -98,6 +101,8 @@ from investment_analyst.analytics.valuation import (
     CorporateValuationHistoryService,
     CorporateValuationPersistencePipeline,
     CorporateValuationRequest,
+    CorporateValuationSelectedFilingRequest,
+    CorporateValuationSelectedFilingSnapshot,
     CorporateValuationService,
     CorporateValuationSnapshot,
     ValuationPersistenceSummary,
@@ -109,6 +114,7 @@ from investment_analyst.application.aapl_bootstrap_models import (
 )
 from investment_analyst.application.aapl_refresh_planner import AaplMarketRefreshPlanner
 from investment_analyst.application.analysis_capabilities import (
+    AssetAnalysisCapabilities,
     AssetAnalysisFamily,
     analysis_capabilities_for,
 )
@@ -218,6 +224,7 @@ from investment_analyst.application.universe_coverage_models import (
     UniverseCoverageRequest,
     UniverseCoverageResult,
 )
+from investment_analyst.catalog.models import CatalogAsset
 from investment_analyst.catalog.provider_configuration import (
     resolve_alpaca_configuration,
     resolve_coinbase_configuration,
@@ -1319,14 +1326,12 @@ class InvestmentAnalystApplication:
                 )
             ).query(request)
 
-    def query_corporate_valuation(
+    def _corporate_valuation_context(
         self,
-        request: CorporateValuationRequest,
-        *,
-        location: StorageLocationRequest,
-    ) -> CorporateValuationSnapshot:
-        """Reconstruct a read-only latest-annual valuation without provider calls."""
-        asset = self._runtime.catalog.get(request.asset_id)
+        asset_id: str,
+    ) -> tuple[CatalogAsset, AssetAnalysisCapabilities, str | None, str | None]:
+        """Resolve the catalog asset, capabilities and configured source IDs."""
+        asset = self._runtime.catalog.get(asset_id)
         capabilities = analysis_capabilities_for(asset)
         market_source_id: str | None = None
         fundamental_source_id: str | None = None
@@ -1337,7 +1342,7 @@ class InvestmentAnalystApplication:
             try:
                 market_source_id = resolve_alpaca_configuration(
                     self._runtime.provider_resolver,
-                    asset_id=request.asset_id,
+                    asset_id=asset_id,
                 ).source_id
             except ValueError:
                 market_source_id = None
@@ -1348,15 +1353,79 @@ class InvestmentAnalystApplication:
             try:
                 fundamental_source_id = resolve_sec_configuration(
                     self._runtime.provider_resolver,
-                    asset_id=request.asset_id,
+                    asset_id=asset_id,
                 ).companyfacts_source_id
             except ValueError:
                 fundamental_source_id = None
-        with self._runtime.open_storage(
+        return asset, capabilities, market_source_id, fundamental_source_id
+
+    def _open_valuation_read(self, location: StorageLocationRequest):
+        """Open the workspace once with the shared explicit read-only mode."""
+        return self._runtime.open_storage(
             location,
             access_mode=WorkspaceAccessMode.READ_ONLY,
-        ) as storage:
+        )
+
+    def query_corporate_valuation(
+        self,
+        request: CorporateValuationRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationSnapshot:
+        """Reconstruct a read-only latest-annual valuation without provider calls."""
+        asset, capabilities, market_source_id, fundamental_source_id = (
+            self._corporate_valuation_context(request.asset_id)
+        )
+        with self._open_valuation_read(location) as storage:
             return CorporateValuationService(
+                storage,
+                capabilities=capabilities,
+                market_source_id=market_source_id,
+                fundamental_source_id=fundamental_source_id,
+                price_currency=asset.quote_currency,
+                security_unit_factor=asset.security_unit_factor,
+                security_unit_basis=asset.security_unit_basis,
+                security_unit_basis_version=asset.security_unit_basis_version,
+                security_unit_market_adjustment=asset.security_unit_market_adjustment,
+                security_unit_basis_revisions=asset.security_unit_basis_revisions,
+            ).query(request)
+
+    def query_corporate_valuation_filings(
+        self,
+        query: CorporateValuationFilingQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationFilingOptions:
+        """Return available annual contexts without metrics, providers or writes."""
+        asset, capabilities, market_source_id, fundamental_source_id = (
+            self._corporate_valuation_context(query.asset_id)
+        )
+        with self._open_valuation_read(location) as storage:
+            return CorporateValuationFilingService(
+                storage,
+                capabilities=capabilities,
+                market_source_id=market_source_id,
+                fundamental_source_id=fundamental_source_id,
+                price_currency=asset.quote_currency,
+                security_unit_factor=asset.security_unit_factor,
+                security_unit_basis=asset.security_unit_basis,
+                security_unit_basis_version=asset.security_unit_basis_version,
+                security_unit_market_adjustment=asset.security_unit_market_adjustment,
+                security_unit_basis_revisions=asset.security_unit_basis_revisions,
+            ).query_options(query)
+
+    def query_corporate_valuation_selected_filing(
+        self,
+        request: CorporateValuationSelectedFilingRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> CorporateValuationSelectedFilingSnapshot:
+        """Value one literal annual filing selection without providers or writes."""
+        asset, capabilities, market_source_id, fundamental_source_id = (
+            self._corporate_valuation_context(request.asset_id)
+        )
+        with self._open_valuation_read(location) as storage:
+            return CorporateValuationFilingService(
                 storage,
                 capabilities=capabilities,
                 market_source_id=market_source_id,

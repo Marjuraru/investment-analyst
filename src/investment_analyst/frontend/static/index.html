@@ -816,8 +816,8 @@
                 <p class="eyebrow">VALORACIÓN</p>
                 <h2 id="valoracion-titulo">Valoración corporativa point-in-time</h2>
                 <p>
-                  Precio y último ejercicio anual alineados al corte, sin TTM, estimaciones,
-                  score ni recomendación.
+                  Precio al corte y ejercicio anual explícito —último por defecto—, sin TTM,
+                  estimaciones, score ni recomendación.
                 </p>
               </div>
               <div class="valuation-control-groups">
@@ -832,6 +832,28 @@
                       Cargar valoración
                     </button>
                   </div>
+                  <p class="field-note">
+                    La consulta usa el último anual por defecto. Abre el selector para elegir
+                    un contexto anual ya persistido.
+                  </p>
+                  <details id="valuation-filing-picker" class="valuation-filing-picker">
+                    <summary id="valuation-filing-picker-summary">Elegir ejercicio y filing</summary>
+                    <label class="field">
+                      <span>Contexto anual disponible</span>
+                      <select id="valuation-filing-option" disabled>
+                        <option value="">Abre el selector para cargar opciones</option>
+                      </select>
+                    </label>
+                    <p id="valuation-filing-options-status" role="status" aria-live="polite">Sin cargar.</p>
+                    <div class="valuation-control-actions">
+                      <button id="query-valuation-filing" class="button secondary" type="button" disabled>
+                        Consultar ejercicio seleccionado
+                      </button>
+                      <button id="valuation-filing-reset" class="data-export-button" type="button" disabled>
+                        Volver a último anual
+                      </button>
+                    </div>
+                  </details>
                 </fieldset>
                 <fieldset class="valuation-control-group valuation-control-group--history">
                   <legend>Historia materializada</legend>
@@ -863,7 +885,7 @@
                   <p id="valuation-context" class="chart-quote-context">
                     La consulta se carga bajo demanda desde evidencia local.
                   </p>
-                  <h3>Base latest_annual</h3>
+                  <h3 id="valuation-basis-title">Base latest_annual</h3>
                 </div>
                 <div class="valuation-actions">
                   <span id="valuation-coverage" class="quality-chip">Sin consultar</span>
@@ -881,6 +903,9 @@
 
               <p id="valuation-status" role="status" aria-live="polite">
                 Selecciona una fecha o abre esta sección para consultar.
+              </p>
+              <p id="valuation-mode-note" class="valuation-source-note">
+                Base latest_annual: último ejercicio anual elegible al corte.
               </p>
               <div id="valuation-metrics" class="valuation-metrics"></div>
               <section class="valuation-history" aria-labelledby="valuation-history-title">
