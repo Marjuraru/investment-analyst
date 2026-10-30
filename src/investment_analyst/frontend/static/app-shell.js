@@ -498,6 +498,18 @@ byId("candidate-notification-panel").addEventListener("toggle", (event) => {
   if (event.currentTarget.open) void loadCandidateNotifications();
 });
 
+byId("desktop-notification-panel").addEventListener("toggle", (event) => {
+  if (event.currentTarget.open) void loadDesktopNotifications();
+});
+
+byId("desktop-notification-toggle").addEventListener("click", () => {
+  void toggleDesktopNotifications();
+});
+
+byId("desktop-notification-test").addEventListener("click", () => {
+  void sendDesktopNotificationTest();
+});
+
 byId("screening-rules-panel").addEventListener("toggle", (event) => {
   if (event.currentTarget.open) void loadScreeningRules();
 });

@@ -424,6 +424,45 @@ def test_scheduler_recovers_interrupted_attempt_before_retry(tmp_path: Path) -> 
     assert scheduler.status().next_run_at == now + timedelta(seconds=60)
 
 
+def test_tick_observer_runs_once_even_without_due_jobs(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    definition = _definition("tick-observer").model_copy(update={"run_at": time(hour=23)})
+    store = MultiAssetScheduleStateStore(tmp_path / "tick.json")
+    calls: list[str] = []
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(definition, _execution),),
+        store,
+        clock=lambda: now,
+        tick_observer=lambda: calls.append("tick"),
+    )
+
+    assert scheduler.tick() == ()
+    assert calls == ["tick"]
+
+
+def test_tick_observer_failure_does_not_block_or_revert_a_due_job(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 29, 12, 5, tzinfo=UTC)
+    definition = _definition("tick-observer-failure")
+    store = MultiAssetScheduleStateStore(tmp_path / "tick-failure.json")
+
+    def fail() -> None:
+        raise RuntimeError("delivery channel failed")
+
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(definition, _execution),),
+        store,
+        clock=lambda: now,
+        tick_observer=fail,
+    )
+
+    attempts = scheduler.tick()
+
+    assert len(attempts) == 1
+    assert attempts[0].status is ScheduledJobAttemptStatus.SUCCEEDED
+    assert "scheduled tick observer could not complete" in scheduler.status().issues
+    assert scheduler.tick() == ()
+
+
 def test_scheduler_recovers_interrupted_removed_job_without_reactivating_it(
     tmp_path: Path,
 ) -> None:

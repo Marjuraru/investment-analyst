@@ -34,6 +34,17 @@ from investment_analyst.alerts.analytical_state import (
 )
 from investment_analyst.alerts.candidate_notifications import CandidateNotificationStore
 from investment_analyst.alerts.cazatiburones_notifications import CazatiburonesNotificationStore
+from investment_analyst.alerts.desktop_notification_models import (
+    MAX_RETAINED_DELIVERIES,
+    MAX_STATE_BYTES,
+    DesktopNotificationCapability,
+    DesktopNotificationStatus,
+)
+from investment_analyst.alerts.desktop_notifications import (
+    DesktopNotificationChannelError,
+    DesktopNotificationRateLimitError,
+    DesktopNotificationService,
+)
 from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagnosticReport
 from investment_analyst.analytics.aapl_daily_report_service import AaplDailyReportError
 from investment_analyst.analytics.cazatiburones.declared_activity_models import (
@@ -789,6 +800,14 @@ class _WebOperations(Protocol):
     def acknowledge_candidate_notification(
         self, payload: dict[str, object]
     ) -> dict[str, object]: ...
+
+    def desktop_notifications(
+        self, parameters: Mapping[str, tuple[str, ...]]
+    ) -> dict[str, object]: ...
+
+    def configure_desktop_notifications(self, payload: dict[str, object]) -> dict[str, object]: ...
+
+    def test_desktop_notification(self, payload: dict[str, object]) -> dict[str, object]: ...
 
     def screening_rules(self) -> dict[str, object]:
         """Return the current versioned analytical rule configuration."""
@@ -1864,6 +1883,7 @@ class AaplLocalWebApplication:
         manual_operations: ManualOperationQueue | None = None,
         asset_preferences: AssetPreferencesService | None = None,
         cazatiburones_notification_store: CazatiburonesNotificationStore | None = None,
+        desktop_notifications: DesktopNotificationService | None = None,
     ) -> None:
         self._controller = controller
         self._scheduler = scheduler
@@ -1875,6 +1895,7 @@ class AaplLocalWebApplication:
         self._cazatiburones_notification_store = cazatiburones_notification_store
         self._manual_operations = manual_operations
         self._asset_preferences = asset_preferences
+        self._desktop_notifications = desktop_notifications
 
     def set_manual_operations(self, operations: ManualOperationQueue) -> None:
         """Attach the durable queue after its dispatcher can reference this adapter."""
@@ -2157,6 +2178,73 @@ class AaplLocalWebApplication:
             "changed": changed,
             "item": item.model_dump(mode="json"),
         }
+
+    def desktop_notifications(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return channel state and one bounded delivery page without probing or writing."""
+        allowed = {"offset", "limit"}
+        if set(parameters) - allowed:
+            raise ValueError("desktop notifications query contains unsupported parameters")
+        offset = _integer_parameter(
+            _one_parameter(parameters, "offset", required=False),
+            name="offset",
+            default=0,
+        )
+        limit = _integer_parameter(
+            _one_parameter(parameters, "limit", required=False),
+            name="limit",
+            default=50,
+        )
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        if self._desktop_notifications is None:
+            return DesktopNotificationStatus(
+                enabled=False,
+                enabled_at=None,
+                updated_at=None,
+                capability=DesktopNotificationCapability(),
+                last_test_at=None,
+                last_test_accepted=None,
+                last_test_reason=None,
+                total=0,
+                pending_count=0,
+                attempting_count=0,
+                accepted_count=0,
+                retry_wait_count=0,
+                unknown_count=0,
+                cancelled_count=0,
+                failed_count=0,
+                state_bytes=0,
+                budget_bytes=MAX_STATE_BYTES,
+                retained_limit=MAX_RETAINED_DELIVERIES,
+                budget_exceeded=False,
+                next_attempt_at=None,
+                offset=offset,
+                limit=limit,
+                returned=0,
+                truncated=False,
+                deliveries=(),
+            ).model_dump(mode="json")
+        return self._desktop_notifications.status(offset=offset, limit=limit).model_dump(
+            mode="json"
+        )
+
+    def configure_desktop_notifications(self, payload: dict[str, object]) -> dict[str, object]:
+        """Enable with verified registration or disable and cancel pending evidence."""
+        if self._desktop_notifications is None:
+            raise ValueError("desktop notifications are not configured")
+        if set(payload) != {"enabled"} or type(payload["enabled"]) is not bool:
+            raise ValueError("desktop notification configuration requires only enabled")
+        return self._desktop_notifications.configure(enabled=payload["enabled"]).model_dump(
+            mode="json"
+        )
+
+    def test_desktop_notification(self, payload: dict[str, object]) -> dict[str, object]:
+        """Send one explicitly labelled transport test with a one-minute limit."""
+        if self._desktop_notifications is None:
+            raise ValueError("desktop notifications are not configured")
+        if set(payload) != {"confirm"} or payload["confirm"] is not True:
+            raise ValueError("desktop notification test requires confirm=true")
+        return self._desktop_notifications.test().model_dump(mode="json")
 
     def cazatiburones_notifications(
         self, parameters: Mapping[str, tuple[str, ...]]
@@ -3077,6 +3165,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("candidate notifications do not accept parameters")
                 self._send_json(HTTPStatus.OK, server.application.candidate_notifications({}))
                 return
+            if parsed.path == "/api/v1/desktop-notifications":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=2)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.desktop_notifications(parameters),
+                )
+                return
             if parsed.path == "/api/screening-rules":
                 if parsed.query:
                     raise ValueError("screening rules query does not accept parameters")
@@ -3263,6 +3359,8 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 "/api/alerts/transition",
                 "/api/candidates/transition",
                 "/api/v1/candidate-notifications/acknowledge",
+                "/api/v1/desktop-notifications/configure",
+                "/api/v1/desktop-notifications/test",
                 "/api/screening-rules/update",
                 "/api/v1/manual-operations",
             }:
@@ -3281,6 +3379,10 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 response = server.application.candidate_transition(payload)
             elif parsed.path == "/api/v1/candidate-notifications/acknowledge":
                 response = server.application.acknowledge_candidate_notification(payload)
+            elif parsed.path == "/api/v1/desktop-notifications/configure":
+                response = server.application.configure_desktop_notifications(payload)
+            elif parsed.path == "/api/v1/desktop-notifications/test":
+                response = server.application.test_desktop_notification(payload)
             elif parsed.path == "/api/screening-rules/update":
                 response = server.application.screening_rule_update(payload)
             elif parsed.path == "/api/market-refresh":
@@ -3444,6 +3546,18 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
             self._send_error(
                 HTTPStatus.UNPROCESSABLE_ENTITY,
                 "backtest_unavailable",
+                str(error)[:500],
+            )
+        elif isinstance(error, DesktopNotificationRateLimitError):
+            self._send_error(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                "desktop_notification_rate_limited",
+                str(error)[:500],
+            )
+        elif isinstance(error, DesktopNotificationChannelError):
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "desktop_notification_unavailable",
                 str(error)[:500],
             )
         elif isinstance(error, (ValueError, SecDocumentTimelineApplicationError)):

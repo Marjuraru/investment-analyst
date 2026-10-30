@@ -1015,3 +1015,195 @@ async function loadCandidateNotifications() {
     inbox.setAttribute("aria-busy", "false");
   }
 }
+
+let desktopNotificationPayload = null;
+
+const DESKTOP_NOTIFICATION_STATUS_LABELS = Object.freeze({
+  pending: "Pendiente",
+  attempting: "Intentando",
+  accepted: "Aceptado por Windows",
+  retry_wait: "Esperando reintento",
+  unknown: "Estado desconocido",
+  cancelled: "Cancelado",
+  failed: "Fallido",
+});
+
+const DESKTOP_NOTIFICATION_REASON_LABELS = Object.freeze({
+  channel_disabled: "canal desactivado",
+  candidate_missing: "candidato ausente",
+  candidate_not_new: "el candidato ya no está nuevo",
+  candidate_acknowledged: "entrega confirmada por el usuario",
+  candidate_evidence_mismatch: "evidencia del candidato incompatible",
+  notification_missing: "aviso local ausente",
+  notification_evidence_mismatch: "evidencia del aviso incompatible",
+  result_missing: "resultado de activación ausente",
+  rule_configuration_missing: "regla no configurada",
+  rule_not_active_at_activation: "la regla no estaba activa al activarse",
+  rule_not_active_now: "la regla no está activa ahora",
+  rule_fingerprint_changed: "la regla cambió de forma incompatible",
+  notification_before_activation: "aviso anterior a la activación",
+  budget_exceeded: "presupuesto del canal agotado",
+  interrupted_after_invocation: "interrupción tras invocar el envío",
+  bridge_unavailable: "puente WSL a Windows no disponible",
+  powershell_missing: "Windows PowerShell no disponible",
+  script_missing: "script fijo del release ausente",
+  session_unavailable: "sesión interactiva de Windows no disponible",
+  winrt_unavailable: "API de avisos de Windows no disponible",
+  registration_failed: "identidad propia no registrada",
+  timeout: "tiempo de espera agotado",
+  invalid_result: "respuesta del transporte ilegible",
+  process_exit: "el proceso de transporte terminó con error",
+  output_limit: "salida del transporte excedida",
+  send_error: "Windows rechazó el aviso",
+  probe_failed: "sonda de capacidad fallida",
+});
+
+function desktopNotificationReasonLabel(reason) {
+  if (!reason) return "";
+  return DESKTOP_NOTIFICATION_REASON_LABELS[reason] || reason;
+}
+
+function renderDesktopNotifications(payload) {
+  desktopNotificationPayload = payload;
+  byId("desktop-notification-summary").textContent = payload.enabled
+    ? `${formatInteger(payload.accepted_count)} aceptados · ${formatInteger(payload.pending_count)} pendientes`
+    : "Desactivado · sin envío automático";
+  const capability = payload.capability || {};
+  const capabilityTarget = byId("desktop-notification-capability");
+  if (capability.available === true) {
+    capabilityTarget.textContent =
+      "Capacidad verificada: Windows disponible e identidad propia registrada.";
+  } else if (capability.available === false) {
+    capabilityTarget.textContent =
+      `Capacidad no disponible: ${desktopNotificationReasonLabel(capability.reason)}.`;
+  } else {
+    capabilityTarget.textContent =
+      "Capacidad sin consultar; esta lectura no ejecuta sondeos ni registros.";
+  }
+  byId("desktop-notification-toggle").textContent = payload.enabled
+    ? "Desactivar avisos Windows"
+    : "Activar avisos Windows";
+  byId("desktop-notification-test").disabled = !payload.enabled;
+  const counts = byId("desktop-notification-counts");
+  counts.replaceChildren();
+  const counters = [
+    ["Pendientes", payload.pending_count],
+    ["Reintentos", payload.retry_wait_count],
+    ["Aceptados", payload.accepted_count],
+    ["Desconocidos", payload.unknown_count],
+    ["Fallidos", payload.failed_count],
+    ["Cancelados", payload.cancelled_count],
+  ];
+  for (const [label, value] of counters) {
+    const block = createElement("span", "screening-backtest-metric");
+    block.append(
+      createElement("small", "", label),
+      createElement("strong", "", formatInteger(value)),
+    );
+    counts.append(block);
+  }
+  byId("desktop-notification-budget").textContent =
+    `Estado ${formatInteger(payload.state_bytes)} de ${formatInteger(payload.budget_bytes)} bytes · `
+    + `${formatInteger(payload.total)} de ${formatInteger(payload.retained_limit)} entregas`
+    + (payload.budget_exceeded ? " · admisión y lotes pausados por presupuesto" : "");
+  const inbox = byId("desktop-notifications");
+  inbox.replaceChildren();
+  const deliveries = Array.isArray(payload.deliveries) ? payload.deliveries : [];
+  if (deliveries.length === 0) {
+    inbox.append(createElement("p", "", "Sin entregas registradas para este workspace."));
+  }
+  for (const delivery of deliveries) {
+    const item = createElement("article", "alert-inbox-item");
+    item.append(
+      createElement(
+        "strong",
+        "",
+        `${delivery.title_es} · ${assetDisplayLabel(delivery.asset_id)}`,
+      ),
+      createElement("p", "", delivery.body_es),
+      createElement(
+        "span",
+        `alert-inbox-status ${delivery.status}`,
+        DESKTOP_NOTIFICATION_STATUS_LABELS[delivery.status] || delivery.status,
+      ),
+    );
+    if (delivery.reason) {
+      item.append(
+        createElement("small", "", `Causa: ${desktopNotificationReasonLabel(delivery.reason)}`),
+      );
+    }
+    item.append(
+      createElement(
+        "time",
+        "",
+        `${formatInstant(delivery.updated_at)} · intento ${formatInteger(delivery.attempt_count)}`,
+      ),
+    );
+    inbox.append(item);
+  }
+  renderReviewServerCoverageNote(
+    inbox,
+    Number.isInteger(payload.total) ? payload.total : deliveries.length,
+    deliveries.length,
+    Boolean(payload.truncated),
+  );
+}
+
+async function loadDesktopNotifications() {
+  const inbox = byId("desktop-notifications");
+  inbox.setAttribute("aria-busy", "true");
+  try {
+    renderDesktopNotifications(await api("/api/v1/desktop-notifications?limit=50"));
+  } catch (error) {
+    inbox.replaceChildren(
+      createElement("p", "", `No se pudieron consultar los avisos Windows: ${error.message}`),
+    );
+  } finally {
+    inbox.setAttribute("aria-busy", "false");
+  }
+}
+
+async function toggleDesktopNotifications() {
+  const toggle = byId("desktop-notification-toggle");
+  const enabled = desktopNotificationPayload?.enabled !== true;
+  toggle.disabled = true;
+  byId("desktop-notification-status").textContent = enabled
+    ? "Registrando identidad y activando…"
+    : "Desactivando…";
+  try {
+    await api("/api/v1/desktop-notifications/configure", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    });
+    byId("desktop-notification-status").textContent = enabled
+      ? "Avisos Windows activados; la frontera excluye candidatos anteriores."
+      : "Avisos Windows desactivados; pendientes cancelados sin borrar evidencia.";
+    await loadDesktopNotifications();
+  } catch (error) {
+    byId("desktop-notification-status").textContent =
+      `No se pudo cambiar el canal: ${error.message}`;
+  } finally {
+    toggle.disabled = false;
+  }
+}
+
+async function sendDesktopNotificationTest() {
+  const button = byId("desktop-notification-test");
+  button.disabled = true;
+  byId("desktop-notification-status").textContent = "Enviando prueba de transporte…";
+  try {
+    const outcome = await api("/api/v1/desktop-notifications/test", {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+    });
+    byId("desktop-notification-status").textContent = outcome.accepted
+      ? "Prueba aceptada por Windows; no demuestra que el aviso se haya visto."
+      : `Prueba no aceptada: ${desktopNotificationReasonLabel(outcome.reason) || "sin causa declarada"}.`;
+    await loadDesktopNotifications();
+  } catch (error) {
+    byId("desktop-notification-status").textContent =
+      `No se pudo ejecutar la prueba: ${error.message}`;
+  } finally {
+    button.disabled = desktopNotificationPayload?.enabled !== true;
+  }
+}

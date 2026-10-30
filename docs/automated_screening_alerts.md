@@ -83,6 +83,44 @@ empaquetado continúa siendo la fuente de contratos inmutables —métrica, oper
 unidad, parámetros y calidad—; la interfaz solo permite modificar estado, umbrales,
 confirmaciones y cooldown.
 
+### Canal local Windows (integrado, deshabilitado por defecto)
+
+`ALERTS-DELIVERY` integra un único canal local de transporte, literal `windows_toast`, con
+contratos estrictos `desktop-notification-config-v1`, `desktop-notification-delivery-v1` y
+`desktop-notification-status-v1`. Vive en `state/desktop_notifications/` y no modifica candidatos,
+reglas, outbox, métricas ni almacenamiento financiero.
+
+- **Identidad.** `delivery_id` es UUID5 determinista sobre namespace constante, `workspace_uuid`,
+  `notification_id`, canal y versión. `tag` y `group` de Windows son las dos mitades hexadecimales
+  de esa identidad (16 caracteres cada una) y se conservan en todos los reintentos.
+- **Activación.** El canal empieza deshabilitado. Habilitarlo registra la frontera `enabled_at` y
+  una identidad propia `Marjuraru.InvestmentAnalyst` mediante un acceso directo del usuario; no
+  encola el historial anterior. Deshabilitar cancela pendientes de esa habilitación sin borrar
+  evidencia; reactivar fija una frontera nueva.
+- **Elegibilidad.** Antes de admitir y de enviar se exige candidato `new`, sin acuse, creado
+  después de la activación, regla `active` tanto en la evidencia de activación como en la
+  configuración vigente y fingerprint compatible. Silencio, pausa, resolución, descarte o cambio
+  incompatible cancelan con causa cerrada.
+- **Reintentos.** Persistir la intención precede a cualquier subprocess y el resultado se persiste
+  después. Un error probado antes del envío admite hasta tres intentos con esperas de 60 y 300
+  segundos, activadas por el siguiente tick elegible, sin bucle de espera ni proceso permanente.
+  Timeout, muerte tras invocar o resultado ilegible son `unknown` y **no se reenvían
+  automáticamente**. La aceptación del sistema operativo no demuestra visualización ni lectura.
+- **Lote y límites.** Como máximo cinco entregas y un proceso PowerShell por lote, con ritmo
+  máximo de un lote por minuto. El puente usa un ejecutable fijo de Windows PowerShell y un script
+  fijo del release, sin aceptar rutas ni comandos por HTTP; los datos viajan por stdin JSON UTF-8 y
+  el XML se construye con escape, nunca evaluando títulos o cuerpos como código. No hay URLs
+  remotas ni imágenes; la apertura apunta sólo a `http://127.0.0.1:8765`. Timeout total de 10
+  segundos y salida máxima de 64 KiB por lote.
+- **Presupuesto.** El directorio completo se limita a 8 MiB y 10 000 entregas retenidas. Al
+  alcanzarlo se pausan admisión y lotes, el estado `budget_exceeded` queda visible y la bandeja se
+  conserva; no se borra historia ni se elevan límites automáticamente.
+- **Lectura.** `GET /api/v1/desktop-notifications` sólo lee estado y una página estable de entregas
+  (`offset`/`limit`, 50 por defecto, 100 máximo). No ejecuta sondeos, no registra la identidad del
+  sistema operativo y no escribe. Las acciones `configure` y `test` son POST explícitos; la prueba
+  se limita a una por minuto y se rotula «PRUEBA — sin señal de inversión», sin crear un candidato
+  financiero ficticio.
+
 ### Regla de screening
 
 - `rule_id` estable y `rule_version`;
@@ -305,11 +343,13 @@ Orden recomendado:
 3. Telegram o correo opcionales;
 4. resumen diario o semanal.
 
-Los canales externos requieren un bloque posterior y configuración local secreta. Ninguna
-credencial se escribe en la regla, workspace analítico, JSON público o logs. La outbox local actual
-no transmite contenido fuera del proceso; los adaptadores de entrega futuros deberán persistir antes
-del envío y reintentar sin duplicar. Un canal local del sistema o del navegador tampoco está
-operativo: la primera entrega real pertenece a `ALERTS-DELIVERY`.
+El canal local del sistema está integrado en `ALERTS-DELIVERY` como `windows_toast`, cerrado por
+defecto y con evidencia de transporte separada del acuse humano. Sigue siendo una entrega
+descriptiva: no crea señales, recomendaciones ni ejecución. Los canales externos —Telegram, correo
+o navegador— requieren un bloque posterior y configuración local secreta. Ninguna credencial se
+escribe en la regla, workspace analítico, JSON público o logs. Toda entrega futura debe persistir
+antes del envío y reintentar sin duplicar; el canal Windows ya aplica esa regla y trata la
+incertidumbre como `unknown`, nunca como éxito.
 
 ## IA cualitativa opcional
 
@@ -394,9 +434,9 @@ antes de habilitar cualquier canal externo.
 
 - consumir las métricas de valoración point-in-time ya persistidas por el dominio independiente;
 - reglas de valoración;
-- Telegram, correo o notificación local;
-- outbox reanudable;
-- resumen diario.
+- notificación local del sistema (integrada por `ALERTS-DELIVERY`, no desplegada por este bloque);
+- Telegram, correo y resumen diario como canales futuros;
+- outbox reanudable.
 
 La entrega de valoración no activa todavía reglas, candidatos, outbox ni notificaciones. Un bloque
 posterior podrá referenciar sus `MetricResult` y reason codes sin recalcular fórmulas ni convertir
@@ -411,12 +451,14 @@ missingness en cero.
 
 ## Estado reconciliado y medidas V1 (2026-10-30)
 
-Integrado no equivale a desplegado ni operacional. Los bytes base contienen el monitor, la outbox
-local, la bandeja y cuatro plantillas `SILENT`; no contienen un canal local del sistema, de navegador
-o externo operativo, ni una cadena predictiva validada. `analytical_backtest` reproduce
-coincidencias, frecuencia y cobertura sobre 20–500 cortes persistidos; no calcula retorno posterior,
-rentabilidad ni precisión predictiva. Este bloque documental no cambia reglas, scheduler ni
-almacenamiento.
+Integrado no equivale a desplegado ni operacional. El candidato de `ALERTS-DELIVERY` añade el canal
+local Windows cerrado por defecto, con identidad propia, journal append-only y presupuesto acotado;
+la entrega real y su observación pertenecen a la etapa de despliegue posterior. Los bytes base
+anteriores contienen el monitor, la outbox local, la bandeja y cuatro plantillas `SILENT`; no
+contienen un canal de navegador o externo operativo ni una cadena predictiva validada.
+`analytical_backtest` reproduce coincidencias, frecuencia y cobertura sobre 20–500 cortes
+persistidos; no calcula retorno posterior, rentabilidad ni precisión predictiva. Este bloque no
+cambia reglas, scheduler ni almacenamiento financiero.
 
 Las medidas de entrega y utilidad descriptiva son `V1-U2` y `V1-U3` en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md). Permanecen

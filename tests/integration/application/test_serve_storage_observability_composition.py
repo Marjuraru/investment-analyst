@@ -557,6 +557,7 @@ def test_composition_order_and_scheduler_observers_are_unchanged(
         "memory_ceiling_bytes",
         "observer",
         "storage_observability",
+        "tick_observer",
     )
     assert kwargs["memory_ceiling_bytes"] is None
     observer = kwargs["observer"]
@@ -566,6 +567,8 @@ def test_composition_order_and_scheduler_observers_are_unchanged(
         "AnalyticalScreeningMonitor",
         "CandidateNotificationMonitor",
     )
+    tick_observer = kwargs["tick_observer"]
+    assert getattr(tick_observer, "__name__", None) == "observe_tick"
 
     composed.scheduler().tick()
 

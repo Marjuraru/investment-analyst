@@ -45,6 +45,18 @@ from investment_analyst.alerts.cazatiburones_notification_models import (
     notification_id as cazatiburones_notification_id,
 )
 from investment_analyst.alerts.cazatiburones_notifications import CazatiburonesNotificationStore
+from investment_analyst.alerts.desktop_notification_models import (
+    MAX_RETAINED_DELIVERIES,
+    MAX_STATE_BYTES,
+    DesktopNotificationCapability,
+    DesktopNotificationReason,
+    DesktopNotificationStatus,
+    DesktopNotificationTestResponse,
+)
+from investment_analyst.alerts.desktop_notifications import (
+    DesktopNotificationChannelError,
+    DesktopNotificationRateLimitError,
+)
 from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagnosticReport
 from investment_analyst.analytics.cazatiburones.declared_activity_models import (
     DeclaredActivityFeatureSet,
@@ -3170,6 +3182,203 @@ def test_local_api_lists_and_acknowledges_candidate_notifications(tmp_path: Path
     assert invalid["error"]["code"] == "invalid_request"
     assert unknown_status == 400
     assert unknown["error"]["code"] == "invalid_request"
+
+
+class _FakeDesktopNotifications:
+    def __init__(self) -> None:
+        self.configured: list[bool] = []
+        self.tests = 0
+
+    def _status(self, *, enabled: bool, offset: int = 0, limit: int = 50):
+        return DesktopNotificationStatus(
+            enabled=enabled,
+            enabled_at=datetime(2026, 1, 1, tzinfo=UTC) if enabled else None,
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            capability=DesktopNotificationCapability(
+                available=True,
+                checked_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+            last_test_at=None,
+            last_test_accepted=None,
+            last_test_reason=None,
+            total=0,
+            pending_count=0,
+            attempting_count=0,
+            accepted_count=0,
+            retry_wait_count=0,
+            unknown_count=0,
+            cancelled_count=0,
+            failed_count=0,
+            state_bytes=0,
+            budget_bytes=MAX_STATE_BYTES,
+            retained_limit=MAX_RETAINED_DELIVERIES,
+            budget_exceeded=False,
+            next_attempt_at=None,
+            offset=offset,
+            limit=limit,
+            returned=0,
+            truncated=False,
+            deliveries=(),
+        )
+
+    def status(self, *, offset: int = 0, limit: int = 50):
+        return self._status(
+            enabled=bool(self.configured and self.configured[-1]),
+            offset=offset,
+            limit=limit,
+        )
+
+    def configure(self, *, enabled: bool):
+        self.configured.append(enabled)
+        return self.status()
+
+    def test(self):
+        self.tests += 1
+        return DesktopNotificationTestResponse(
+            accepted=True,
+            checked_at=datetime(2026, 1, 1, tzinfo=UTC),
+            capability=DesktopNotificationCapability(
+                available=True,
+                checked_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+        )
+
+
+class _FailingDesktopNotifications(_FakeDesktopNotifications):
+    def configure(self, *, enabled: bool):
+        raise DesktopNotificationChannelError(DesktopNotificationReason.REGISTRATION_FAILED)
+
+    def test(self):
+        raise DesktopNotificationRateLimitError("too soon")
+
+
+def test_local_api_desktop_notifications_is_bounded_and_read_only(tmp_path: Path) -> None:
+    controller = AaplLocalController(
+        _FakeRunner(),
+        _FakeApplication(),
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    service = _FakeDesktopNotifications()
+    with _server(AaplLocalWebApplication(controller, None, desktop_notifications=service)) as (
+        _,
+        root,
+    ):
+        status, payload, _ = _json_request(
+            Request(f"{root}/api/v1/desktop-notifications?offset=0&limit=10")
+        )
+        invalid_limit, invalid_limit_payload, _ = _json_request(
+            Request(f"{root}/api/v1/desktop-notifications?limit=101")
+        )
+        invalid_offset, _, _ = _json_request(
+            Request(f"{root}/api/v1/desktop-notifications?offset=abc")
+        )
+        unknown_parameter, _, _ = _json_request(
+            Request(f"{root}/api/v1/desktop-notifications?probe=true")
+        )
+        invalid_configure, _, _ = _json_request(
+            Request(
+                f"{root}/api/v1/desktop-notifications/configure",
+                data=json.dumps({"enabled": "yes"}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        configured_status, configured, _ = _json_request(
+            Request(
+                f"{root}/api/v1/desktop-notifications/configure",
+                data=json.dumps({"enabled": True}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        invalid_test, _, _ = _json_request(
+            Request(
+                f"{root}/api/v1/desktop-notifications/test",
+                data=json.dumps({"confirm": False}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        tested_status, tested, _ = _json_request(
+            Request(
+                f"{root}/api/v1/desktop-notifications/test",
+                data=json.dumps({"confirm": True}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+    assert status == 200
+    assert payload["schema_version"] == "desktop-notification-status-v1"
+    assert payload["offset"] == 0
+    assert payload["limit"] == 10
+    assert payload["enabled"] is False
+    assert invalid_limit == 400
+    assert invalid_limit_payload["error"]["code"] == "invalid_request"
+    assert invalid_offset == 400
+    assert unknown_parameter == 400
+    assert invalid_configure == 400
+    assert configured_status == 200
+    assert configured["enabled"] is True
+    assert service.configured == [True]
+    assert invalid_test == 400
+    assert tested_status == 200
+    assert tested["accepted"] is True
+    assert service.tests == 1
+
+
+def test_local_api_desktop_notifications_defaults_disabled_without_a_service(
+    tmp_path: Path,
+) -> None:
+    controller = AaplLocalController(
+        _FakeRunner(),
+        _FakeApplication(),
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    with _server(AaplLocalWebApplication(controller, None)) as (_, root):
+        status, payload, _ = _json_request(Request(f"{root}/api/v1/desktop-notifications"))
+    assert status == 200
+    assert payload["enabled"] is False
+    assert payload["total"] == 0
+    assert payload["deliveries"] == []
+
+
+def test_local_api_maps_desktop_channel_failures(tmp_path: Path) -> None:
+    controller = AaplLocalController(
+        _FakeRunner(),
+        _FakeApplication(),
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    service = _FailingDesktopNotifications()
+    with _server(AaplLocalWebApplication(controller, None, desktop_notifications=service)) as (
+        _,
+        root,
+    ):
+        configure_status, configure_payload, _ = _json_request(
+            Request(
+                f"{root}/api/v1/desktop-notifications/configure",
+                data=json.dumps({"enabled": True}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        test_status, test_payload, _ = _json_request(
+            Request(
+                f"{root}/api/v1/desktop-notifications/test",
+                data=json.dumps({"confirm": True}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+    assert configure_status == 409
+    assert configure_payload["error"]["code"] == "desktop_notification_unavailable"
+    assert test_status == 429
+    assert test_payload["error"]["code"] == "desktop_notification_rate_limited"
 
 
 def test_local_api_returns_cazatiburones_notifications_verbatim_and_read_only(
