@@ -1310,10 +1310,7 @@ class InvestmentAnalystApplication:
             self._runtime.provider_resolver,
             asset_id=asset_id,
         )
-        with self._runtime.open_storage(
-            location,
-            access_mode=WorkspaceAccessMode.READ_ONLY,
-        ) as storage:
+        with self._open_read_only(location) as storage:
             return SecIssuerFundamentalAnnualHorizonService(
                 storage,
                 configuration,
@@ -1387,7 +1384,7 @@ class InvestmentAnalystApplication:
                 fundamental_source_id = None
         return asset, capabilities, market_source_id, fundamental_source_id
 
-    def _open_valuation_read(self, location: StorageLocationRequest):
+    def _open_read_only(self, location: StorageLocationRequest):
         """Open the workspace once with the shared explicit read-only mode."""
         return self._runtime.open_storage(
             location,
@@ -1404,7 +1401,7 @@ class InvestmentAnalystApplication:
         asset, capabilities, market_source_id, fundamental_source_id = (
             self._corporate_valuation_context(request.asset_id)
         )
-        with self._open_valuation_read(location) as storage:
+        with self._open_read_only(location) as storage:
             return CorporateValuationService(
                 storage,
                 capabilities=capabilities,
@@ -1428,7 +1425,7 @@ class InvestmentAnalystApplication:
         asset, capabilities, market_source_id, fundamental_source_id = (
             self._corporate_valuation_context(query.asset_id)
         )
-        with self._open_valuation_read(location) as storage:
+        with self._open_read_only(location) as storage:
             return CorporateValuationFilingService(
                 storage,
                 capabilities=capabilities,
@@ -1452,7 +1449,7 @@ class InvestmentAnalystApplication:
         asset, capabilities, market_source_id, fundamental_source_id = (
             self._corporate_valuation_context(request.asset_id)
         )
-        with self._open_valuation_read(location) as storage:
+        with self._open_read_only(location) as storage:
             return CorporateValuationFilingService(
                 storage,
                 capabilities=capabilities,
