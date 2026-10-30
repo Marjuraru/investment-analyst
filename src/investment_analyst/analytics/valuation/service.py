@@ -57,13 +57,13 @@ from investment_analyst.storage.local import LocalStorage
 _ALGORITHM = "corporate-valuation-latest-annual-v1-decimal34"
 _DEFINITION_VERSION = "corporate-valuation-definition-v1"
 _LIMITATION = "Base latest_annual; no es TTM, forward, consenso, DCF ni recomendación."
-_IEX_LIMITATION = "Precio diario Alpaca IEX: cobertura de una bolsa, no SIP consolidado."
-_SHARE_LIMITATION = (
+VALUATION_IEX_LIMITATION = "Precio diario Alpaca IEX: cobertura de una bolsa, no SIP consolidado."
+VALUATION_SHARE_LIMITATION = (
     "Las acciones corresponden al cierre del ejercicio anual; no se infieren recompras, "
     "emisiones ni conversiones posteriores."
 )
 
-_MONETARY_FIELDS = frozenset(
+VALUATION_MONETARY_FIELDS = frozenset(
     {
         "fundamental.commercial_paper",
         "fundamental.long_term_debt_current",
@@ -78,7 +78,7 @@ _MONETARY_FIELDS = frozenset(
         "fundamental.capital_expenditures",
     }
 )
-_FIELDS = _MONETARY_FIELDS | {"fundamental.shares_outstanding"}
+VALUATION_FIELDS = VALUATION_MONETARY_FIELDS | {"fundamental.shares_outstanding"}
 
 
 class CorporateValuationError(RuntimeError):
@@ -122,7 +122,7 @@ class _Storage(Protocol):
 
 
 @dataclass(frozen=True)
-class _FilingMetadata:
+class FilingMetadata:
     accession_number: str
     taxonomy: str
     tag: str
@@ -132,168 +132,414 @@ class _FilingMetadata:
 
 
 @dataclass(frozen=True)
-class _AnnualSelection:
+class AnnualFilingSelection:
     facts: Mapping[str, NormalizedObservation]
-    metadata: _FilingMetadata
+    metadata: FilingMetadata
     period_start: datetime | None
     period_end: datetime
     accepted_at: datetime
 
 
-def _definition(
-    key: str,
-    name: str,
-    formula: str,
-    roles: tuple[str, ...],
-    unit: str,
-    *limitations: str,
-) -> ValuationMetricDefinition:
-    published_limitations = (
-        _LIMITATION,
-        *limitations,
-        *((_IEX_LIMITATION,) if "close_price" in roles else ()),
+def valuation_eligibility_reason(
+    *,
+    capabilities: AssetAnalysisCapabilities,
+    market_source_id: str | None,
+    fundamental_source_id: str | None,
+) -> ValuationReasonCode | None:
+    """Return the first missing prerequisite for corporate valuation, if any."""
+    if (
+        capabilities.family is not AssetAnalysisFamily.LISTED_COMPANY
+        or capabilities.fundamental_mode is not FundamentalAnalysisMode.CORPORATE
+    ):
+        return ValuationReasonCode.ASSET_NOT_APPLICABLE
+    if not capabilities.market_data_configured or market_source_id is None:
+        return ValuationReasonCode.MARKET_NOT_CONFIGURED
+    if not capabilities.fundamental_data_configured or fundamental_source_id is None:
+        return ValuationReasonCode.FUNDAMENTALS_NOT_CONFIGURED
+    return None
+
+
+def normalize_valuation_computed_at(value: datetime | None) -> datetime:
+    """Return one timezone-aware UTC computation clock."""
+    resolved = value or datetime.now(UTC)
+    if resolved.tzinfo is None or resolved.utcoffset() is None:
+        raise CorporateValuationError("computed_at must be timezone-aware")
+    return resolved.astimezone(UTC)
+
+
+def resolve_valuation_security_basis(
+    *,
+    known_at: datetime,
+    valuation_date: date,
+    security_unit_factor: Decimal | None,
+    security_unit_basis: str | None,
+    security_unit_basis_version: str | None,
+    security_unit_market_adjustment: str | None,
+    security_unit_basis_revisions: tuple[SecurityUnitBasisRevision, ...],
+) -> ValuationSecurityBasis | None:
+    """Resolve the single eligible traded-unit basis for one cut."""
+    values = (
+        security_unit_factor,
+        security_unit_basis,
+        security_unit_basis_version,
+        security_unit_market_adjustment,
     )
-    return ValuationMetricDefinition(
-        metric_key=key,
-        display_name_es=name,
-        formula=formula,
-        input_roles=roles,
-        unit=unit,
-        algorithm_version=_ALGORITHM,
-        definition_version=_DEFINITION_VERSION,
-        limitations=published_limitations,
+    if all(value is not None for value in values):
+        return ValuationSecurityBasis(
+            basis=security_unit_basis,
+            market_units_per_reported_share=security_unit_factor,
+            market_adjustment=security_unit_market_adjustment,
+            contract_version=security_unit_basis_version,
+        )
+    if any(value is not None for value in values):
+        return None
+    selected = select_security_unit_basis_revision(
+        security_unit_basis_revisions,
+        known_at=known_at,
+        valuation_date=valuation_date,
+    )
+    if selected is None:
+        return None
+    return ValuationSecurityBasis(
+        basis=selected.basis,
+        market_units_per_reported_share=selected.factor,
+        market_adjustment=selected.adjustment,
+        contract_version=f"{selected.schema_version}:{selected.revision}",
+        basis_evidence=selected,
     )
 
 
-_DEFINITIONS = tuple(
-    sorted(
-        (
-            _definition(
-                "valuation.corporate.market_cap",
-                "Capitalización bursátil",
-                "close_price * shares_outstanding * market_units_per_reported_share",
-                ("close_price", "shares_outstanding"),
-                "USD",
-                _SHARE_LIMITATION,
-            ),
-            _definition(
-                "valuation.corporate.financial_debt",
-                "Deuda financiera",
-                "commercial_paper + long_term_debt_current + long_term_debt_noncurrent",
-                ("commercial_paper", "long_term_debt_current", "long_term_debt_noncurrent"),
-                "USD",
-            ),
-            _definition(
-                "valuation.corporate.enterprise_value",
-                "Enterprise value",
-                "market_cap + financial_debt - cash_and_cash_equivalents",
-                (
-                    "close_price",
-                    "shares_outstanding",
-                    "commercial_paper",
-                    "long_term_debt_current",
-                    "long_term_debt_noncurrent",
-                    "cash_and_cash_equivalents",
-                ),
-                "USD",
-                "EV v1 no añade leases, preferred equity, minoritarios ni valores negociables.",
-            ),
-            _definition(
-                "valuation.corporate.price_to_earnings_latest_annual",
-                "Precio / utilidad anual",
-                "market_cap / annual_net_income",
-                ("close_price", "shares_outstanding", "net_income"),
-                "ratio",
-            ),
-            _definition(
-                "valuation.corporate.price_to_book",
-                "Precio / valor en libros",
-                "market_cap / stockholders_equity",
-                ("close_price", "shares_outstanding", "stockholders_equity"),
-                "ratio",
-            ),
-            _definition(
-                "valuation.corporate.price_to_sales_latest_annual",
-                "Precio / ventas anuales",
-                "market_cap / annual_revenue",
-                ("close_price", "shares_outstanding", "revenue"),
-                "ratio",
-            ),
-            _definition(
-                "valuation.corporate.enterprise_value_to_sales_latest_annual",
-                "EV / ventas anuales",
-                "enterprise_value / annual_revenue",
-                (
-                    "close_price",
-                    "shares_outstanding",
-                    "commercial_paper",
-                    "long_term_debt_current",
-                    "long_term_debt_noncurrent",
-                    "cash_and_cash_equivalents",
-                    "revenue",
-                ),
-                "ratio",
-            ),
-            _definition(
-                "valuation.corporate.enterprise_value_to_ebit_latest_annual",
-                "EV / EBIT anual",
-                "enterprise_value / annual_operating_income",
-                (
-                    "close_price",
-                    "shares_outstanding",
-                    "commercial_paper",
-                    "long_term_debt_current",
-                    "long_term_debt_noncurrent",
-                    "cash_and_cash_equivalents",
-                    "operating_income",
-                ),
-                "ratio",
-            ),
-            _definition(
-                "valuation.corporate.enterprise_value_to_ebitda_latest_annual",
-                "EV / EBITDA anual",
-                (
-                    "enterprise_value / (annual_operating_income + "
-                    "annual_depreciation_and_amortization)"
-                ),
-                (
-                    "close_price",
-                    "shares_outstanding",
-                    "commercial_paper",
-                    "long_term_debt_current",
-                    "long_term_debt_noncurrent",
-                    "cash_and_cash_equivalents",
-                    "operating_income",
-                    "depreciation_and_amortization",
-                ),
-                "ratio",
-                (
-                    "EBITDA solo se reconstruye con D&A anual oficial compatible; "
-                    "nunca sustituye EBIT."
-                ),
-            ),
-            _definition(
-                "valuation.corporate.free_cash_flow_yield_latest_annual",
-                "FCF yield anual",
-                "(annual_operating_cash_flow - annual_capital_expenditures) / market_cap",
-                (
-                    "operating_cash_flow",
-                    "capital_expenditures",
-                    "close_price",
-                    "shares_outstanding",
-                ),
-                "percentage",
-            ),
-            _definition(
-                "valuation.corporate.earnings_yield_latest_annual",
-                "Earnings yield anual",
-                "annual_net_income / market_cap",
-                ("net_income", "close_price", "shares_outstanding"),
-                "percentage",
-            ),
-        ),
-        key=lambda item: item.metric_key,
+def validate_selected_price(
+    price: MarketBar,
+    *,
+    asset_id: str,
+    market_source_id: str | None,
+    known_at: datetime,
+    valuation_date: date,
+) -> MarketBar:
+    """Reject a caller-selected price outside the requested valuation cut."""
+    if (
+        price.asset_id != asset_id
+        or price.source_id != market_source_id
+        or price.frequency is not DataFrequency.DAY_1
+        or price.available_at > known_at
+        or price.timestamp.date() > valuation_date
+    ):
+        raise CorporateValuationError("selected price does not match the requested valuation cut")
+    return price
+
+
+def resolve_valuation_price(
+    storage: _Storage,
+    *,
+    asset_id: str,
+    market_source_id: str | None,
+    known_at: datetime,
+    valuation_date: date,
+    semantic_identity_v2: bool,
+) -> MarketBar | None:
+    """Select the latest eligible close, hydrating only the needed projection."""
+    earliest = datetime.combine(date(1970, 1, 1), datetime.min.time(), UTC)
+    end = datetime.combine(valuation_date + timedelta(days=1), datetime.min.time(), UTC)
+    if semantic_identity_v2:
+        from investment_analyst.analytics.market.history_v2 import (
+            HistoricalMarketDataV2Service,
+        )
+
+        staging = storage.store.raw_staging
+        service = HistoricalMarketDataV2Service(staging)
+        for lookback_days in (30, 90, 365, 3650, None):
+            start = (
+                earliest
+                if lookback_days is None
+                else max(earliest, end - timedelta(days=lookback_days))
+            )
+            query = HistoricalBarQuery(
+                asset_id=asset_id,
+                source_id=market_source_id or "",
+                start=start,
+                end=end,
+                known_at=known_at,
+            )
+            summary = summarize_market_history_v2(staging, query)
+            if summary.latest_projection is not None:
+                return service.materialize(summary.latest_projection, query)
+        return None
+    query = HistoricalBarQuery(
+        asset_id=asset_id,
+        source_id=market_source_id or "",
+        start=earliest,
+        end=end,
+        known_at=known_at,
     )
+    bars = HistoricalMarketDataService(storage).query(query).bars
+    return bars[-1] if bars else None
+
+
+def build_annual_filing_selection(
+    observations: Collection[NormalizedObservation],
+    *,
+    metadata: FilingMetadata,
+    period_end: datetime,
+    accepted_at: datetime,
+) -> AnnualFilingSelection:
+    """Deduplicate one exact filing group and validate its shared semantics."""
+    facts: dict[str, NormalizedObservation] = {}
+    for item in observations:
+        current = facts.get(item.field_name)
+        if current is not None and _observation_identity(current) != _observation_identity(item):
+            raise AmbiguousValuationEvidenceError(
+                "one filing contains contradictory fundamental observations"
+            )
+        if current is None or str(item.observation_id) < str(current.observation_id):
+            facts[item.field_name] = item
+    duration_starts = {
+        item.period_start
+        for item in facts.values()
+        if item.field_name in VALUATION_MONETARY_FIELDS and item.period_start is not None
+    }
+    if len(duration_starts) > 1:
+        raise IncompatibleValuationEvidenceError(
+            ValuationReasonCode.PERIOD_MISMATCH,
+            "annual duration inputs do not share one period_start",
+        )
+    accounting_taxonomies = {
+        filing_metadata(item).taxonomy
+        for item in facts.values()
+        if item.field_name in VALUATION_MONETARY_FIELDS
+    }
+    if len(accounting_taxonomies) > 1:
+        raise IncompatibleValuationEvidenceError(
+            ValuationReasonCode.ACCOUNTING_BASIS_MISMATCH,
+            "annual valuation inputs do not share one accounting taxonomy",
+        )
+    shares = facts.get(DEI_SHARES_FIELD_NAME)
+    if shares is not None:
+        shares_taxonomy = filing_metadata(shares).taxonomy
+        if shares_taxonomy != DEI_TAXONOMY and (
+            accounting_taxonomies and shares_taxonomy not in accounting_taxonomies
+        ):
+            raise IncompatibleValuationEvidenceError(
+                ValuationReasonCode.ACCOUNTING_BASIS_MISMATCH,
+                "annual share count is not compatible with the accounting taxonomy",
+            )
+    return AnnualFilingSelection(
+        facts=facts,
+        metadata=metadata,
+        period_start=next(iter(duration_starts), None),
+        period_end=period_end,
+        accepted_at=accepted_at,
+    )
+
+
+def build_valuation_inputs(
+    price: MarketBar,
+    selection: AnnualFilingSelection,
+    *,
+    price_currency: str | None,
+) -> tuple[ValuationInput, ...]:
+    """Project exact price and fundamental evidence into valuation inputs."""
+    price_input = ValuationInput(
+        role="close_price",
+        observation_id=price.observation_ids["close"],
+        raw_record_id=price.raw_record_id,
+        source_id=price.source_id,
+        value=price.close,
+        unit=price_currency or "USD",
+        frequency=price.frequency,
+        observed_at=price.timestamp,
+        available_at=price.available_at,
+    )
+    fundamental_inputs = tuple(
+        ValuationInput(
+            role=field_name.removeprefix("fundamental."),
+            observation_id=item.observation_id,
+            raw_record_id=item.raw_record_id,
+            source_id=item.source.source_id,
+            value=item.value,
+            unit=item.unit,
+            frequency=item.frequency,
+            observed_at=item.observed_at,
+            period_start=item.period_start,
+            period_end=item.period_end,
+            available_at=item.available_at,
+            accession_number=selection.metadata.accession_number,
+            taxonomy=filing_metadata(item).taxonomy,
+            tag=filing_metadata(item).tag,
+        )
+        for field_name, item in sorted(selection.facts.items())
+    )
+    return (price_input, *fundamental_inputs)
+
+
+def valuation_metric_definitions(
+    *,
+    algorithm_version: str,
+    definition_version: str,
+    basis_limitation: str,
+) -> tuple[ValuationMetricDefinition, ...]:
+    """Return the published formulas bound to one explicit contract vintage."""
+
+    def definition(
+        key: str,
+        name: str,
+        formula: str,
+        roles: tuple[str, ...],
+        unit: str,
+        *limitations: str,
+    ) -> ValuationMetricDefinition:
+        published_limitations = (
+            basis_limitation,
+            *limitations,
+            *((VALUATION_IEX_LIMITATION,) if "close_price" in roles else ()),
+        )
+        return ValuationMetricDefinition(
+            metric_key=key,
+            display_name_es=name,
+            formula=formula,
+            input_roles=roles,
+            unit=unit,
+            algorithm_version=algorithm_version,
+            definition_version=definition_version,
+            limitations=published_limitations,
+        )
+
+    return tuple(
+        sorted(
+            (
+                definition(
+                    "valuation.corporate.market_cap",
+                    "Capitalización bursátil",
+                    "close_price * shares_outstanding * market_units_per_reported_share",
+                    ("close_price", "shares_outstanding"),
+                    "USD",
+                    VALUATION_SHARE_LIMITATION,
+                ),
+                definition(
+                    "valuation.corporate.financial_debt",
+                    "Deuda financiera",
+                    "commercial_paper + long_term_debt_current + long_term_debt_noncurrent",
+                    ("commercial_paper", "long_term_debt_current", "long_term_debt_noncurrent"),
+                    "USD",
+                ),
+                definition(
+                    "valuation.corporate.enterprise_value",
+                    "Enterprise value",
+                    "market_cap + financial_debt - cash_and_cash_equivalents",
+                    (
+                        "close_price",
+                        "shares_outstanding",
+                        "commercial_paper",
+                        "long_term_debt_current",
+                        "long_term_debt_noncurrent",
+                        "cash_and_cash_equivalents",
+                    ),
+                    "USD",
+                    "EV v1 no añade leases, preferred equity, minoritarios ni valores negociables.",
+                ),
+                definition(
+                    "valuation.corporate.price_to_earnings_latest_annual",
+                    "Precio / utilidad anual",
+                    "market_cap / annual_net_income",
+                    ("close_price", "shares_outstanding", "net_income"),
+                    "ratio",
+                ),
+                definition(
+                    "valuation.corporate.price_to_book",
+                    "Precio / valor en libros",
+                    "market_cap / stockholders_equity",
+                    ("close_price", "shares_outstanding", "stockholders_equity"),
+                    "ratio",
+                ),
+                definition(
+                    "valuation.corporate.price_to_sales_latest_annual",
+                    "Precio / ventas anuales",
+                    "market_cap / annual_revenue",
+                    ("close_price", "shares_outstanding", "revenue"),
+                    "ratio",
+                ),
+                definition(
+                    "valuation.corporate.enterprise_value_to_sales_latest_annual",
+                    "EV / ventas anuales",
+                    "enterprise_value / annual_revenue",
+                    (
+                        "close_price",
+                        "shares_outstanding",
+                        "commercial_paper",
+                        "long_term_debt_current",
+                        "long_term_debt_noncurrent",
+                        "cash_and_cash_equivalents",
+                        "revenue",
+                    ),
+                    "ratio",
+                ),
+                definition(
+                    "valuation.corporate.enterprise_value_to_ebit_latest_annual",
+                    "EV / EBIT anual",
+                    "enterprise_value / annual_operating_income",
+                    (
+                        "close_price",
+                        "shares_outstanding",
+                        "commercial_paper",
+                        "long_term_debt_current",
+                        "long_term_debt_noncurrent",
+                        "cash_and_cash_equivalents",
+                        "operating_income",
+                    ),
+                    "ratio",
+                ),
+                definition(
+                    "valuation.corporate.enterprise_value_to_ebitda_latest_annual",
+                    "EV / EBITDA anual",
+                    (
+                        "enterprise_value / (annual_operating_income + "
+                        "annual_depreciation_and_amortization)"
+                    ),
+                    (
+                        "close_price",
+                        "shares_outstanding",
+                        "commercial_paper",
+                        "long_term_debt_current",
+                        "long_term_debt_noncurrent",
+                        "cash_and_cash_equivalents",
+                        "operating_income",
+                        "depreciation_and_amortization",
+                    ),
+                    "ratio",
+                    (
+                        "EBITDA solo se reconstruye con D&A anual oficial compatible; "
+                        "nunca sustituye EBIT."
+                    ),
+                ),
+                definition(
+                    "valuation.corporate.free_cash_flow_yield_latest_annual",
+                    "FCF yield anual",
+                    "(annual_operating_cash_flow - annual_capital_expenditures) / market_cap",
+                    (
+                        "operating_cash_flow",
+                        "capital_expenditures",
+                        "close_price",
+                        "shares_outstanding",
+                    ),
+                    "percentage",
+                ),
+                definition(
+                    "valuation.corporate.earnings_yield_latest_annual",
+                    "Earnings yield anual",
+                    "annual_net_income / market_cap",
+                    ("net_income", "close_price", "shares_outstanding"),
+                    "percentage",
+                ),
+            ),
+            key=lambda item: item.metric_key,
+        )
+    )
+
+
+_DEFINITIONS = valuation_metric_definitions(
+    algorithm_version=_ALGORITHM,
+    definition_version=_DEFINITION_VERSION,
+    basis_limitation=_LIMITATION,
 )
 
 
@@ -497,7 +743,7 @@ class CorporateValuationService:
                 ValuationStatus.NOT_EVALUABLE,
                 security_basis=security_basis,
             )
-        report_currencies = self._report_currencies(selection.facts)
+        report_currencies = valuation_report_currencies(selection.facts)
         report_currency = next(iter(report_currencies), None)
         if len(report_currencies) > 1 or (
             report_currency is not None and report_currency != self._price_currency
@@ -519,7 +765,11 @@ class CorporateValuationService:
                 security_basis=security_basis,
             )
 
-        inputs = self._inputs(price, selection)
+        inputs = build_valuation_inputs(
+            price,
+            selection,
+            price_currency=self._price_currency,
+        )
         by_role = {item.role: item for item in inputs}
         reuse_key = self._reuse_key(
             request=request,
@@ -559,9 +809,9 @@ class CorporateValuationService:
         available_at = max(item.available_at for item in inputs)
         if basis_evidence is not None:
             available_at = max(available_at, basis_evidence.available_at)
-        coverage = _coverage(metrics)
-        status = _snapshot_status(coverage)
-        limitations = [_IEX_LIMITATION, _SHARE_LIMITATION]
+        coverage = valuation_coverage(metrics)
+        status = valuation_snapshot_status(coverage)
+        limitations = [VALUATION_IEX_LIMITATION, VALUATION_SHARE_LIMITATION]
         if (request.valuation_date - price.timestamp.date()).days > 3:
             limitations.append(
                 "El último precio elegible está retrasado respecto de valuation_date."
@@ -600,7 +850,7 @@ class CorporateValuationService:
         *,
         request: CorporateValuationRequest,
         price: MarketBar,
-        selection: _AnnualSelection,
+        selection: AnnualFilingSelection,
         security_basis: ValuationSecurityBasis,
         inputs: tuple[ValuationInput, ...],
     ) -> ExecutionReuseKey:
@@ -642,60 +892,56 @@ class CorporateValuationService:
 
     @staticmethod
     def _normalized_computed_at(value: datetime | None) -> datetime:
-        resolved = value or datetime.now(UTC)
-        if resolved.tzinfo is None or resolved.utcoffset() is None:
-            raise CorporateValuationError("computed_at must be timezone-aware")
-        return resolved.astimezone(UTC)
+        """Keep the existing cutoff normalization seam."""
+        return normalize_valuation_computed_at(value)
 
     def _security_basis(
         self,
         request: CorporateValuationRequest,
     ) -> ValuationSecurityBasis | None:
         """Resolve the single eligible traded-unit basis for this cut."""
-        values = (
-            self._security_unit_factor,
-            self._security_unit_basis,
-            self._security_unit_basis_version,
-            self._security_unit_market_adjustment,
+        return resolve_valuation_security_basis(
+            known_at=request.known_at,
+            valuation_date=request.valuation_date,
+            security_unit_factor=self._security_unit_factor,
+            security_unit_basis=self._security_unit_basis,
+            security_unit_basis_version=self._security_unit_basis_version,
+            security_unit_market_adjustment=self._security_unit_market_adjustment,
+            security_unit_basis_revisions=self._security_unit_basis_revisions,
         )
-        if all(value is not None for value in values):
-            return ValuationSecurityBasis(
-                basis=self._security_unit_basis,
-                market_units_per_reported_share=self._security_unit_factor,
-                market_adjustment=self._security_unit_market_adjustment,
-                contract_version=self._security_unit_basis_version,
-            )
-        if any(value is not None for value in values):
-            return None
-        selected = select_security_unit_basis_revision(
-            self._security_unit_basis_revisions,
+
+    def _selected_price(
+        self,
+        request: CorporateValuationRequest,
+        price: MarketBar,
+    ) -> MarketBar:
+        """Validate a caller-provided price against the requested cut."""
+        return validate_selected_price(
+            price,
+            asset_id=request.asset_id,
+            market_source_id=self._market_source_id,
             known_at=request.known_at,
             valuation_date=request.valuation_date,
         )
-        if selected is None:
-            return None
-        return ValuationSecurityBasis(
-            basis=selected.basis,
-            market_units_per_reported_share=selected.factor,
-            market_adjustment=selected.adjustment,
-            contract_version=f"{selected.schema_version}:{selected.revision}",
-            basis_evidence=selected,
+
+    def _price(self, request: CorporateValuationRequest) -> MarketBar | None:
+        """Select the latest eligible close without hydrating unrelated rows."""
+        return resolve_valuation_price(
+            self._storage,
+            asset_id=request.asset_id,
+            market_source_id=self._market_source_id,
+            known_at=request.known_at,
+            valuation_date=request.valuation_date,
+            semantic_identity_v2=self._semantic_identity_v2,
         )
 
     def _eligibility_reason(self) -> ValuationReasonCode | None:
-        if (
-            self._capabilities.family is not AssetAnalysisFamily.LISTED_COMPANY
-            or self._capabilities.fundamental_mode is not FundamentalAnalysisMode.CORPORATE
-        ):
-            return ValuationReasonCode.ASSET_NOT_APPLICABLE
-        if not self._capabilities.market_data_configured or self._market_source_id is None:
-            return ValuationReasonCode.MARKET_NOT_CONFIGURED
-        if (
-            not self._capabilities.fundamental_data_configured
-            or self._fundamental_source_id is None
-        ):
-            return ValuationReasonCode.FUNDAMENTALS_NOT_CONFIGURED
-        return None
+        """Return the first missing corporate valuation prerequisite, if any."""
+        return valuation_eligibility_reason(
+            capabilities=self._capabilities,
+            market_source_id=self._market_source_id,
+            fundamental_source_id=self._fundamental_source_id,
+        )
 
     def _unavailable(
         self,
@@ -726,75 +972,21 @@ class CorporateValuationService:
             security_basis=security_basis,
             definitions=_DEFINITIONS,
             metrics=metrics,
-            coverage=_coverage(metrics),
+            coverage=valuation_coverage(metrics),
         )
 
-    def _selected_price(
-        self,
-        request: CorporateValuationRequest,
-        price: MarketBar,
-    ) -> MarketBar:
-        if (
-            price.asset_id != request.asset_id
-            or price.source_id != self._market_source_id
-            or price.frequency is not DataFrequency.DAY_1
-            or price.available_at > request.known_at
-            or price.timestamp.date() > request.valuation_date
-        ):
-            raise CorporateValuationError(
-                "selected price does not match the requested valuation cut"
-            )
-        return price
-
-    def _price(self, request: CorporateValuationRequest) -> MarketBar | None:
-        earliest = datetime.combine(date(1970, 1, 1), datetime.min.time(), UTC)
-        end = datetime.combine(request.valuation_date + timedelta(days=1), datetime.min.time(), UTC)
-        if self._semantic_identity_v2:
-            from investment_analyst.analytics.market.history_v2 import (
-                HistoricalMarketDataV2Service,
-            )
-
-            staging = self._storage.store.raw_staging
-            service = HistoricalMarketDataV2Service(staging)
-            for lookback_days in (30, 90, 365, 3650, None):
-                start = (
-                    earliest
-                    if lookback_days is None
-                    else max(earliest, end - timedelta(days=lookback_days))
-                )
-                query = HistoricalBarQuery(
-                    asset_id=request.asset_id,
-                    source_id=self._market_source_id or "",
-                    start=start,
-                    end=end,
-                    known_at=request.known_at,
-                )
-                summary = summarize_market_history_v2(staging, query)
-                if summary.latest_projection is not None:
-                    return service.materialize(summary.latest_projection, query)
-            return None
-        query = HistoricalBarQuery(
-            asset_id=request.asset_id,
-            source_id=self._market_source_id or "",
-            start=earliest,
-            end=end,
-            known_at=request.known_at,
-        )
-        bars = HistoricalMarketDataService(self._storage).query(query).bars
-        return bars[-1] if bars else None
-
-    def _annual_facts(self, request: CorporateValuationRequest) -> _AnnualSelection | None:
+    def _annual_facts(self, request: CorporateValuationRequest) -> AnnualFilingSelection | None:
         candidates = [
             item
             for item in self._storage.observations.list(
                 asset_id=request.asset_id,
                 source_id=self._fundamental_source_id,
-                field_names=_FIELDS,
+                field_names=VALUATION_FIELDS,
                 frequency=DataFrequency.ANNUAL,
                 quality=DataQuality.VALID,
                 available_to=request.known_at,
             )
-            if item.field_name in _FIELDS
+            if item.field_name in VALUATION_FIELDS
             and item.frequency is DataFrequency.ANNUAL
             and item.quality is DataQuality.VALID
             and item.source.source_id == self._fundamental_source_id
@@ -813,9 +1005,9 @@ class CorporateValuationService:
         by_revision: dict[tuple[datetime, str, str, str, str], list[NormalizedObservation]] = (
             defaultdict(list)
         )
-        metadata_by_revision: dict[tuple[datetime, str, str, str, str], _FilingMetadata] = {}
+        metadata_by_revision: dict[tuple[datetime, str, str, str, str], FilingMetadata] = {}
         for item in by_period[period_end]:
-            metadata = _filing_metadata(item)
+            metadata = filing_metadata(item)
             key = (
                 item.available_at,
                 metadata.accession_number,
@@ -834,97 +1026,12 @@ class CorporateValuationService:
                     "equally available fundamental revisions disagree semantically"
                 )
         key = latest_keys[0]
-        facts: dict[str, NormalizedObservation] = {}
-        for item in by_revision[key]:
-            current = facts.get(item.field_name)
-            if current is not None and _observation_identity(current) != _observation_identity(
-                item
-            ):
-                raise AmbiguousValuationEvidenceError(
-                    "one filing contains contradictory fundamental observations"
-                )
-            if current is None or str(item.observation_id) < str(current.observation_id):
-                facts[item.field_name] = item
-        duration_starts = {
-            item.period_start
-            for item in facts.values()
-            if item.field_name in _MONETARY_FIELDS and item.period_start is not None
-        }
-        if len(duration_starts) > 1:
-            raise IncompatibleValuationEvidenceError(
-                ValuationReasonCode.PERIOD_MISMATCH,
-                "annual duration inputs do not share one period_start",
-            )
-        accounting_taxonomies = {
-            _filing_metadata(item).taxonomy
-            for item in facts.values()
-            if item.field_name in _MONETARY_FIELDS
-        }
-        if len(accounting_taxonomies) > 1:
-            raise IncompatibleValuationEvidenceError(
-                ValuationReasonCode.ACCOUNTING_BASIS_MISMATCH,
-                "annual valuation inputs do not share one accounting taxonomy",
-            )
-        shares = facts.get(DEI_SHARES_FIELD_NAME)
-        if shares is not None:
-            shares_taxonomy = _filing_metadata(shares).taxonomy
-            if shares_taxonomy != DEI_TAXONOMY and (
-                accounting_taxonomies and shares_taxonomy not in accounting_taxonomies
-            ):
-                raise IncompatibleValuationEvidenceError(
-                    ValuationReasonCode.ACCOUNTING_BASIS_MISMATCH,
-                    "annual share count is not compatible with the accounting taxonomy",
-                )
-        return _AnnualSelection(
-            facts=facts,
+        return build_annual_filing_selection(
+            by_revision[key],
             metadata=metadata_by_revision[key],
-            period_start=next(iter(duration_starts), None),
             period_end=period_end,
             accepted_at=latest_at,
         )
-
-    def _inputs(
-        self,
-        price: MarketBar,
-        selection: _AnnualSelection,
-    ) -> tuple[ValuationInput, ...]:
-        price_input = ValuationInput(
-            role="close_price",
-            observation_id=price.observation_ids["close"],
-            raw_record_id=price.raw_record_id,
-            source_id=price.source_id,
-            value=price.close,
-            unit=self._price_currency or "USD",
-            frequency=price.frequency,
-            observed_at=price.timestamp,
-            available_at=price.available_at,
-        )
-        fundamental_inputs = tuple(
-            ValuationInput(
-                role=field_name.removeprefix("fundamental."),
-                observation_id=item.observation_id,
-                raw_record_id=item.raw_record_id,
-                source_id=item.source.source_id,
-                value=item.value,
-                unit=item.unit,
-                frequency=item.frequency,
-                observed_at=item.observed_at,
-                period_start=item.period_start,
-                period_end=item.period_end,
-                available_at=item.available_at,
-                accession_number=selection.metadata.accession_number,
-                taxonomy=_filing_metadata(item).taxonomy,
-                tag=_filing_metadata(item).tag,
-            )
-            for field_name, item in sorted(selection.facts.items())
-        )
-        return (price_input, *fundamental_inputs)
-
-    @staticmethod
-    def _report_currencies(
-        facts: Mapping[str, NormalizedObservation],
-    ) -> frozenset[str]:
-        return frozenset(item.unit for name, item in facts.items() if name in _MONETARY_FIELDS)
 
     def _evaluate_metric(
         self,
@@ -932,7 +1039,7 @@ class CorporateValuationService:
         *,
         request: CorporateValuationRequest,
         price: MarketBar,
-        selection: _AnnualSelection,
+        selection: AnnualFilingSelection,
         security_basis: ValuationSecurityBasis,
         inputs: Mapping[str, ValuationInput],
     ) -> ValuationMetricValue:
@@ -961,7 +1068,7 @@ class CorporateValuationService:
                 input_observation_ids=input_ids,
             )
         values = {role: inputs[role].value for role in definition.input_roles}
-        value, reason = _calculate(
+        value, reason = calculate_valuation_value(
             definition.metric_key,
             values,
             factor=security_basis.market_units_per_reported_share,
@@ -1017,7 +1124,7 @@ class CorporateValuationService:
         )
 
 
-def _filing_metadata(observation: NormalizedObservation) -> _FilingMetadata:
+def filing_metadata(observation: NormalizedObservation) -> FilingMetadata:
     record_key = observation.source.record_key
     if record_key is None:
         raise MalformedValuationEvidenceError("SEC valuation observation record_key is missing")
@@ -1029,7 +1136,7 @@ def _filing_metadata(observation: NormalizedObservation) -> _FilingMetadata:
         ) from error
     if not isinstance(decoded, dict) or not all(isinstance(key, str) for key in decoded):
         raise MalformedValuationEvidenceError("SEC valuation record_key must be an object")
-    return _FilingMetadata(
+    return FilingMetadata(
         accession_number=_required_text(decoded, "accession_number"),
         taxonomy=_required_text(decoded, "taxonomy"),
         tag=_required_text(decoded, "tag"),
@@ -1070,7 +1177,7 @@ def _observation_identity(item: NormalizedObservation) -> tuple[object, ...]:
         item.period_start,
         item.period_end,
         item.source.source_id,
-        _filing_metadata(item),
+        filing_metadata(item),
     )
 
 
@@ -1107,7 +1214,14 @@ def _ratio(numerator: Decimal, denominator: Decimal) -> Decimal:
         return numerator / denominator
 
 
-def _calculate(
+def valuation_report_currencies(
+    facts: Mapping[str, NormalizedObservation],
+) -> frozenset[str]:
+    """Return the distinct report currencies declared by monetary annual facts."""
+    return frozenset(item.unit for name, item in facts.items() if name in VALUATION_MONETARY_FIELDS)
+
+
+def calculate_valuation_value(
     key: str,
     values: Mapping[str, Decimal],
     *,
@@ -1180,7 +1294,7 @@ def _calculate(
     raise CorporateValuationError(f"unsupported valuation metric: {key}")
 
 
-def _coverage(metrics: tuple[ValuationMetricValue, ...]) -> ValuationCoverage:
+def valuation_coverage(metrics: tuple[ValuationMetricValue, ...]) -> ValuationCoverage:
     return ValuationCoverage(
         total=len(metrics),
         evaluated=sum(item.status is ValuationStatus.EVALUATED for item in metrics),
@@ -1189,7 +1303,7 @@ def _coverage(metrics: tuple[ValuationMetricValue, ...]) -> ValuationCoverage:
     )
 
 
-def _snapshot_status(coverage: ValuationCoverage) -> ValuationSnapshotStatus:
+def valuation_snapshot_status(coverage: ValuationCoverage) -> ValuationSnapshotStatus:
     if coverage.evaluated == coverage.total:
         return ValuationSnapshotStatus.EVALUATED
     if coverage.evaluated > 0:
@@ -1201,8 +1315,20 @@ def _snapshot_status(coverage: ValuationCoverage) -> ValuationSnapshotStatus:
 
 __all__ = [
     "AmbiguousValuationEvidenceError",
+    "AnnualFilingSelection",
     "CorporateValuationError",
     "CorporateValuationService",
+    "FilingMetadata",
     "IncompatibleValuationEvidenceError",
     "MalformedValuationEvidenceError",
+    "build_annual_filing_selection",
+    "build_valuation_inputs",
+    "calculate_valuation_value",
+    "resolve_valuation_price",
+    "resolve_valuation_security_basis",
+    "validate_selected_price",
+    "valuation_coverage",
+    "valuation_metric_definitions",
+    "valuation_report_currencies",
+    "valuation_snapshot_status",
 ]

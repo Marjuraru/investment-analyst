@@ -68,6 +68,14 @@ class CorporateValuationPersistencePipeline:
 
     def persist(self, snapshot: CorporateValuationSnapshot) -> ValuationPersistenceSummary:
         """Save deterministic results without rolling back already persisted progress."""
+        if (
+            not isinstance(snapshot, CorporateValuationSnapshot)
+            or snapshot.schema_version != "corporate-valuation-snapshot-v1"
+            or snapshot.request.basis != "latest_annual"
+        ):
+            raise ValueError(
+                "selected annual filing valuation is ephemeral and cannot be persisted"
+            )
         self._storage.require_open()
         existing_definitions = {
             item.metric_key: item for item in self._storage.metric_definitions.list_all()

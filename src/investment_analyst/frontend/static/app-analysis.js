@@ -2144,8 +2144,57 @@ function valuationDisplayValue(metric, definition) {
   return createElement("span", "figure", formatMultiple(metric.value));
 }
 
+function resetValuationFilingOptions() {
+  valuationFilingOptionsPayload = null;
+  valuationFilingSelection = null;
+  valuationFilingRequestSequence += 1;
+  const picker = byId("valuation-filing-picker");
+  if (picker) picker.open = false;
+  const select = byId("valuation-filing-option");
+  if (select) {
+    select.replaceChildren(createElement("option", "", "Abre el selector para cargar opciones"));
+    select.value = "";
+    select.disabled = true;
+  }
+  const status = byId("valuation-filing-options-status");
+  if (status) status.textContent = "Sin cargar.";
+  const queryButton = byId("query-valuation-filing");
+  if (queryButton) queryButton.disabled = true;
+  const resetButton = byId("valuation-filing-reset");
+  if (resetButton) resetButton.disabled = true;
+}
+
+function setValuationBasisHeader(selected) {
+  byId("valuation-basis-title").textContent = selected
+    ? "Ejercicio seleccionado"
+    : "Base latest_annual";
+  byId("valuation-mode-note").textContent = selected
+    ? "Ejercicio elegido explícitamente: el precio corresponde a valuation_date, no al cierre del ejercicio. No es el último anual ni TTM."
+    : "Base latest_annual: último ejercicio anual elegible al corte.";
+}
+
+function invalidateValuationFilingSelection() {
+  resetValuationFilingOptions();
+  if (valuationPayload?.request?.basis !== "selected_annual_filing") return;
+  valuationPayload = null;
+  byId("valuation-metrics").replaceChildren();
+  byId("valuation-status").textContent =
+    "El corte o la fecha cambió; vuelve a consultar la valoración.";
+  byId("valuation-coverage").textContent = "Sin consultar";
+  byId("valuation-coverage").className = "quality-chip";
+  byId("valuation-price-context").textContent = "—";
+  byId("valuation-period-context").textContent = "—";
+  byId("valuation-filing-context").textContent = "—";
+  byId("valuation-unit-context").textContent = "—";
+  byId("valuation-evidence").textContent = "Sin evidencia cargada.";
+  setExportAvailable("export-valuation-json", false);
+  setValuationBasisHeader(false);
+}
+
 function resetValuation() {
   valuationPayload = null;
+  resetValuationFilingOptions();
+  setValuationBasisHeader(false);
   byId("valuation-metrics").replaceChildren();
   byId("valuation-context").textContent =
     "La consulta se carga bajo demanda desde evidencia local.";
@@ -2173,6 +2222,176 @@ function resetValuation() {
   byId("valuation-rule-result").replaceChildren();
   byId("valuation-rule-evidence").textContent = "Sin evaluación cargada.";
   setExportAvailable("export-valuation-history-rule-json", false);
+}
+
+function valuationFilingOptionLabel(option) {
+  const selector = option.selector;
+  const fields = option.available_field_roles.length
+    ? option.available_field_roles.join(", ")
+    : "sin campos de valoración";
+  return `${selector.fiscal_year} ${selector.fiscal_period} · cierre ${selector.annual_period_end} · ${selector.filing_form} ${selector.filing_accession_number} · disponible ${formatInstant(selector.filing_accepted_at)} · ${fields}`;
+}
+
+function renderValuationFilingOptions(payload, { complete = true } = {}) {
+  valuationFilingOptionsPayload = payload;
+  const select = byId("valuation-filing-option");
+  select.replaceChildren(createElement("option", "", "Selecciona un contexto anual"));
+  for (const option of payload.options || []) {
+    const element = createElement("option", "", valuationFilingOptionLabel(option));
+    element.value = JSON.stringify(option.selector);
+    select.append(element);
+  }
+  select.value = "";
+  select.disabled = !(payload.options || []).length;
+  const status = byId("valuation-filing-options-status");
+  if (!(payload.options || []).length) {
+    status.textContent = payload.limitations?.length
+      ? payload.limitations.join(" ")
+      : "No hay contextos anuales visibles en el corte y el rango.";
+  } else if (!complete) {
+    status.textContent = `Contextos cargados: ${formatInteger(payload.options.length)} de ${formatInteger(payload.total)}. La lista es parcial; ajusta el rango para ver el resto.`;
+  } else {
+    status.textContent = `${formatInteger(payload.total)} contextos anuales visibles; elige uno para consultar sin ranking por cobertura.`;
+  }
+  byId("query-valuation-filing").disabled = true;
+  byId("valuation-filing-reset").disabled = !(payload.options || []).length;
+}
+
+async function loadValuationFilingOptions() {
+  if (!marketAssetPresentation().hasFundamentals) return;
+  const assetId = selectedMarketAsset;
+  const knownAt = byId("report-known-at").value.trim();
+  const valuationDate = byId("valuation-date").value;
+  if (!knownAt || !valuationDate) {
+    byId("valuation-filing-options-status").textContent =
+      "Define el corte y la fecha de valoración.";
+    return;
+  }
+  if (
+    valuationFilingOptionsPayload
+    && valuationFilingOptionsPayload.asset_id === assetId
+    && valuationFilingOptionsPayload.known_at === knownAt
+    && valuationFilingOptionsPayload.valuation_date === valuationDate
+  ) {
+    renderValuationFilingOptions(valuationFilingOptionsPayload, {
+      complete: valuationFilingOptionsPayload.complete !== false,
+    });
+    return;
+  }
+  const sequence = ++valuationFilingRequestSequence;
+  const status = byId("valuation-filing-options-status");
+  status.textContent = "Cargando contextos anuales disponibles…";
+  const options = [];
+  let offset = 0;
+  let total = 0;
+  let limitations = [];
+  try {
+    while (offset < 2000) {
+      const parameters = new URLSearchParams({
+        asset_id: assetId,
+        known_at: knownAt,
+        valuation_date: valuationDate,
+        start_date: "1900-01-01",
+        end_date: valuationDate,
+        offset: String(offset),
+        limit: "200",
+      });
+      const page = await api(`/api/v1/valuation/filings?${parameters.toString()}`);
+      if (
+        sequence !== valuationFilingRequestSequence
+        || assetId !== selectedMarketAsset
+        || knownAt !== byId("report-known-at").value.trim()
+        || valuationDate !== byId("valuation-date").value
+      ) return;
+      total = page.total;
+      limitations = page.limitations || [];
+      options.push(...(page.options || []));
+      offset += page.returned;
+      if (!page.returned) break;
+    }
+    const complete = offset >= total;
+    const payload = {
+      asset_id: assetId,
+      known_at: knownAt,
+      valuation_date: valuationDate,
+      total,
+      options,
+      limitations,
+      complete,
+    };
+    renderValuationFilingOptions(payload, { complete });
+  } catch (error) {
+    if (sequence !== valuationFilingRequestSequence) return;
+    status.textContent = error.message;
+  }
+}
+
+function onValuationFilingSelectionChange() {
+  const select = byId("valuation-filing-option");
+  valuationFilingSelection = select.value ? JSON.parse(select.value) : null;
+  byId("query-valuation-filing").disabled = !valuationFilingSelection;
+  byId("valuation-filing-reset").disabled =
+    !valuationFilingSelection && !(valuationFilingOptionsPayload?.options || []).length;
+  if (valuationFilingSelection) {
+    byId("valuation-filing-options-status").textContent =
+      `Elegido: ${valuationFilingSelection.fiscal_year} ${valuationFilingSelection.fiscal_period} · ${valuationFilingSelection.filing_form} ${valuationFilingSelection.filing_accession_number}.`;
+  }
+}
+
+async function queryValuationFiling() {
+  if (!marketAssetPresentation().hasFundamentals || !valuationFilingSelection) return;
+  const card = byId("valuation-card");
+  const button = byId("query-valuation-filing");
+  card.setAttribute("aria-busy", "true");
+  setButtonBusy(button, true, "Consultando…", "Consultar ejercicio seleccionado");
+  byId("valuation-status").textContent =
+    "Reconstruyendo el ejercicio seleccionado desde evidencia local…";
+  setValuationBasisHeader(true);
+  const selector = valuationFilingSelection;
+  const parameters = new URLSearchParams({
+    asset_id: selectedMarketAsset,
+    known_at: byId("report-known-at").value.trim(),
+    valuation_date: byId("valuation-date").value,
+    basis: "selected_annual_filing",
+    annual_period_end: selector.annual_period_end,
+    filing_accession_number: selector.filing_accession_number,
+    filing_accepted_at: selector.filing_accepted_at,
+    filing_form: selector.filing_form,
+    fiscal_year: selector.fiscal_year,
+    fiscal_period: selector.fiscal_period,
+  });
+  try {
+    const payload = await api(`/api/v1/valuation?${parameters.toString()}`);
+    if (payload?.request?.basis !== "selected_annual_filing") {
+      throw new Error("La respuesta no corresponde al ejercicio seleccionado.");
+    }
+    renderValuation(payload);
+  } catch (error) {
+    valuationPayload = null;
+    byId("valuation-metrics").replaceChildren();
+    byId("valuation-status").textContent = error.message;
+    byId("valuation-coverage").textContent = "Sin consultar";
+    byId("valuation-coverage").className = "quality-chip";
+    byId("valuation-price-context").textContent = "—";
+    byId("valuation-period-context").textContent = "—";
+    byId("valuation-filing-context").textContent = "—";
+    byId("valuation-unit-context").textContent = "—";
+    byId("valuation-evidence").textContent = "Sin evidencia cargada.";
+    setExportAvailable("export-valuation-json", false);
+  } finally {
+    card.setAttribute("aria-busy", "false");
+    setButtonBusy(button, false, "Consultando…", "Consultar ejercicio seleccionado");
+  }
+}
+
+function resetValuationToLatest() {
+  valuationFilingSelection = null;
+  const select = byId("valuation-filing-option");
+  if (select) select.value = "";
+  byId("query-valuation-filing").disabled = true;
+  byId("valuation-filing-reset").disabled = true;
+  setValuationBasisHeader(false);
+  void queryValuation();
 }
 
 function valuationHistorySeriesKey(series) {
@@ -2359,6 +2578,8 @@ function valuationBasisEvidenceText(basis) {
 
 function renderValuation(payload) {
   valuationPayload = payload;
+  const selectedMode = payload.request?.basis === "selected_annual_filing";
+  setValuationBasisHeader(selectedMode);
   const definitions = new Map(
     (payload.definitions || []).map((definition) => [definition.metric_key, definition]),
   );
@@ -2398,18 +2619,26 @@ function renderValuation(payload) {
   coverageChip.textContent = `${formatInteger(coverage.evaluated)}/${formatInteger(coverage.total)} calculadas`;
   coverageChip.className = `quality-chip ${payload.status === "evaluated" ? "good" : "warn"}`;
   byId("valuation-context").textContent =
-    `${marketAssetPresentation().symbol} · corte ${formatInstant(payload.known_at)} · ${VALUATION_STATUS_LABELS[payload.status] || payload.status}`;
+    `${marketAssetPresentation().symbol} · corte ${formatInstant(payload.known_at)} · ${selectedMode ? "ejercicio seleccionado" : "último anual"} · ${VALUATION_STATUS_LABELS[payload.status] || payload.status}`;
   byId("valuation-status").textContent =
-    `${formatInteger(coverage.evaluated)} calculadas · ${formatInteger(coverage.not_evaluable)} no evaluables · lectura local sin proveedores.`;
+    `${formatInteger(coverage.evaluated)} calculadas · ${formatInteger(coverage.not_evaluable)} no evaluables · ${selectedMode ? "ejercicio elegido explícitamente" : "base latest_annual"} · lectura local sin proveedores.`;
   byId("valuation-price-context").textContent = payload.valuation_as_of
     ? `${formatCalendarDate(payload.valuation_as_of)} · ${formatInteger(payload.price_age_days)} días de antigüedad · ${payload.price_source_id}`
     : "No disponible en el corte";
+  const requestedPeriod = selectedMode ? payload.request.annual_period_end : null;
+  const requestedFilingAccepted = selectedMode ? payload.request.filing_accepted_at : null;
+  const requestedFilingForm = selectedMode ? payload.request.filing_form : null;
+  const requestedFilingAccession = selectedMode ? payload.request.filing_accession_number : null;
   byId("valuation-period-context").textContent = payload.annual_period_end
     ? `${formatCalendarDate(payload.annual_period_start)}–${formatCalendarDate(payload.annual_period_end)} · ${payload.fiscal_period || "FY"}`
-    : "No disponible en el corte";
+    : requestedPeriod
+      ? `${formatCalendarDate(requestedPeriod)} · ejercicio seleccionado sin evidencia visible`
+      : "No disponible en el corte";
   byId("valuation-filing-context").textContent = payload.filing_accepted_at
     ? `${payload.filing_form || "Filing"} ${payload.filing_accession_number || ""} · ${formatInstant(payload.filing_accepted_at)}`
-    : "No disponible en el corte";
+    : requestedFilingAccepted
+      ? `${requestedFilingForm || "Filing"} ${requestedFilingAccession || ""} · disponible ${formatInstant(requestedFilingAccepted)} · sin evidencia visible`
+      : "No disponible en el corte";
   byId("valuation-unit-context").textContent = payload.security_basis
     ? `${payload.price_currency}/${payload.report_currency} · ${payload.security_basis.basis} · factor exacto ${payload.security_basis.market_units_per_reported_share}${valuationBasisEvidenceText(payload.security_basis)}`
     : "Base de título no disponible";
@@ -2424,6 +2653,12 @@ async function queryValuation() {
   card.setAttribute("aria-busy", "true");
   setButtonBusy(button, true, "Consultando…", "Cargar valoración");
   byId("valuation-status").textContent = "Reconstruyendo la valoración desde evidencia local…";
+  valuationFilingSelection = null;
+  const filingSelect = byId("valuation-filing-option");
+  if (filingSelect) filingSelect.value = "";
+  byId("query-valuation-filing").disabled = true;
+  byId("valuation-filing-reset").disabled = true;
+  setValuationBasisHeader(false);
   const parameters = new URLSearchParams({
     asset_id: selectedMarketAsset,
     known_at: byId("report-known-at").value.trim(),
@@ -2443,8 +2678,11 @@ async function queryValuation() {
 
 function exportValuationJson() {
   if (!valuationPayload) return;
+  const selector = valuationPayload.request?.basis === "selected_annual_filing"
+    ? valuationPayload.request.annual_period_end
+    : valuationPayload.request.valuation_date;
   downloadText(
-    `${safeFilePart(marketAssetPresentation().symbol)}-valoracion-${safeFilePart(valuationPayload.request.valuation_date)}.json`,
+    `${safeFilePart(marketAssetPresentation().symbol)}-valoracion-${safeFilePart(selector)}.json`,
     `${JSON.stringify(valuationPayload, null, 2)}\n`,
     "application/json",
   );

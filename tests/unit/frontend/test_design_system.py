@@ -1656,7 +1656,9 @@ def _check_no_new_capability_or_route_is_introduced_by_the_shell(app_js: str) ->
 # from (origin/main@4fc61c7ca3...), extracted the same way the check above
 # extracts the candidate's routes: every `/api/...` literal outside the
 # BOARD_REGISTRY declaration. UI-7 adds the already-integrated, read-only
-# Cazatiburones notification inbox route; no transport or contract changes.
+# Cazatiburones notification inbox route; #375 adds the already-integrated,
+# read-only explicit annual filing options route. No transport or contract
+# changes beyond those authorized Work Blocks.
 _BASELINE_API_ROUTES = frozenset(
     {
         "/api/alerts",
@@ -1688,6 +1690,7 @@ _BASELINE_API_ROUTES = frozenset(
         "/api/v1/sec-document-timeline",
         "/api/v1/universe-coverage",
         "/api/v1/valuation",
+        "/api/v1/valuation/filings",
         "/api/v1/valuation-history",
         "/api/v1/valuation-history-rule",
     }

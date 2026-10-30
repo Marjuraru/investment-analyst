@@ -37,6 +37,12 @@
 > trazabilidad, 55 celdas de valoración (AAPL 11/11; AMD y B 6/11; TSM y BVN 1/11), DEI/ADR con
 > linaje exacto y K0 preservado.
 >
+> `FUNDAMENTALS-FILING-VALUATION`/#375 (`ADVANCES`) añade la consulta explícita de ejercicios y
+> filings anuales ya persistidos: opciones compactas, selector literal PIT y una valoración efímera
+> con las once fórmulas existentes, precio al corte y cero mezcla entre contextos. La fila
+> `FUNDAMENTALS-COVERAGE` permanece `NEXT`: no se declara mayor cobertura del último anual, no se
+> cierra la ruta y deuda, FX, trimestral IFRS y nuevas fuentes siguen fuera de este bloque.
+>
 > Las notas siguientes y las narrativas fechadas de este documento son registro histórico. No
 > describen un Issue activo ni autorizan ejecución: la única autoridad de Work Block es el Issue
 > abierto con `workflow:active` resuelto desde GitHub vivo.
@@ -139,6 +145,13 @@ La transición de cierre de `DATA-CHASSIS` (`DATA-CHASSIS-48`/#357, `COMPLETES`)
 la reparación temporal R4 del discovery `4847c4d0…`, el delta físico de la vista packed compatible y
 el restore final verificado desde el padre retenido más los objetos remotos. `DATA-CHASSIS` pasa a
 `DONE`; `FUNDAMENTALS-COVERAGE` queda como el único `NEXT` y Q1–Q7 no cambian.
+
+`FUNDAMENTALS-FILING-VALUATION`/#375 (`ADVANCES`) avanza `FUNDAMENTALS-COVERAGE` sin cerrarla:
+permite elegir un contexto anual SEC ya persistido y consultar sus once métricas de valoración con
+precio y corte explícitos, sin mezclar ejercicios ni modificar `latest_annual`. La aceptación
+conserva la compatibilidad AAPL 11/11, AMD/B 6/11 y TSM/BVN 1/11, y demuestra P/E, P/B y P/S sobre
+contextos 2024 de TSM/BVN con su base ADR. La fila sigue `NEXT`: deuda, FX, trimestral IFRS,
+nuevas fuentes y la decisión de ampliar cobertura pertenecen al siguiente PLAN.
 
 `FUNDAMENTALS-COVERAGE-CYCLE`/#363 (`ADVANCES`) propone avanzar los prerrequisitos operativos de
 `FUNDAMENTALS-COVERAGE` sin cerrar la fila: matriz determinista del ciclo semanal (fin de semana,

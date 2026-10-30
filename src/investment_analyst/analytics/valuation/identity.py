@@ -8,6 +8,10 @@ from uuid import UUID, uuid5
 from pydantic import JsonValue
 
 from investment_analyst.analytics.metric_identity_v2 import metric_result_id_v2
+from investment_analyst.analytics.valuation.filing_models import (
+    CorporateValuationFilingSelector,
+    CorporateValuationSelectedFilingRequest,
+)
 from investment_analyst.analytics.valuation.models import CorporateValuationRequest
 from investment_analyst.catalog.models import SecurityUnitBasisRevision
 from investment_analyst.core.models import DataQuality
@@ -135,4 +139,87 @@ def valuation_result_id_v2(
     )
 
 
-__all__ = ["valuation_result_id", "valuation_result_id_v2", "valuation_result_parameters_v2"]
+def filing_valuation_result_parameters_v2(
+    *,
+    request: CorporateValuationSelectedFilingRequest,
+    selector: CorporateValuationFilingSelector,
+    annual_period_start: datetime | None,
+    annual_period_end: datetime,
+    security_basis_version: str,
+    formula: str,
+    market_units_per_reported_share: Decimal,
+    basis_evidence: SecurityUnitBasisRevision | None = None,
+) -> dict[str, JsonValue]:
+    """Return semantic parameters for one explicit annual filing selection."""
+    parameters: dict[str, JsonValue] = {
+        "category": "valuation",
+        "basis": request.basis,
+        "valuation_date": request.valuation_date.isoformat(),
+        "annual_period_start": (
+            annual_period_start.isoformat() if annual_period_start is not None else None
+        ),
+        "annual_period_end": annual_period_end.isoformat(),
+        "filing_accession_number": selector.filing_accession_number,
+        "filing_accepted_at": selector.filing_accepted_at.isoformat(),
+        "filing_form": selector.filing_form,
+        "fiscal_year": selector.fiscal_year,
+        "fiscal_period": selector.fiscal_period,
+        "formula": formula,
+        "security_basis_version": security_basis_version,
+        "market_units_per_reported_share": str(market_units_per_reported_share),
+    }
+    evidence = _basis_evidence_parameters(basis_evidence)
+    if evidence is not None:
+        parameters["security_unit_basis_evidence"] = evidence
+    return parameters
+
+
+def filing_valuation_result_id_v2(
+    *,
+    request: CorporateValuationSelectedFilingRequest,
+    metric_key: str,
+    valuation_as_of: datetime,
+    available_at: datetime,
+    unit: str,
+    annual_period_start: datetime | None,
+    annual_period_end: datetime,
+    security_basis_version: str,
+    input_observation_ids: tuple[UUID, ...],
+    algorithm_version: str,
+    formula: str,
+    market_units_per_reported_share: Decimal,
+    basis_evidence: SecurityUnitBasisRevision | None = None,
+) -> UUID:
+    """Return a cut-independent UUIDv8 for one selected-filing valuation metric."""
+    selector = request.selector()
+    parameters = filing_valuation_result_parameters_v2(
+        request=request,
+        selector=selector,
+        annual_period_start=annual_period_start,
+        annual_period_end=annual_period_end,
+        security_basis_version=security_basis_version,
+        formula=formula,
+        market_units_per_reported_share=market_units_per_reported_share,
+        basis_evidence=basis_evidence,
+    )
+    return metric_result_id_v2(
+        asset_id=request.asset_id,
+        metric_key=metric_key,
+        input_observation_ids=input_observation_ids,
+        algorithm_version=algorithm_version,
+        as_of=valuation_as_of,
+        available_at=available_at,
+        unit=unit,
+        quality=DataQuality.VALID,
+        parameters=parameters,
+        known_at=request.known_at,
+    )
+
+
+__all__ = [
+    "filing_valuation_result_id_v2",
+    "filing_valuation_result_parameters_v2",
+    "valuation_result_id",
+    "valuation_result_id_v2",
+    "valuation_result_parameters_v2",
+]

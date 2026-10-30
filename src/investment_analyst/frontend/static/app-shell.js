@@ -474,6 +474,26 @@ byId("valuation-nav-link").addEventListener("click", () => {
   if (valuationPayload === null) void queryValuation();
 });
 
+byId("valuation-filing-picker").addEventListener("toggle", (event) => {
+  if (event.currentTarget.open) void loadValuationFilingOptions();
+});
+
+byId("valuation-filing-option").addEventListener("change", () => {
+  onValuationFilingSelectionChange();
+});
+
+byId("query-valuation-filing").addEventListener("click", () => {
+  void queryValuationFiling();
+});
+
+byId("valuation-filing-reset").addEventListener("click", () => {
+  resetValuationToLatest();
+});
+
+byId("valuation-date").addEventListener("change", () => {
+  invalidateValuationFilingSelection();
+});
+
 byId("candidate-notification-panel").addEventListener("toggle", (event) => {
   if (event.currentTarget.open) void loadCandidateNotifications();
 });
@@ -489,6 +509,7 @@ byId("crypto-derivatives-panel").addEventListener("toggle", (event) => {
 byId("report-known-at").addEventListener("change", () => {
   renderKnownAtCut(byId("report-known-at").value.trim());
   resetListedCompanyReport();
+  invalidateValuationFilingSelection();
   invalidateDeferredBoardLoads();
   if (marketAssetPresentation().supportsCryptoDerivatives && byId("crypto-derivatives-panel").open) {
     cryptoDerivativesPayload = null;
@@ -498,6 +519,7 @@ byId("report-known-at").addEventListener("change", () => {
 });
 byId("report-known-at").addEventListener("input", () => {
   renderKnownAtCut(byId("report-known-at").value.trim());
+  invalidateValuationFilingSelection();
 });
 byId("market-comparison-form").addEventListener("submit", async (event) => {
   event.preventDefault();

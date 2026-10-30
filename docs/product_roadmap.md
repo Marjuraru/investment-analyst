@@ -38,6 +38,12 @@
 > trazabilidad, 55 celdas de valoración (AAPL 11/11; AMD y B 6/11; TSM y BVN 1/11), DEI/ADR con
 > linaje exacto y K0 preservado.
 >
+> `FUNDAMENTALS-FILING-VALUATION`/#375 (`ADVANCES`) añade la consulta explícita de ejercicios y
+> filings anuales ya persistidos: opciones compactas, selector literal PIT y una valoración efímera
+> con las once fórmulas existentes, precio al corte y cero mezcla entre contextos. La fila
+> `FUNDAMENTALS-COVERAGE` permanece `NEXT`: no se declara mayor cobertura del último anual, no se
+> cierra la ruta y deuda, FX, trimestral IFRS y nuevas fuentes siguen fuera de este bloque.
+>
 > Las notas y cronologías fechadas de este documento son registro histórico. No describen un Issue
 > activo ni autorizan ejecución; la única autoridad de Work Block es el Issue abierto con
 > `workflow:active` resuelto desde GitHub vivo.

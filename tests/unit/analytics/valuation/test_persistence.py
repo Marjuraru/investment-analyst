@@ -9,6 +9,8 @@ import pytest
 from investment_analyst.analytics.valuation import (
     CorporateValuationPersistencePipeline,
     CorporateValuationRequest,
+    CorporateValuationSelectedFilingRequest,
+    CorporateValuationSelectedFilingSnapshot,
     CorporateValuationSnapshot,
     ValuationCoverage,
     ValuationMetricDefinition,
@@ -142,6 +144,91 @@ def _snapshot(*keys: str) -> CorporateValuationSnapshot:
             not_applicable=0,
         ),
     )
+
+
+def _selected_snapshot() -> CorporateValuationSelectedFilingSnapshot:
+    from investment_analyst.analytics.valuation.models import ValuationInput
+    from investment_analyst.core.models import DataFrequency
+
+    metric_key = "valuation.corporate.market_cap"
+    return CorporateValuationSelectedFilingSnapshot(
+        asset_id="equity:us:aapl",
+        request=CorporateValuationSelectedFilingRequest(
+            asset_id="equity:us:aapl",
+            known_at=_KNOWN_AT,
+            valuation_date=date(2026, 1, 30),
+            annual_period_end=date(2025, 9, 27),
+            filing_accession_number="0000320193-25-000079",
+            filing_accepted_at=_AVAILABLE_AT,
+            filing_form="10-K",
+            fiscal_year="2025",
+            fiscal_period="FY",
+        ),
+        status=ValuationSnapshotStatus.EVALUATED,
+        valuation_as_of=_AS_OF,
+        known_at=_KNOWN_AT,
+        computed_at=datetime(2026, 2, 2, tzinfo=UTC),
+        available_at=_AVAILABLE_AT,
+        annual_period_end=_PERIOD_END,
+        filing_date=_AVAILABLE_AT.date(),
+        filing_accepted_at=_AVAILABLE_AT,
+        filing_accession_number="0000320193-25-000079",
+        filing_form="10-K",
+        fiscal_year="2025",
+        fiscal_period="FY",
+        inputs=(
+            ValuationInput(
+                role="close_price",
+                observation_id=_INPUT_ID,
+                raw_record_id=UUID(int=100),
+                source_id="alpaca-market-data:iex:aapl:daily-bars:adjustment-all",
+                value=Decimal("1"),
+                unit="USD",
+                frequency=DataFrequency.DAY_1,
+                observed_at=_AS_OF,
+                available_at=_AVAILABLE_AT,
+            ),
+        ),
+        definitions=(
+            ValuationMetricDefinition(
+                metric_key=metric_key,
+                display_name_es=metric_key,
+                formula="close_price * shares_outstanding",
+                input_roles=("close_price", "shares_outstanding"),
+                unit="USD",
+                algorithm_version="corporate-valuation-selected-annual-filing-v1-decimal34",
+                definition_version="corporate-valuation-selected-filing-definition-v1",
+            ),
+        ),
+        metrics=(
+            ValuationMetricValue(
+                metric_key=metric_key,
+                status=ValuationStatus.EVALUATED,
+                value=Decimal("1"),
+                result_id=UUID(f"00000000-0000-8000-8000-{10:012d}"),
+                available_at=_AVAILABLE_AT,
+                input_observation_ids=(_INPUT_ID,),
+            ),
+        ),
+        coverage=ValuationCoverage(
+            total=1,
+            evaluated=1,
+            not_evaluable=0,
+            not_applicable=0,
+        ),
+        limitations=("Ejercicio anual elegido explícitamente.",),
+    )
+
+
+def test_selected_filing_snapshot_is_rejected_before_any_write() -> None:
+    storage = _Storage()
+    pipeline = CorporateValuationPersistencePipeline(storage)
+
+    with pytest.raises(ValueError, match="ephemeral and cannot be persisted"):
+        pipeline.persist(_selected_snapshot())  # type: ignore[arg-type]
+
+    assert storage.metric_definitions.rows == []
+    assert storage.metric_results.rows == []
 
 
 def test_persistence_is_deterministic_and_idempotent() -> None:
