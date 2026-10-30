@@ -56,6 +56,28 @@
 > activo ni autorizan ejecución; la única autoridad de Work Block es el Issue abierto con
 > `workflow:active` resuelto desde GitHub vivo.
 
+## Dirección de V1 (2026-10-30)
+
+La V1 es el recorrido local `catálogo/watchlist → actualización incremental → análisis → candidato →
+notificación → evidencia/exportación` sobre activos configurados compatibles. El mercado diario es la
+cadencia inicial; los fundamentales siguen la frecuencia que cada perfil soporta y los eventos sólo
+aparecen cuando existe fuente y disponibilidad reales. No promete todas las capacidades para las 37
+identidades: cada ausencia incompatible o no soportada se explica y la misma categoría no implica la
+misma disponibilidad de fuente.
+
+El alcance es finito y se ordena por dependencias en cinco entregas: alertas, cobertura y activos,
+ciclos y patrones, investigación predictiva y release. La contribución mínima de fundamentales es una
+selección PIT trazable por perfil, moneda y frecuencia —con base ADR cuando aplique— cuyas métricas
+usadas por las detecciones elegidas sean evaluables o declaren ausencia legítima. No exige 11/11
+universal ni trimestral IFRS inventado, y distingue carencia de producto de carencia de fuente.
+`FUNDAMENTALS-COVERAGE` permanece el único `NEXT`: este bloque lo avanza documentalmente, no lo
+cierra, no lo declara `DONE` y no publica Issues futuros.
+
+La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de crecimiento viven en
+[`basic_functional_release_plan.md`](basic_functional_release_plan.md).
+La implementación vigente de reglas, replay y entrega se reconcilia en
+[`automated_screening_alerts.md`](automated_screening_alerts.md).
+
 ## Prioridad operativa de 2026-10-27
 
 DATA-CHASSIS cerró con `DATA-CHASSIS-48`/#357 (`COMPLETES`) tras la reparación temporal R4, el delta físico de la vista packed compatible y el restore final verificado desde el padre retenido más los objetos remotos. `FUNDAMENTALS-COVERAGE` queda como el único `NEXT`. `FUNDAMENTALS-COVERAGE-READINESS`/#361 (`ADVANCES`) dejó v2 listo para retomar desarrollo: lecturas críticas acotadas, recuperación remota utilizable, espacio local seguro y documentación vigente. `FUNDAMENTALS-COVERAGE-CYCLE`/#363 (`ADVANCES`) avanza los prerrequisitos operativos sin cerrar la fila: ciclo semanal determinista con fines de semana, feriados y reintentos acotados; frecuencia IFRS no declarada explicada como `not_implemented`/`not_queried`; ausencias de valoración visibles; y precio PIT compartido entre cobertura y valoración. No declara más cobertura fundamental ni cierra la ruta. Se permite adquisición reciente y warm-up necesario mediante fuentes existentes; el archivo anterior no se re-descarga masivamente. Las cronologías inferiores conservan contexto histórico, no autoridad para sustituir esta secuencia.
@@ -531,7 +553,7 @@ La implementación se divide en:
    el 29 de julio de 2026 con motor trivaluado, replay, deduplicación, transiciones auditadas y
    cierre automático tras una recuperación completa del mismo trabajo—;
 2. reglas de mercado y fundamentales con métricas existentes —primer monitor local completado con
-   motor puro, contratos point-in-time, dos plantillas silenciosas, persistencia, deduplicación,
+   motor puro, contratos point-in-time, cuatro plantillas silenciosas, persistencia, deduplicación,
    confirmaciones, histéresis, cooldown, bandeja separada y conexión al scheduler solo ante
    evidencia nueva; también incluye editor versionado, restauración auditable, locking optimista y
    replay histórico acotado de frecuencia y ruido; queda ampliar el catálogo y observarlo durante
