@@ -238,6 +238,82 @@ del universo (`cazatiburones-universe-activity-v1` la devuelve presente en 19 de
 producto del refresh de actividad declarada que exige su propio Work Block; no se repara aquí ni propone fila
 nueva.
 
+## V1 — alcance finito y secuencia de entrega (2026-10-30)
+
+La V1 es el recorrido local definido en la hoja de ruta: catálogo/watchlist, actualización
+incremental, análisis, candidato, notificación y evidencia/exportación. Mercado diario primero;
+fundamentales según la frecuencia declarada de cada perfil; eventos sólo con fuente y disponibilidad
+reales. El universo inicial son los activos configurados compatibles: no se promete la misma
+capacidad para las 37 identidades ni se añade un ticker sin presupuesto, binding y evidencia en su
+bloque posterior. Toda ausencia incompatible o no soportada se explica en la matriz de cobertura.
+Este bloque no cambia el scheduler ni activa reglas.
+
+### Fundamentales mínimos y cierre futuro
+
+La contribución exigida a fundamentales es una selección PIT trazable por perfil, moneda y
+frecuencia, con base ADR documentada cuando aplique, y métricas evaluables —o ausencia legítima
+explicada— para las detecciones elegidas. No hay requisito 11/11 universal ni trimestral IFRS
+inventado; la carencia de producto y la carencia de fuente se registran por separado. Nueva
+extracción de filings, FX, deuda, saldos promedio o más métricas sólo se evalúa si bloquea una
+detección prioritaria; no es prerrequisito automático. El cierre futuro de la fila exige que la
+entrega de alertas demuestre esas métricas sobre su universo y que las ausencias restantes tengan
+motivo verificado; este bloque no lo declara cumplido ni reduce compromisos históricos.
+
+`route_transition:FUNDAMENTALS-COVERAGE:ADVANCES`
+
+### Secuencia táctica
+
+| Entrega | Salida | Dependencia | Pendiente | Candidato detallado |
+| --- | --- | --- | --- | --- |
+| `ALERTS-DELIVERY` | Cuatro reglas existentes verificadas sobre perfiles compatibles, un canal de entrega y explicación en la interfaz. | Monitor, outbox y bandeja integrados; runtime local activo. | Elegir un solo canal —local del sistema o equivalente— con UI cerrada y soporte WSL; no varias integraciones a la vez. | `ALERTS-DELIVERY` |
+| `COVERAGE-AND-ASSET-EXPANSION` | Brechas que impidan las detecciones elegidas cubiertas y un lote acotado de identidades compatibles. | `ALERTS-DELIVERY` y carencia demostrada. | Medir coste marginal antes del lote siguiente; no fijar un número arbitrario de activos como garantía. | `COVERAGE-AND-ASSET-EXPANSION` |
+| `CYCLES-AND-PATTERNS` | Primera definición reproducible de régimen y un conjunto pequeño de patrones diarios, con resultados posteriores separados de coincidencias. | Cobertura suficiente para el universo elegido. | No prometer valor predictivo por disponer de indicadores. | `CYCLES-AND-PATTERNS` |
+| `PREDICTIVE-RESEARCH` | Una hipótesis, universo y horizonte, agrupando P0–P1 de dataset y P2–P3 de baseline/validación; P4–P6 de explicación/calibración, sombra y promoción reversible cuando corresponda. | Rutas PIT y gates existentes. | Mantener todas las puertas; no elegir booster, LLM ni dependencias por anticipado. | `PREDICTIVE-RESEARCH` |
+| `V1-RELEASE` | Aceptación extremo a extremo en PC, presupuesto, recuperación y límites documentados. | Entregas anteriores y alertas operativas. | La predicción promovida es condicional a superar criterios, no un resultado garantizado ni una rebaja de la aspiración. | `V1-RELEASE` |
+
+Estas entregas no obligan a agotar todo `FUNDAMENTALS-COVERAGE` antes de las alertas. El PLAN
+siguiente resuelve expresamente su transición con evidencia y autoridad, sin falso `DONE`/`BLOCKED`
+ni un segundo `NEXT`. BVL y licencias, intradía ampliado, noticias, macro de larga historia, on-chain
+y LLM quedan condicionados a una necesidad concreta y no bloquean la utilidad inicial. Los candidatos
+de la tabla no se publican como Issues. El probe de `ALERTS-DELIVERY` es lectura de configuración y
+capacidades existentes, no adquisición general.
+
+### Objetivos V1
+
+Este bloque especifica métodos: no ejecuta campañas, no declara `MET` y no crea otro marco ni
+registro. Baseline y actual permanecen `UNKNOWN` salvo evidencia exacta reutilizable. Cuatro
+escenarios bastan para las fronteras pertinentes: sin novedad, con novedad, interrupción/reanudación
+y lote ampliado. No se añaden daemons, dashboards de telemetría, scans para medir ni suites de
+benchmark; ningún escenario se repite si el cambio no lo afecta.
+
+| Objetivo | Baseline → actual | Unidad | Universo y carga | Meta y comparador | Método y referencia |
+| --- | --- | --- | --- | --- | --- |
+| `V1-U1` cobertura | `UNKNOWN` → `UNKNOWN` | activos | activos solicitados y compatibles del catálogo en el mismo corte | (evaluables + explicados) / solicitados, con cobertura evaluable separada | `universe-coverage-v1` y recibos de adquisición; una ausencia nunca cuenta como evaluable |
+| `V1-U2` entrega | `UNKNOWN` → `UNKNOWN` | eventos y segundos | candidatos elegibles de un ciclo, outbox y un canal | elegible→outbox→acuse completo; cero duplicados por evento en replay/reanudación; demora mediana y máxima con tamaño muestral | outbox/bandeja y recibos existentes; el acuse de transporte no equivale a lectura humana |
+| `V1-U3` utilidad descriptiva | `UNKNOWN` → `UNKNOWN` | detecciones | detecciones y horizonte declarados, misma versión de regla | frecuencia y duplicación; resultado posterior por detección/horizonte sólo cuando exista módulo autorizado | replay acotado y evidencia persistida; descartado por humano no equivale a falso positivo financiero |
+| `V1-U4` predicción | `UNKNOWN` → `UNKNOWN` | métrica de validación | hipótesis, universo y horizonte fijados antes del experimento | comparación fuera de muestra con baseline, incertidumbre/calibración pertinente y estabilidad | label, umbral de promoción y tolerancia se fijan antes; hoy no existe modelo validado ni porcentaje de avance |
+| `V1-U5` tiempo y memoria | `UNKNOWN` → `UNKNOWN` | segundos y bytes | misma release, proceso/cgroup, universo, corte e inputs | mediana y máximo con tamaño muestral; demoras separadas fuente→adquisición→evaluación→entrega | colector existente; no p95 con pocas muestras ni pico de vida atribuido a un job; los límites vigentes se heredan y cualquier SLA nuevo queda para el PLAN de implementación |
+| `V1-U6` espacio | `UNKNOWN` → `UNKNOWN` | bytes | host y WSL medidos por separado; DB+WAL y almacenamiento físico restante | coste marginal por lote; proyección 30/90 días declarada estimación | colector y reportes existentes; adquisición inicial, ordinaria, revisiones, derivados, logs, backup, releases y scratch separados; día no observado no es cero y un checkpoint no es adquisición |
+
+### Disciplina de crecimiento
+
+Cada ampliación presenta bytes iniciales y ordinarios, pico coexistente y reserva antes de escribir,
+conforme a la receta única de presupuesto y retención de
+[`development_protocol.md`](development_protocol.md). Se evitan descargas masivas, copias de DB/venv y
+un dataset por experimento: se usa una evidencia versionada reutilizable. La selección histórica
+alcanza para contrato y warm-up; nunca se trunca para aparentar eficiencia. Las nuevas identidades se
+eligen por perfil, fuente y frecuencia. La inferencia consume evidencia nueva y el entrenamiento se
+separa del polling; SHAP no se calcula para todo el universo. Las métricas se reutilizan por
+identidad sin duplicación financiera por reloj y los recibos legítimos se contabilizan aparte. Los
+temporales se retiran tras su último consumidor y nunca se borra evidencia única o historial para
+cumplir una meta.
+
+Toda desviación futura registra problema probado, efecto sobre la entrega, cambio mínimo de
+alcance/presupuesto y criterio de salida; sólo blockers reales o riesgos críticos extienden un
+bloque, y las oportunidades opcionales van al backlog sin una cola de microbloques por archivo. Este
+bloque cierra al integrar los tres documentos coherentes y completar o verificar la entrega local
+autorizada; no espera series operacionales futuras ni inventa pruebas para documentos.
+
 ## Diagnóstico histórico de la estructura
 
 Las carencias descritas aquí no forman el backlog vivo: contrastar con la tabla de ruta integrada y el plan de arranque. En particular, los privilegios por activo y el corpus SEC ya tienen avances/cierres posteriores documentados.

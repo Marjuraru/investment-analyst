@@ -308,7 +308,8 @@ Orden recomendado:
 Los canales externos requieren un bloque posterior y configuración local secreta. Ninguna
 credencial se escribe en la regla, workspace analítico, JSON público o logs. La outbox local actual
 no transmite contenido fuera del proceso; los adaptadores de entrega futuros deberán persistir antes
-del envío y reintentar sin duplicar.
+del envío y reintentar sin duplicar. Un canal local del sistema o del navegador tampoco está
+operativo: la primera entrega real pertenece a `ALERTS-DELIVERY`.
 
 ## IA cualitativa opcional
 
@@ -356,15 +357,18 @@ por frescura y presupuestos observados por proveedor sin alterar resultados ya p
 
 ### Etapa B — Screening analítico
 
-Primer corte determinista implementado localmente el 29 de julio de 2026:
+Primer corte determinista implementado localmente el 29 de julio de 2026; el catálogo empaquetado se
+amplió después hasta las cuatro plantillas actuales:
 
 - contratos estrictos de regla, condición, solicitud, resultado trivaluado y evidencia;
 - motor puro sin I/O que recibe una instantánea métrica ya seleccionada point-in-time;
 - validación de activo, clase, fuente, período común, disponibilidad, algoritmo, unidad, parámetros
   y calidad;
 - identidad reproducible independiente de `computed_at`;
-- plantilla silenciosa de actividad relativa de mercado para acciones, ETF y cripto;
-- plantilla silenciosa trimestral de balance, margen y crecimiento para acciones;
+- cuatro plantillas empaquetadas `SILENT`: actividad relativa de mercado para acciones, ETF y cripto;
+  RSI Wilder bajo; histograma MACD positivo; y balance, margen y crecimiento trimestral para acciones;
+- defaults `SILENT` versionados en el catálogo; Cazatiburones conserva sus reglas separadas y ninguna
+  plantilla se activa por el solo hecho de estar integrada;
 - ausencia como `not_evaluable`, sin convertirla en cero;
 - mercado y fundamentales evaluados por separado, sin score ni recomendación;
 - persistencia atómica de resultados, recibos por intento, candidatos y transiciones;
@@ -404,6 +408,21 @@ missingness en cero.
 - línea temporal;
 - resumen cualitativo opcional;
 - presupuestos y auditoría de IA.
+
+## Estado reconciliado y medidas V1 (2026-10-30)
+
+Integrado no equivale a desplegado ni operacional. Los bytes base contienen el monitor, la outbox
+local, la bandeja y cuatro plantillas `SILENT`; no contienen un canal local del sistema, de navegador
+o externo operativo, ni una cadena predictiva validada. `analytical_backtest` reproduce
+coincidencias, frecuencia y cobertura sobre 20–500 cortes persistidos; no calcula retorno posterior,
+rentabilidad ni precisión predictiva. Este bloque documental no cambia reglas, scheduler ni
+almacenamiento.
+
+Las medidas de entrega y utilidad descriptiva son `V1-U2` y `V1-U3` en
+[`basic_functional_release_plan.md`](basic_functional_release_plan.md). Permanecen
+`UNKNOWN` hasta una ejecución real con el mismo release, universo y corte; un acuse de transporte no
+se presenta como lectura humana y un candidato descartado por el analista no se contabiliza como
+falso positivo financiero.
 
 ## Validación
 
