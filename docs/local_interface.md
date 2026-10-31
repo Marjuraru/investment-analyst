@@ -858,10 +858,11 @@ correctamente y con cobertura completa resuelve también, con actor `system_reco
 anteriores del mismo job. Esta recuperación no elimina la evidencia histórica ni permite que un
 éxito parcial o de otro job cierre una incidencia.
 
-La primera entrega no evalúa oportunidades financieras ni envía Telegram, correo o notificaciones
-del sistema. La bandeja local recomienda revisar la evidencia operativa; no recomienda comprar o
-vender. El monitor trabaja con el intento ya persistido: no carga gráficos, no abre el frontend, no
-consulta proveedores y funciona con el navegador cerrado.
+La primera entrega de incidencias operativas no evalúa oportunidades financieras ni envía Telegram o
+correo; el canal Windows pertenece a la bandeja de candidatos y permanece cerrado por defecto. La
+bandeja local recomienda revisar la evidencia operativa; no recomienda comprar o vender. El monitor
+trabaja con el intento ya persistido: no carga gráficos, no abre el frontend, no consulta proveedores
+y funciona con el navegador cerrado.
 
 ## Reglas y replay analítico
 
@@ -901,6 +902,15 @@ entrega con el equipo apagado.
 minuto. Envía un aviso rotulado **PRUEBA — sin señal de inversión**, no crea un candidato
 financiero ficticio y registra aceptación o causa. Un estado `accepted` significa que Windows aceptó
 el transporte, no que la persona lo haya visto; `unknown` nunca se reenvía automáticamente.
+
+Estado observado el 2026-10-31 con el release `200db2d6` desplegado: `GET /api/v1/desktop-notifications`
+respondió 200 con el canal deshabilitado, cero entregas y 370 B de estado. Una única prueba fue
+aceptada por Windows desde el proceso del servicio y el canal se restituyó a `enabled=false`
+conservando su resultado. Los assets `/assets/app-operations.js` y `/assets/app-analysis.js` servidos
+coinciden byte a byte con el release; el selector de filing devolvió seis opciones anuales PIT para
+AAPL y los horizontes anuales respondieron 200 con seis filas (cinco completas y una incompleta
+declarada) y trazabilidad verificada. Sin navegador controlable en el host, la lectura visual
+permanece `UNKNOWN`: no se afirma renderizado inspeccionado.
 
 ## Servicio persistente con systemd
 

@@ -51,6 +51,13 @@
 > se cierra la ruta y conceptos monetarios ausentes, retornos con balances promedio y nuevas fuentes
 > siguen pendientes.
 >
+> `ALERTS-OPERATIONAL-ADOPTION`/#383 (`ADVANCES`, sin cierre) despliega la base integrada
+> `200db2d6` en el runtime local: activa el canal `windows_toast` sólo para una prueba de transporte
+> acotada y restituye `enabled=false`. Evidencia: unidad y SHA coincidentes, HTTP 200, `accepted=true`
+> desde el servicio, cero entregas financieras y fingerprints de preferencias/reglas sin cambio. La
+> fila `FUNDAMENTALS-COVERAGE` permanece `NEXT`: la adopción operacional no declara cobertura completa
+> ni precisión predictiva.
+>
 > Las notas siguientes y las narrativas fechadas de este documento son registro histórico. No
 > describen un Issue activo ni autorizan ejecución: la única autoridad de Work Block es el Issue
 > abierto con `workflow:active` resuelto desde GitHub vivo.
@@ -269,15 +276,17 @@ incompatibles, persiste intención antes del envío y trata timeout o resultado 
 total de 8 MiB y 10 000 entregas; un lote envía como máximo cinco avisos con un proceso PowerShell y
 un ritmo de un lote por minuto.
 
-La integración no demuestra entrega real: eso exige el smoke post-despliegue y la observación del
-mismo release. `FUNDAMENTALS-COVERAGE` permanece el único `NEXT`; no se declara `DONE`, `MET`,
+`ALERTS-OPERATIONAL-ADOPTION`/#383 completó esa entrega: el release `200db2d6` está desplegado,
+`GET /api/v1/desktop-notifications` responde 200 y una prueba de transporte fue aceptada por Windows
+desde el servicio (`accepted=true`), con el canal restituido a deshabilitado y cero entregas
+financieras. `FUNDAMENTALS-COVERAGE` permanece el único `NEXT`; no se declara `DONE`, `MET`,
 cobertura completa ni otro `NEXT`, y no se añade un segundo canal.
 
 ### Secuencia táctica
 
 | Entrega | Salida | Dependencia | Pendiente | Candidato detallado |
 | --- | --- | --- | --- | --- |
-| ALERTS-DELIVERY | Cuatro reglas existentes verificadas sobre perfiles compatibles, un canal local Windows integrado y explicación en la interfaz. | Monitor, outbox y bandeja integrados; runtime local activo. | El canal queda cerrado por defecto; falta la entrega real post-despliegue y su observación. No añadir un segundo canal. | `ALERTS-DELIVERY` |
+| ALERTS-DELIVERY | Cuatro reglas existentes verificadas sobre perfiles compatibles, un canal local Windows integrado y explicación en la interfaz. | Monitor, outbox y bandeja integrados; runtime local activo. | El canal queda cerrado por defecto; entrega real observada una vez desde el release desplegado y configuración restituida. No añadir un segundo canal. | `ALERTS-DELIVERY` |
 | COVERAGE-AND-ASSET-EXPANSION | Brechas que impidan las detecciones elegidas cubiertas y un lote acotado de identidades compatibles. | `ALERTS-DELIVERY` y carencia demostrada. | Medir coste marginal antes del lote siguiente; no fijar un número arbitrario de activos como garantía. | `COVERAGE-AND-ASSET-EXPANSION` |
 | CYCLES-AND-PATTERNS | Primera definición reproducible de régimen y un conjunto pequeño de patrones diarios, con resultados posteriores separados de coincidencias. | Cobertura suficiente para el universo elegido. | No prometer valor predictivo por disponer de indicadores. | `CYCLES-AND-PATTERNS` |
 | PREDICTIVE-RESEARCH | Una hipótesis, universo y horizonte, agrupando P0–P1 de dataset y P2–P3 de baseline/validación; P4–P6 de explicación/calibración, sombra y promoción reversible cuando corresponda. | Rutas PIT y gates existentes. | Mantener todas las puertas; no elegir booster, LLM ni dependencias por anticipado. | `PREDICTIVE-RESEARCH` |

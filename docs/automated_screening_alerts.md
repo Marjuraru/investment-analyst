@@ -83,12 +83,19 @@ empaquetado continúa siendo la fuente de contratos inmutables —métrica, oper
 unidad, parámetros y calidad—; la interfaz solo permite modificar estado, umbrales,
 confirmaciones y cooldown.
 
-### Canal local Windows (integrado, deshabilitado por defecto)
+### Canal local Windows (desplegado, deshabilitado por defecto)
 
 `ALERTS-DELIVERY` integra un único canal local de transporte, literal `windows_toast`, con
 contratos estrictos `desktop-notification-config-v1`, `desktop-notification-delivery-v1` y
 `desktop-notification-status-v1`. Vive en `state/desktop_notifications/` y no modifica candidatos,
 reglas, outbox, métricas ni almacenamiento financiero.
+
+`ALERTS-OPERATIONAL-ADOPTION` desplegó ese código integrado: el release `200db2d6` está activo desde
+el 2026-10-31 y una única prueba `PRUEBA — sin señal de inversión` fue aceptada por Windows desde el
+proceso del servicio (`accepted=true`, 1022 ms de ida y vuelta HTTP). La capacidad quedó verificada y
+el canal se restituyó a `enabled=false` en la misma ventana; no se observó lectura humana ni se
+entregó un candidato financiero. Es evidencia de transporte local: no acredita latencia estadística,
+cobertura universal ni precisión predictiva.
 
 - **Identidad.** `delivery_id` es UUID5 determinista sobre namespace constante, `workspace_uuid`,
   `notification_id`, canal y versión. `tag` y `group` de Windows son las dos mitades hexadecimales
@@ -434,7 +441,8 @@ antes de habilitar cualquier canal externo.
 
 - consumir las métricas de valoración point-in-time ya persistidas por el dominio independiente;
 - reglas de valoración;
-- notificación local del sistema (integrada por `ALERTS-DELIVERY`, no desplegada por este bloque);
+- notificación local del sistema (integrada y desplegada por `ALERTS-DELIVERY`; prueba de transporte
+  aceptada y canal restituido a cerrado);
 - Telegram, correo y resumen diario como canales futuros;
 - outbox reanudable.
 
@@ -449,11 +457,12 @@ missingness en cero.
 - resumen cualitativo opcional;
 - presupuestos y auditoría de IA.
 
-## Estado reconciliado y medidas V1 (2026-10-30)
+## Estado reconciliado y medidas V1 (2026-10-31)
 
-Integrado no equivale a desplegado ni operacional. El candidato de `ALERTS-DELIVERY` añade el canal
-local Windows cerrado por defecto, con identidad propia, journal append-only y presupuesto acotado;
-la entrega real y su observación pertenecen a la etapa de despliegue posterior. Los bytes base
+Integrado no equivale a desplegado ni operacional. El release `200db2d6` desplegado el 2026-10-31
+contiene el canal local Windows cerrado por defecto, con identidad propia, journal append-only y
+presupuesto acotado; una prueba de transporte fue aceptada desde el servicio y el canal se restituyó
+a deshabilitado. No existe entrega financiera real ni lectura humana observada. Los bytes base
 anteriores contienen el monitor, la outbox local, la bandeja y cuatro plantillas `SILENT`; no
 contienen un canal de navegador o externo operativo ni una cadena predictiva validada.
 `analytical_backtest` reproduce coincidencias, frecuencia y cobertura sobre 20–500 cortes
