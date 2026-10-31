@@ -1,6 +1,7 @@
 """Tests for versioned local analytical rule configuration."""
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,8 @@ from investment_analyst.alerts.analytical_rule_catalog import (
     INITIAL_ANALYTICAL_RULES,
     INITIAL_ANNUAL_FUNDAMENTAL_RULE,
     INITIAL_MARKET_ACTIVITY_RULE,
+    MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE,
+    RSI_INCREMENTAL_LOW_REVIEW_RULE,
 )
 from investment_analyst.alerts.analytical_rule_registry import (
     AnalyticalConditionConfigurationUpdate,
@@ -57,17 +60,23 @@ def test_registry_uses_packaged_defaults_without_creating_state(tmp_path: Path) 
 
     assert not path.exists()
     assert snapshot.total_revisions == 0
-    assert len(snapshot.configurations) == 5
+    assert len(snapshot.configurations) == 7
     assert tuple(item.rule for item in snapshot.configurations) == INITIAL_ANALYTICAL_RULES
     assert all(not item.customized for item in snapshot.configurations)
 
 
-def test_registry_adopts_fifth_default_without_rewriting_existing_revision(tmp_path: Path) -> None:
+def test_registry_adopts_incremental_defaults_without_rewriting_existing_revision(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "rules.json"
     legacy_defaults = tuple(
         rule
         for rule in INITIAL_ANALYTICAL_RULES
-        if rule.rule_id != INITIAL_ANNUAL_FUNDAMENTAL_RULE.rule_id
+        if rule.rule_id
+        not in {
+            RSI_INCREMENTAL_LOW_REVIEW_RULE.rule_id,
+            MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE.rule_id,
+        }
     )
     legacy = AnalyticalRuleRegistryStore(path, legacy_defaults)
     legacy.update(
@@ -79,12 +88,18 @@ def test_registry_adopts_fifth_default_without_rewriting_existing_revision(tmp_p
     snapshot = restarted.snapshot()
     market = restarted.get(INITIAL_MARKET_ACTIVITY_RULE.rule_id)
 
-    assert len(snapshot.configurations) == 5
+    assert len(snapshot.configurations) == 7
     assert snapshot.total_revisions == 1
     assert market.rule_version == "1.0.local.1"
     assert str(market.conditions[0].threshold) == "2.0"
     assert restarted.get(INITIAL_ANNUAL_FUNDAMENTAL_RULE.rule_id) == (
         INITIAL_ANNUAL_FUNDAMENTAL_RULE
+    )
+    assert restarted.get(RSI_INCREMENTAL_LOW_REVIEW_RULE.rule_id) == (
+        RSI_INCREMENTAL_LOW_REVIEW_RULE
+    )
+    assert restarted.get(MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE.rule_id) == (
+        MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE
     )
 
 
@@ -218,3 +233,43 @@ def test_registry_validates_hysteresis_numbers_and_corrupt_history(tmp_path: Pat
     path.write_text("not-json", encoding="utf-8")
     with pytest.raises(AaplOperationalStateError, match="malformed"):
         store.load()
+
+
+def test_registry_customizes_incremental_rule_without_touching_legacy_defaults(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rules.json"
+    store = AnalyticalRuleRegistryStore(path, INITIAL_ANALYTICAL_RULES)
+    current = store.get(RSI_INCREMENTAL_LOW_REVIEW_RULE.rule_id)
+
+    outcome = store.update(
+        AnalyticalRuleConfigurationUpdate(
+            rule_id=current.rule_id,
+            expected_fingerprint=current.semantic_fingerprint(),
+            state=AnalyticalRuleState.SILENT,
+            confirmations_required=3,
+            cooldown_seconds=172_800,
+            conditions=(
+                AnalyticalConditionConfigurationUpdate(
+                    condition_id=current.conditions[0].condition_id,
+                    threshold="28",
+                    exit_threshold="32",
+                ),
+            ),
+        ),
+        recorded_at=_RECORDED_AT,
+    )
+    restarted = AnalyticalRuleRegistryStore(path, INITIAL_ANALYTICAL_RULES)
+    updated = restarted.get(RSI_INCREMENTAL_LOW_REVIEW_RULE.rule_id)
+
+    assert outcome.changed is True
+    assert updated.rule_version == "1.0.local.1"
+    assert updated.conditions[0].threshold == Decimal("28")
+    assert updated.conditions[0].exit_threshold == Decimal("32")
+    assert updated.confirmations_required == 3
+    assert updated.cooldown_seconds == 172_800
+    assert restarted.get(INITIAL_MARKET_ACTIVITY_RULE.rule_id) == (INITIAL_MARKET_ACTIVITY_RULE)
+    assert restarted.get(MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE.rule_id) == (
+        MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE
+    )
+    assert restarted.snapshot().total_revisions == 1

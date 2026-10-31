@@ -3672,6 +3672,23 @@ def test_local_api_versions_rule_updates_and_rejects_stale_edits(tmp_path: Path)
 
     assert initial_status == 200
     assert initial["total_revisions"] == 0
+    assert len(initial["configurations"]) == 7
+    initial_by_id = {item["rule"]["rule_id"]: item for item in initial["configurations"]}
+    assert set(initial_by_id) == {rule.rule_id for rule in INITIAL_ANALYTICAL_RULES}
+    assert all(item["customized"] is False for item in initial["configurations"])
+    assert (
+        initial_by_id["market.technical.rsi-incremental-low-review"]["rule"]["conditions"][0][
+            "algorithm_version"
+        ]
+        == "market-rsi-incremental-v2-decimal34"
+    )
+    assert (
+        initial_by_id["market.technical.macd-incremental-positive-histogram-review"]["rule"][
+            "conditions"
+        ][0]["algorithm_version"]
+        == "market-macd-incremental-v2-decimal34"
+    )
+    assert initial_by_id["market.technical.rsi-incremental-low-review"]["rule"]["state"] == "silent"
     assert changed_status == 200
     assert changed["changed"] is True
     assert changed["configuration"]["rule"]["rule_version"] == "1.0.local.1"

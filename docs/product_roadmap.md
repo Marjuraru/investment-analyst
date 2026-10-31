@@ -1,6 +1,6 @@
 # Hoja de ruta estratégica del producto
 
-> Estado vigente 2026-10-30: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
+> Estado vigente 2026-10-31: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
 > `NEXT`. La readiness operativa v2 se registra en
 > [`v2_operational_readiness.md`](v2_operational_readiness.md): avanza prerrequisitos de interfaz,
 > lectura, limpieza y entrega, sin declarar cobertura fundamental nueva ni cerrar la ruta. La
@@ -107,6 +107,19 @@ completa.
 > legacy exigen `v1`: no son evaluables por contrato y esa ausencia tiene causa explícita; la regla
 > de volumen relativo sí evaluó (QQQ `2,5827`; SOL `2,3596`). La fila sigue `NEXT`; no se declara
 > `MET`, cobertura completa, recomendación ni precisión predictiva.
+>
+> `SCREENING-INCREMENTAL-COMPATIBILITY`/#387 (`ADVANCES`, sin cierre) añade dos plantillas
+> incrementales `SILENT` al catálogo, que pasa de cinco a siete. Las cinco anteriores conservan
+> bytes, fingerprints, versiones, defaults y overrides; las nuevas aceptan exclusivamente
+> `market-rsi-incremental-v2-decimal34` y `market-macd-incremental-v2-decimal34`, sin alias ni
+> migración automática. El monitor reutiliza las claves RSI/histograma ya consultadas, el editor las
+> muestra por nombre/versión y el replay las acepta por `rule_id`. Evidencia real READ_ONLY en el
+> workspace `70c64668…`: seis combinaciones QQQ/SOL/AAPL evaluables, RSI
+> `35.004533…`/`31.466109…`/`55.515477…` e histograma
+> `-3.081330…`/`-0.718932…`/`-0.211784…`, todas `not_met` en el último corte; 35/47/11 cortes
+> disponibles por replay y cero escrituras. La fila `FUNDAMENTALS-COVERAGE` sigue `NEXT`; `V1-U1`
+> mejora la elegibilidad técnica, mientras `V1-U3` y `V1-U4` siguen sin resultados posteriores ni
+> validación predictiva.
 
 ## Prioridad operativa de 2026-10-27
 

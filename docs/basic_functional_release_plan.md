@@ -1,6 +1,6 @@
 # Plan de cierre de la versión básica funcional
 
-> Estado vigente 2026-10-30: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
+> Estado vigente 2026-10-31: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
 > `NEXT`. La readiness operativa v2 ([`v2_operational_readiness.md`](v2_operational_readiness.md))
 > avanza sus prerrequisitos de interfaz, lectura, limpieza y entrega; no declara cobertura
 > fundamental nueva ni cierra la ruta. La adopción operacional de
@@ -72,6 +72,18 @@
 > `incremental-v2` no son evaluables por las reglas legacy `v1`; la causa queda explícita y la
 > regla de volumen relativo sí evaluó (QQQ `2,5827`; SOL `2,3596`). La fila sigue `NEXT`; no hay
 > `MET`, cobertura completa, recomendación ni precisión predictiva.
+>
+> `SCREENING-INCREMENTAL-COMPATIBILITY`/#387 (`ADVANCES`, sin cierre) añade dos plantillas
+> incrementales `SILENT` al catálogo (cinco → siete) sin modificar las cinco anteriores ni migrar
+> sus configuraciones. Las nuevas aceptan exclusivamente `market-rsi-incremental-v2-decimal34` y
+> `market-macd-incremental-v2-decimal34`; el monitor reutiliza las claves RSI/histograma ya
+> solicitadas, el editor las muestra por nombre/versión y el replay las acepta por `rule_id`.
+> Evidencia real READ_ONLY en el workspace `70c64668…`: seis combinaciones QQQ/SOL/AAPL evaluables,
+> RSI `35.004533…`/`31.466109…`/`55.515477…` e histograma
+> `-3.081330…`/`-0.718932…`/`-0.211784…`, todas `not_met` en el último corte; 35/47/11 cortes
+> disponibles por replay y cero escrituras. `FUNDAMENTALS-COVERAGE` sigue `NEXT`; `V1-U1` mejora la
+> elegibilidad técnica, `V1-U3` sigue sin resultados posteriores y `V1-U4` sin validación
+> predictiva.
 >
 > Las notas siguientes y las narrativas fechadas de este documento son registro histórico. No
 > describen un Issue activo ni autorizan ejecución: la única autoridad de Work Block es el Issue

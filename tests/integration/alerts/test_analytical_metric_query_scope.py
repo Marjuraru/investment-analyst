@@ -12,11 +12,14 @@ from investment_analyst.alerts.analytical_backtest import (
     AnalyticalBacktestResult,
     AnalyticalBacktestService,
 )
+from investment_analyst.alerts.analytical_models import AnalyticalScreeningRule
 from investment_analyst.alerts.analytical_monitor import AnalyticalScreeningMonitor
 from investment_analyst.alerts.analytical_rule_catalog import (
     INITIAL_ANALYTICAL_RULES,
     INITIAL_ANNUAL_FUNDAMENTAL_RULE,
     INITIAL_MARKET_ACTIVITY_RULE,
+    MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE,
+    RSI_INCREMENTAL_LOW_REVIEW_RULE,
 )
 from investment_analyst.alerts.analytical_rule_registry import AnalyticalRuleRegistryStore
 from investment_analyst.alerts.analytical_state import (
@@ -47,6 +50,12 @@ _FUNDAMENTAL_METRICS = {
     "fundamental.net_margin": "sec-fundamental-net-margin-v1-decimal34",
     "fundamental.revenue_yoy_growth": "sec-fundamental-revenue-yoy-growth-v1-decimal34",
 }
+_RSI_KEY = "market.technical.rsi"
+_MACD_HISTOGRAM_KEY = "market.technical.macd.histogram"
+_RSI_LEGACY_ALGORITHM = "market-rsi-wilder-v1-decimal34"
+_RSI_INCREMENTAL_ALGORITHM = "market-rsi-incremental-v2-decimal34"
+_MACD_LEGACY_ALGORITHM = "market-macd-v1-decimal34"
+_MACD_INCREMENTAL_ALGORITHM = "market-macd-incremental-v2-decimal34"
 
 
 def _metric(
@@ -120,6 +129,55 @@ def _v2_metric(
         parameters=parameters,
         input_observation_ids=input_observation_ids,
         algorithm_version=_METRIC_ALGORITHM if is_relevant else "unused-v1",
+        quality=DataQuality.PARTIAL,
+    )
+
+
+def _technical_scope_metric(
+    value: str,
+    *,
+    identifier: int,
+    metric_key: str,
+    algorithm_version: str,
+    unit: str,
+    parameters: dict[str, object],
+    version_two: bool,
+    as_of: datetime,
+    known_at: datetime,
+) -> MetricResult:
+    input_observation_ids = [UUID(f"73000000-0000-4000-8000-{identifier:012d}")]
+    if version_two:
+        scoped_parameters = {"source_id": _SOURCE_ID, **parameters}
+        result_id = metric_result_id_v2(
+            asset_id=_ASSET_ID,
+            metric_key=metric_key,
+            input_observation_ids=input_observation_ids,
+            algorithm_version=algorithm_version,
+            as_of=as_of,
+            available_at=known_at,
+            unit=unit,
+            quality=DataQuality.PARTIAL,
+            parameters=scoped_parameters,
+        )
+    else:
+        scoped_parameters = {
+            "source_id": _SOURCE_ID,
+            "known_at": known_at.isoformat(),
+            **parameters,
+        }
+        result_id = UUID(f"70000000-0000-4000-8000-{identifier:012d}")
+    return MetricResult(
+        result_id=result_id,
+        asset_id=_ASSET_ID,
+        metric_key=metric_key,
+        value=Decimal(value),
+        unit=unit,
+        as_of=as_of,
+        available_at=known_at,
+        computed_at=known_at,
+        parameters=scoped_parameters,
+        input_observation_ids=input_observation_ids,
+        algorithm_version=algorithm_version,
         quality=DataQuality.PARTIAL,
     )
 
@@ -343,6 +401,53 @@ def _run_monitor(
 
     assert len(observed_rows) == 1
     return store.load(), observed_rows[0]
+
+
+def _run_monitor_catalog(
+    root: Path,
+    metrics: tuple[MetricResult, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    rules: tuple[AnalyticalScreeningRule, ...],
+) -> tuple[AnalyticalScreeningState, list[tuple[str, ...] | None], list[int]]:
+    service, paths, runtime = _seed(root, metrics)
+    store = AnalyticalScreeningStateStore(paths.state_root / "analytical.json")
+    observed_keys: list[tuple[str, ...] | None] = []
+    observed_rows: list[int] = []
+    original_list = DuckDBMetricResultRepository.list
+
+    def tracked_list(
+        repository: DuckDBMetricResultRepository,
+        *,
+        asset_id: str | None = None,
+        metric_key: str | None = None,
+        metric_keys: tuple[str, ...] | None = None,
+        as_of_from: datetime | None = None,
+        as_of_to: datetime | None = None,
+    ) -> list[MetricResult]:
+        observed_keys.append(metric_keys)
+        results = original_list(
+            repository,
+            asset_id=asset_id,
+            metric_key=metric_key,
+            metric_keys=metric_keys,
+            as_of_from=as_of_from,
+            as_of_to=as_of_to,
+        )
+        observed_rows.append(len(results))
+        return results
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DuckDBMetricResultRepository, "list", tracked_list)
+        AnalyticalScreeningMonitor(
+            store,
+            runtime,
+            paths.root,
+            rules,
+            clock=lambda: datetime(2026, 7, 29, 12, 3, tzinfo=UTC),
+        )(_attempt(datetime(2026, 7, 29, 12, tzinfo=UTC)))
+
+    return store.load(), observed_keys, observed_rows
 
 
 def _run_backtest(
@@ -649,3 +754,99 @@ def test_bounded_reads_keep_v2_rows_reachable_for_monitor_and_backtest(
     assert backtest_rows == 1
     assert replayed.total_available_cuts == 1
     assert replayed.evaluations[0].result.conditions[0].metric_result_id == metrics[0].result_id
+
+
+def test_seven_rule_catalog_keeps_the_same_market_query_and_adds_two_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    known_at = datetime(2026, 7, 29, 12, tzinfo=UTC)
+    as_of = datetime(2026, 7, 28, tzinfo=UTC)
+    metrics = (
+        _metric("2.0", identifier=1, as_of=as_of, known_at=known_at),
+        _technical_scope_metric(
+            "25",
+            identifier=2,
+            metric_key=_RSI_KEY,
+            algorithm_version=_RSI_LEGACY_ALGORITHM,
+            unit="index",
+            parameters={"window": 14},
+            version_two=False,
+            as_of=as_of,
+            known_at=known_at,
+        ),
+        _technical_scope_metric(
+            "24",
+            identifier=3,
+            metric_key=_RSI_KEY,
+            algorithm_version=_RSI_INCREMENTAL_ALGORITHM,
+            unit="index",
+            parameters={"window": 14},
+            version_two=True,
+            as_of=as_of,
+            known_at=known_at,
+        ),
+        _technical_scope_metric(
+            "0.5",
+            identifier=4,
+            metric_key=_MACD_HISTOGRAM_KEY,
+            algorithm_version=_MACD_LEGACY_ALGORITHM,
+            unit="USD",
+            parameters={"fast_window": 12, "slow_window": 26, "signal_window": 9},
+            version_two=False,
+            as_of=as_of,
+            known_at=known_at,
+        ),
+        _technical_scope_metric(
+            "0.7",
+            identifier=5,
+            metric_key=_MACD_HISTOGRAM_KEY,
+            algorithm_version=_MACD_INCREMENTAL_ALGORITHM,
+            unit="USD",
+            parameters={"fast_window": 12, "slow_window": 26, "signal_window": 9},
+            version_two=True,
+            as_of=as_of,
+            known_at=known_at,
+        ),
+    )
+    incremental_ids = {
+        RSI_INCREMENTAL_LOW_REVIEW_RULE.rule_id,
+        MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE.rule_id,
+    }
+    legacy_rules = tuple(
+        rule for rule in INITIAL_ANALYTICAL_RULES if rule.rule_id not in incremental_ids
+    )
+
+    legacy_state, legacy_keys, legacy_rows = _run_monitor_catalog(
+        tmp_path / "catalog-legacy",
+        metrics,
+        monkeypatch,
+        rules=legacy_rules,
+    )
+    full_state, full_keys, full_rows = _run_monitor_catalog(
+        tmp_path / "catalog-full",
+        metrics,
+        monkeypatch,
+        rules=INITIAL_ANALYTICAL_RULES,
+    )
+
+    expected_keys = tuple(sorted({_METRIC_KEY, _RSI_KEY, _MACD_HISTOGRAM_KEY}))
+    assert legacy_keys == full_keys == [expected_keys]
+    assert legacy_rows == full_rows == [len(metrics)]
+    legacy_by_rule = {result.rule.rule_id: result for result in legacy_state.results}
+    full_by_rule = {result.rule.rule_id: result for result in full_state.results}
+    assert set(legacy_by_rule) == {
+        "market.activity.relative-volume-review",
+        "market.technical.macd-positive-histogram-review",
+        "market.technical.rsi-low-review",
+    }
+    assert set(full_by_rule) == set(legacy_by_rule) | incremental_ids
+    assert {rule_id: full_by_rule[rule_id].result_id for rule_id in legacy_by_rule} == {
+        rule_id: result.result_id for rule_id, result in legacy_by_rule.items()
+    }
+    assert all(result.asset_id == _ASSET_ID for result in full_state.results)
+    assert {
+        condition.metric_result_id
+        for result in full_state.results
+        for condition in result.conditions
+    } <= {metric.result_id for metric in metrics}

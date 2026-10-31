@@ -405,16 +405,17 @@ por frescura y presupuestos observados por proveedor sin alterar resultados ya p
 ### Etapa B — Screening analítico
 
 Primer corte determinista implementado localmente el 29 de julio de 2026; el catálogo empaquetado se
-amplió después hasta las cinco plantillas actuales:
+amplió después hasta las siete plantillas actuales:
 
 - contratos estrictos de regla, condición, solicitud, resultado trivaluado y evidencia;
 - motor puro sin I/O que recibe una instantánea métrica ya seleccionada point-in-time;
 - validación de activo, clase, fuente, período común, disponibilidad, algoritmo, unidad, parámetros
   y calidad;
 - identidad reproducible independiente de `computed_at`;
-- cinco plantillas empaquetadas `SILENT`: actividad relativa de mercado para acciones, ETF y cripto;
-  RSI Wilder bajo; histograma MACD positivo; balance, margen y crecimiento trimestral para acciones;
-  y la misma revisión de balance, margen y crecimiento con evidencia anual;
+- siete plantillas empaquetadas `SILENT`: actividad relativa de mercado para acciones, ETF y cripto;
+  RSI Wilder bajo; histograma MACD positivo; RSI diario incremental v2 bajo; histograma MACD diario
+  incremental v2 positivo; balance, margen y crecimiento trimestral para acciones; y la misma
+  revisión de balance, margen y crecimiento con evidencia anual;
 - defaults `SILENT` versionados en el catálogo; Cazatiburones conserva sus reglas separadas y ninguna
   plantilla se activa por el solo hecho de estar integrada;
 - ausencia como `not_evaluable`, sin convertirla en cero;
@@ -441,9 +442,16 @@ amplió después hasta las cinco plantillas actuales:
 - replay histórico acotado y de solo lectura por regla y activo;
 - resolución dinámica de la versión vigente en cada nuevo intento del scheduler.
 
-Pendiente en esta etapa: observar varios ciclos silenciosos reales de las reglas anuales y
-trimestrales antes de habilitar notificaciones financieras; la quinta plantilla permanece `SILENT` y
-no se calibra con el resultado de un piloto.
+Las dos plantillas incrementales aceptan exclusivamente
+`market-rsi-incremental-v2-decimal34` y `market-macd-incremental-v2-decimal34`; las cinco anteriores
+conservan sus fingerprints, versiones, defaults y overrides. No existe alias, fallback, sustitución
+de `rule_id` ni migración automática de configuraciones locales: la adopción es explícita desde el
+editor o el replay. El monitor reutiliza las mismas claves de métrica ya solicitadas y el editor
+muestra nombre, versión y estado sin cambios de JavaScript ni de API.
+
+Pendiente en esta etapa: observar varios ciclos silenciosos reales de las reglas anuales,
+trimestrales y técnicas incrementales antes de habilitar notificaciones financieras; las plantillas
+permanecen `SILENT` y no se calibran con el resultado de un piloto.
 
 ### Etapa C — Valoración y notificaciones
 
@@ -476,6 +484,18 @@ contienen un canal de navegador o externo operativo ni una cadena predictiva val
 `analytical_backtest` reproduce coincidencias, frecuencia y cobertura sobre 20–500 cortes
 persistidos; no calcula retorno posterior, rentabilidad ni precisión predictiva. Este bloque no
 cambia reglas, scheduler ni almacenamiento financiero.
+
+`SCREENING-INCREMENTAL-COMPATIBILITY`/#387 (`ADVANCES`, sin cierre) añade las dos plantillas
+incrementales `SILENT` y mantiene las cinco anteriores sin cambios. El probe real READ_ONLY del
+2026-10-31 sobre el workspace `70c64668-1738-4dfe-ba1f-7e72026bb7fe` evaluó las seis combinaciones
+QQQ/SOL/AAPL con el selector vigente: RSI `35.004533…`/`31.466109…`/`55.515477…` e histograma
+`-3.081330…`/`-0.718932…`/`-0.211784…`, todas evaluables y `not_met` en el último corte. El replay
+acotado a 20 cortes por regla y activo registró 35/47/11 cortes disponibles, sin `not_evaluable`, y
+no persistió métricas, candidatos ni recibos. La diferencia de AAPL frente al probe de PLAN
+(`61.514423…`) proviene de un corte posterior (`available_at` `2026-10-31T15:47:21…`), no de un
+cambio de umbral. La fila `FUNDAMENTALS-COVERAGE` sigue `NEXT`; `V1-U1` mejora la elegibilidad
+técnica de la muestra, mientras `V1-U3` y `V1-U4` siguen sin resultados posteriores ni validación
+predictiva.
 
 Las medidas de entrega y utilidad descriptiva son `V1-U2` y `V1-U3` en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md). Permanecen

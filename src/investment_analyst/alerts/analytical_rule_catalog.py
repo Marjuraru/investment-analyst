@@ -111,6 +111,81 @@ MACD_POSITIVE_HISTOGRAM_REVIEW_RULE = AnalyticalScreeningRule(
     limitations=("No es una señal predictiva ni una recomendación.",),
 )
 
+RSI_INCREMENTAL_LOW_REVIEW_RULE = AnalyticalScreeningRule(
+    rule_id="market.technical.rsi-incremental-low-review",
+    rule_version="1.0",
+    name_es="RSI diario incremental bajo para revisión",
+    description_es=(
+        "Describe un RSI Wilder diario incremental v2 bajo el umbral configurable para "
+        "revisión humana."
+    ),
+    state=AnalyticalRuleState.SILENT,
+    domain=AnalyticalScreeningDomain.MARKET,
+    asset_classes=(AssetClass.CRYPTO, AssetClass.EQUITY, AssetClass.ETF),
+    conditions=(
+        AnalyticalScreeningCondition(
+            condition_id="rsi_lte_30",
+            label_es="RSI Wilder",
+            domain=AnalyticalScreeningDomain.MARKET,
+            metric_key="market.technical.rsi",
+            algorithm_version="market-rsi-incremental-v2-decimal34",
+            unit="index",
+            operator=AnalyticalConditionOperator.LESS_THAN_OR_EQUAL,
+            threshold=Decimal("30"),
+            exit_threshold=Decimal("35"),
+            parameter_filters={"window": 14},
+            accepted_qualities=(DataQuality.PARTIAL, DataQuality.VALID),
+            limitations=(
+                "El umbral es configurable y descriptivo; no demuestra oportunidad, retorno "
+                "futuro ni acción recomendada.",
+            ),
+        ),
+    ),
+    confirmations_required=2,
+    cooldown_seconds=86_400,
+    limitations=(
+        "La evidencia incremental v2 es descriptiva y no tiene valor predictivo probado.",
+        "No representa una instrucción operativa de sobrecompra o sobreventa.",
+    ),
+)
+
+MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE = AnalyticalScreeningRule(
+    rule_id="market.technical.macd-incremental-positive-histogram-review",
+    rule_version="1.0",
+    name_es="Histograma MACD diario incremental positivo para revisión",
+    description_es=(
+        "Describe un histograma MACD diario incremental v2 positivo bajo parámetros configurables."
+    ),
+    state=AnalyticalRuleState.SILENT,
+    domain=AnalyticalScreeningDomain.MARKET,
+    asset_classes=(AssetClass.CRYPTO, AssetClass.EQUITY, AssetClass.ETF),
+    conditions=(
+        AnalyticalScreeningCondition(
+            condition_id="macd_histogram_gt_0",
+            label_es="Histograma MACD",
+            domain=AnalyticalScreeningDomain.MARKET,
+            metric_key="market.technical.macd.histogram",
+            algorithm_version="market-macd-incremental-v2-decimal34",
+            unit="USD",
+            operator=AnalyticalConditionOperator.GREATER_THAN,
+            threshold=Decimal("0"),
+            exit_threshold=Decimal("0"),
+            parameter_filters={"fast_window": 12, "slow_window": 26, "signal_window": 9},
+            accepted_qualities=(DataQuality.PARTIAL, DataQuality.VALID),
+            limitations=(
+                "El umbral es configurable y descriptivo; no demuestra oportunidad, retorno "
+                "futuro ni acción recomendada.",
+            ),
+        ),
+    ),
+    confirmations_required=2,
+    cooldown_seconds=86_400,
+    limitations=(
+        "La evidencia incremental v2 es descriptiva y no tiene valor predictivo probado.",
+        "No es una señal predictiva ni una recomendación.",
+    ),
+)
+
 INITIAL_ANNUAL_FUNDAMENTAL_RULE = AnalyticalScreeningRule(
     rule_id="fundamentals.annual-balance-growth-review",
     rule_version="1.0",
@@ -221,7 +296,9 @@ INITIAL_ANALYTICAL_RULES = (
     INITIAL_ANNUAL_FUNDAMENTAL_RULE,
     INITIAL_QUARTERLY_FUNDAMENTAL_RULE,
     INITIAL_MARKET_ACTIVITY_RULE,
+    MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE,
     MACD_POSITIVE_HISTOGRAM_REVIEW_RULE,
+    RSI_INCREMENTAL_LOW_REVIEW_RULE,
     RSI_LOW_REVIEW_RULE,
 )
 
@@ -230,6 +307,8 @@ __all__ = [
     "INITIAL_ANNUAL_FUNDAMENTAL_RULE",
     "INITIAL_MARKET_ACTIVITY_RULE",
     "INITIAL_QUARTERLY_FUNDAMENTAL_RULE",
-    "RSI_LOW_REVIEW_RULE",
+    "MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE",
     "MACD_POSITIVE_HISTOGRAM_REVIEW_RULE",
+    "RSI_INCREMENTAL_LOW_REVIEW_RULE",
+    "RSI_LOW_REVIEW_RULE",
 ]
