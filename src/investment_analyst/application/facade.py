@@ -9,6 +9,9 @@ from pydantic import ConfigDict, model_validator
 
 from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagnosticReport
 from investment_analyst.analytics.aapl_daily_report_service import AaplDailyReportService
+from investment_analyst.analytics.analytical_access_service import (
+    RepositoryAnalyticalAccessAdapter,
+)
 from investment_analyst.analytics.cazatiburones.activity_metric_pipeline import (
     ActivityMetricPipeline,
 )
@@ -94,6 +97,11 @@ from investment_analyst.analytics.market.diagnostic_selection import (
     MarketDiagnosticMetricSelector,
 )
 from investment_analyst.analytics.market.history_service import HistoricalMarketDataService
+from investment_analyst.analytics.market.pattern_models import (
+    DailyMarketPatternsRequest,
+    DailyMarketPatternsResult,
+)
+from investment_analyst.analytics.market.pattern_service import DailyMarketPatternsService
 from investment_analyst.analytics.market.statistics_engine import MarketStatisticsEngine
 from investment_analyst.analytics.market.statistics_pipeline import MarketStatisticsPipeline
 from investment_analyst.analytics.valuation import (
@@ -613,6 +621,41 @@ class InvestmentAnalystApplication:
             return MarketComparisonService(HistoricalMarketDataService(storage)).query(
                 request,
                 resolved,
+            )
+
+    def query_daily_market_patterns(
+        self,
+        request: DailyMarketPatternsRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> DailyMarketPatternsResult:
+        """Describe daily MACD states and crossings from one read-only local session."""
+        descriptor = next(
+            (
+                item
+                for item in self.list_market_assets().assets
+                if item.asset_id == request.asset_id
+            ),
+            None,
+        )
+        if descriptor is None:
+            raise ValueError("daily market patterns asset_id is not supported")
+        if get_market_bar_schema(descriptor.source_id).frequency is not DataFrequency.DAY_1:
+            raise ValueError("daily market patterns require a visible daily market asset")
+        if descriptor.quote_currency != "USD":
+            raise ValueError("daily market patterns currently require a USD quote currency")
+        read_only = WorkspaceAccessMode.READ_ONLY
+        with self._runtime.open_storage(location, access_mode=read_only) as storage:
+            adapter = RepositoryAnalyticalAccessAdapter(
+                storage.metric_results,
+                storage.diagnostics,
+                storage.metric_definitions,
+            )
+            return DailyMarketPatternsService(storage.observations, adapter).query(
+                request,
+                asset_id=descriptor.asset_id,
+                source_id=descriptor.source_id,
+                currency=descriptor.quote_currency,
             )
 
     def query_btc_market_chart(

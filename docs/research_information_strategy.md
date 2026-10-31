@@ -72,8 +72,10 @@ metadatos, hash, extracto permitido y enlace a la fuente.
 
 ## Preparación para IA cualitativa
 
-La ingestión determinista no dependerá de un LLM. En una fase posterior, una operación opcional y
-explícita podrá leer el corpus local y producir un resultado cualitativo separado que registre:
+La ingestión determinista no dependerá de un LLM. La interpretación cualitativa es una capa
+opcional, intercambiable y posterior; no es prerrequisito de la investigación cuantitativa ni de un
+pronóstico numérico. Una operación opcional y explícita podrá leer el corpus local o un
+`ModelExplanationPacket` ya calculado y producir un resultado cualitativo separado que registre:
 
 - documentos exactos utilizados;
 - modelo, proveedor, versión, parámetros y plantilla;
@@ -90,16 +92,33 @@ normal.
 
 Antes de entrenar o afirmar capacidad predictiva se exigirán:
 
-- particiones temporales walk-forward;
-- datos point-in-time y vintages;
-- control de supervivencia, cambios de símbolo, splits y composición de índices;
-- costes y latencias realistas;
-- comparación contra baselines simples;
-- métricas fuera de muestra y registro de todos los experimentos;
-- separación entre correlación descriptiva, pronóstico y decisión humana.
+- una pregunta, target, horizonte, unidad, universo, calendario y `decision_at` declarados antes de
+  mirar resultados, junto con baselines, métrica primaria y regla de rechazo;
+- datos point-in-time y vintages, con `feature_available_at <= decision_at` y un label estrictamente
+  posterior con `label_available_at` separado; no se retrofecha una métrica, un raw o una feature;
+- control de supervivencia, cambios de símbolo, splits, composición de índices y revisiones;
+- particiones temporales purged walk-forward con embargo; nunca `KFold` aleatorio ni shuffle;
+- transformaciones, imputación, selección, calibración y tuning ajustados sólo dentro de
+  train/validation, con holdout cronológico final intacto;
+- costes y latencias realistas, evaluados por separado de la accuracy o el retorno bruto;
+- comparación contra baselines simples y métricas fuera de muestra con incertidumbre que respete la
+  dependencia temporal;
+- registro de todos los intentos, incluidos los fallos, sin seleccionar umbrales sobre el holdout;
+- separación entre correlación descriptiva, pronóstico, señal y decisión humana.
 
 La historia larga aumenta el número de regímenes observables, pero no garantiza precisión. Su primer
-uso será contexto, pruebas de robustez y relaciones transparentes.
+uso será contexto, pruebas de robustez y relaciones transparentes. La evidencia de la investigación
+cripto ([síntesis 2026-08](research/crypto/crypto_research_synthesis_2026-08.md) §3.1–3.2 y
+[brief del planificador](research/crypto/crypto_planner_brief.md)) es anti-anclaje: disponer de más
+RSI/MACD o de más indicadores no demuestra ventaja predictiva, y una fuente adicional sólo se admite
+si la pregunta muestra la carencia y existe licencia, PIT y coste verificados. La
+[revisión estratégica externa de 2026-09](planning_context/external_strategy_review_decisions_2026-09.md)
+y [historical_research_data.md](historical_research_data.md) documentan decisiones y disponibilidad
+histórica; [product_roadmap.md](product_roadmap.md#capacidad-predictiva-e-interpretación-estado-verificable-2026-10-31)
+mantiene la matriz integrado/por construir/aceptación y
+[basic_functional_release_plan.md](basic_functional_release_plan.md) fija la secuencia táctica.
+Estas referencias son evidencia de investigación, no hechos vigentes sobre proveedores ni permiso de
+implementación.
 
 ## Escala de almacenamiento
 
@@ -120,5 +139,8 @@ uso será contexto, pruebas de robustez y relaciones transparentes.
 3. Incorporar índices y factores históricos de investigación con licencias documentadas.
 4. Definir y probar ingestión de noticias primarias y descubrimiento GDELT en un workspace temporal.
 5. Crear búsqueda local y una línea temporal que relacione documentos y datos sin inferir causalidad.
-6. Evaluar análisis cualitativo opcional mediante IA con presupuesto, citas y auditoría.
-7. Solo después, experimentar con relaciones predictivas fuera de muestra.
+6. Abrir la investigación predictiva con `PREDICTIVE-FOUNDATION` (P0–P1): pregunta y label
+   versionados, elegibilidad temporal, dataset PIT mínimo, baselines y criterio de rechazo antes de
+   mirar resultados. La interpretación cualitativa no bloquea este paso.
+7. Evaluar análisis cualitativo opcional mediante IA sobre paquetes ya calculados, con presupuesto,
+   citas y auditoría; puede desconectarse sin afectar datos, inferencia ni interfaz numérica.

@@ -326,3 +326,332 @@ async function queryMarketComparison() {
     }
   }
 }
+
+const DAILY_PATTERN_STATE_LABELS = Object.freeze({
+  positive: "Positivo",
+  negative: "Negativo",
+  neutral: "Neutral",
+  unavailable: "No disponible",
+});
+
+const DAILY_PATTERN_TYPE_LABELS = Object.freeze({
+  macd_cross_positive: "MACD cruza a positivo",
+  macd_cross_negative: "MACD cruza a negativo",
+  rsi_cross_above_30: "RSI cruza sobre 30",
+});
+
+let dailyPatternsRequestSequence = 0;
+let dailyPatternsAbortController = null;
+let dailyPatternsContextKey = null;
+
+function dailyPatternsCutDate() {
+  const raw = byId("report-known-at").value.trim();
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.valueOf())) return null;
+  return new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate()));
+}
+
+function prepareDailyPatternsRange() {
+  const cut = dailyPatternsCutDate();
+  const start = byId("daily-patterns-start");
+  const end = byId("daily-patterns-end");
+  if (!cut) {
+    start.value = "";
+    end.value = "";
+    return;
+  }
+  start.value = new Date(cut.getTime() - 89 * 86_400_000).toISOString().slice(0, 10);
+  end.value = cut.toISOString().slice(0, 10);
+}
+
+function dailyPatternsFigure(value) {
+  const figure = createElement("span", "figure", formatNumber(value, { maximumFractionDigits: 6 }));
+  figure.title = String(value);
+  return figure;
+}
+
+function appendDailyPatternsRow(container, label, value) {
+  container.append(createElement("dt", "", label));
+  const cell = document.createElement("dd");
+  if (typeof value === "string") cell.textContent = value;
+  else cell.append(value);
+  container.append(cell);
+}
+
+function resetDailyMarketPatterns() {
+  const key = `${selectedMarketAsset || ""}|${byId("report-known-at").value.trim()}`;
+  if (key === dailyPatternsContextKey) return;
+  dailyPatternsContextKey = key;
+  dailyPatternsRequestSequence += 1;
+  if (dailyPatternsAbortController) {
+    dailyPatternsAbortController.abort();
+    dailyPatternsAbortController = null;
+  }
+  const results = byId("daily-patterns-results");
+  results.classList.add("hidden");
+  results.setAttribute("aria-busy", "false");
+  byId("daily-patterns-current").replaceChildren();
+  byId("daily-patterns-segments").replaceChildren();
+  byId("daily-patterns-events").replaceChildren();
+  byId("daily-patterns-coverage").textContent = "";
+  byId("daily-patterns-limitations").replaceChildren();
+  byId("daily-patterns-json").textContent = "";
+  byId("daily-patterns-status").textContent =
+    "Sin consultar. Elige un rango inclusivo de hasta 180 días y consulta al corte global.";
+  byId("daily-patterns-submit").disabled = false;
+  prepareDailyPatternsRange();
+}
+
+function renderDailyPatternsCurrent(payload) {
+  const container = byId("daily-patterns-current");
+  container.replaceChildren();
+  if (!payload.points.length) {
+    container.append(
+      renderAbsenceMark(
+        "missing",
+        "Sin períodos observados",
+        "El rango no contiene cierres diarios disponibles al corte",
+      ),
+    );
+    return;
+  }
+  const point = payload.points[payload.points.length - 1];
+  container.append(
+    createElement(
+      "p",
+      "patterns-current-heading",
+      `${formatCalendarDate(point.as_of)} · ${DAILY_PATTERN_STATE_LABELS[point.macd_state] || point.macd_state}`,
+    ),
+  );
+  const list = document.createElement("dl");
+  list.className = "patterns-evidence";
+  appendDailyPatternsRow(list, "Cierre", dailyPatternsFigure(point.close));
+  appendDailyPatternsRow(list, "Disponibilidad de la evidencia", formatInstant(point.evidence_available_at));
+  appendDailyPatternsRow(
+    list,
+    "RSI(14)",
+    point.rsi.status === "available"
+      ? dailyPatternsFigure(point.rsi.value)
+      : renderAbsenceMark("missing", "Sin RSI elegible", point.rsi.reason),
+  );
+  appendDailyPatternsRow(
+    list,
+    "Histograma MACD(12,26,9)",
+    point.macd_histogram.status === "available"
+      ? dailyPatternsFigure(point.macd_histogram.value)
+      : renderAbsenceMark("missing", "Sin histograma elegible", point.macd_histogram.reason),
+  );
+  appendDailyPatternsRow(list, "Estado MACD", DAILY_PATTERN_STATE_LABELS[point.macd_state]);
+  container.append(list);
+}
+
+function renderDailyPatternsSegments(payload) {
+  const container = byId("daily-patterns-segments");
+  container.replaceChildren();
+  if (!payload.segments.length) {
+    container.append(
+      renderAbsenceMark(
+        "missing",
+        "Sin tramos evaluables",
+        "El histograma MACD no está disponible en los períodos observados",
+      ),
+    );
+    return;
+  }
+  const table = document.createElement("table");
+  table.className = "patterns-segments-table";
+  const caption = createElement(
+    "caption",
+    "",
+    "Tramos de estado MACD con períodos observados y censura de borde.",
+  );
+  table.append(caption);
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["Estado", "Inicio", "Fin", "Períodos", "Duración observada", "Borde"]) {
+    const cell = createElement("th", "", label);
+    cell.setAttribute("scope", "col");
+    headRow.append(cell);
+  }
+  head.append(headRow);
+  table.append(head);
+  const body = document.createElement("tbody");
+  for (const segment of payload.segments) {
+    const row = document.createElement("tr");
+    row.append(createElement("td", `patterns-state-${segment.state}`, DAILY_PATTERN_STATE_LABELS[segment.state]));
+    row.append(createElement("td", "", formatCalendarDate(segment.start_as_of)));
+    row.append(createElement("td", "", formatCalendarDate(segment.end_as_of)));
+    row.append(createElement("td", "figure", formatInteger(segment.observed_periods)));
+    const days = segment.duration_seconds / 86_400;
+    row.append(
+      createElement(
+        "td",
+        "patterns-duration",
+        `${formatInteger(segment.duration_seconds)} s · ${formatNumber(days, { maximumFractionDigits: 2 })} días UTC`,
+      ),
+    );
+    const border = segment.left_censored && segment.right_censored
+      ? "Ambos"
+      : segment.left_censored
+        ? "Izquierdo"
+        : segment.right_censored
+          ? "Derecho"
+          : "No";
+    row.append(createElement("td", "", border));
+    body.append(row);
+  }
+  table.append(body);
+  container.append(table);
+}
+
+function renderDailyPatternsEvents(payload) {
+  const container = byId("daily-patterns-events");
+  container.replaceChildren();
+  if (!payload.events.length) {
+    const evaluable = payload.points.some(
+      (point) => point.macd_histogram.status === "available" || point.rsi.status === "available",
+    );
+    container.append(
+      evaluable
+        ? createElement(
+            "p",
+            "patterns-empty",
+            "Sin cruces en el rango consultado; la ausencia de cruce no implica continuidad futura.",
+          )
+        : renderAbsenceMark(
+            "missing",
+            "Sin evidencia evaluable",
+            "No hay métricas RSI o MACD elegibles en los períodos observados",
+          ),
+    );
+    return;
+  }
+  const list = document.createElement("ol");
+  list.className = "patterns-event-list";
+  for (const event of payload.events) {
+    const item = document.createElement("li");
+    item.className = "patterns-event-item";
+    item.append(
+      createElement(
+        "p",
+        "patterns-event-title",
+        DAILY_PATTERN_TYPE_LABELS[event.pattern_type] || event.pattern_type,
+      ),
+    );
+    item.append(
+      createElement(
+        "p",
+        "patterns-event-dates",
+        `${formatCalendarDate(event.previous_as_of)} → ${formatCalendarDate(event.current_as_of)} · disponible ${formatInstant(event.evidence_available_at)}`,
+      ),
+    );
+    const values = createElement("p", "patterns-event-values");
+    values.append(
+      dailyPatternsFigure(event.previous_value),
+      document.createTextNode(" → "),
+      dailyPatternsFigure(event.current_value),
+      document.createTextNode(` · ${event.comparison}`),
+    );
+    item.append(values);
+    const details = document.createElement("details");
+    details.className = "patterns-event-evidence";
+    details.append(createElement("summary", "", "Evidencia exacta"));
+    details.append(
+      createElement("p", "patterns-technical", `Métrica previa: ${event.previous_metric_result_id}`),
+      createElement("p", "patterns-technical", `Métrica actual: ${event.current_metric_result_id}`),
+      createElement("p", "patterns-technical", `Cierre previo: ${event.previous_close_observation_id}`),
+      createElement("p", "patterns-technical", `Cierre actual: ${event.current_close_observation_id}`),
+    );
+    item.append(details);
+    list.append(item);
+  }
+  container.append(list);
+}
+
+function renderDailyMarketPatterns(payload) {
+  if (
+    payload.schema_version !== "daily-market-patterns-v1"
+    || payload.algorithm_version !== "daily-market-patterns-v1-decimal34"
+  ) {
+    throw new Error("La reconstrucción diaria no respetó su contrato versionado.");
+  }
+  const presentation = marketAssets[payload.asset_id];
+  const label = presentation
+    ? `${presentation.symbol} · ${presentation.name}`
+    : payload.asset_id;
+  const coverage = payload.coverage;
+  byId("daily-patterns-summary").textContent =
+    `${label} · ${payload.request.start_date} a ${payload.request.end_date} inclusive · corte ${formatInstant(payload.request.known_at)} · ${formatInteger(coverage.point_count)} períodos observados · ${formatInteger(coverage.close_periods)} cierres seleccionados de ${formatInteger(coverage.close_observations_read)} filas leídas.`;
+  renderDailyPatternsCurrent(payload);
+  renderDailyPatternsSegments(payload);
+  renderDailyPatternsEvents(payload);
+  byId("daily-patterns-coverage").textContent =
+    `Cobertura: RSI ${formatInteger(coverage.rsi_available_points)} disponibles y ${formatInteger(coverage.rsi_missing_points)} ausentes; histograma MACD ${formatInteger(coverage.macd_available_points)} disponibles y ${formatInteger(coverage.macd_missing_points)} ausentes; ${formatInteger(coverage.discarded_close_revisions)} revisiones de cierre descartadas; ${formatInteger(coverage.metric_periods_without_close)} períodos con métricas sin cierre compatible; ${formatInteger(coverage.segment_count)} tramos y ${formatInteger(coverage.event_count)} cruces; máxima disponibilidad de evidencia ${coverage.maximum_evidence_available_at ? formatInstant(coverage.maximum_evidence_available_at) : "sin evidencia"}.`;
+  const limitations = byId("daily-patterns-limitations");
+  limitations.replaceChildren();
+  for (const limitation of payload.limitations) {
+    limitations.append(createElement("li", "", limitation));
+  }
+  byId("daily-patterns-json").textContent = JSON.stringify(payload, null, 2);
+  byId("daily-patterns-status").textContent = payload.points.length
+    ? `Reconstrucción descriptiva al corte con ${formatInteger(payload.points.length)} períodos observados. Los valores visibles se redondean; el detalle técnico conserva el Decimal exacto.`
+    : "El rango no contiene cierres disponibles al corte; la ausencia es explícita y no se completa con otro período.";
+  byId("daily-patterns-results").classList.remove("hidden");
+}
+
+async function queryDailyMarketPatterns(event) {
+  if (event) event.preventDefault();
+  const assetId = selectedMarketAsset;
+  const cut = byId("report-known-at").value.trim();
+  const start = byId("daily-patterns-start").value;
+  const end = byId("daily-patterns-end").value;
+  if (!assetId) {
+    byId("daily-patterns-status").textContent = "Selecciona un activo del catálogo antes de consultar.";
+    return;
+  }
+  if (!start || !end) {
+    byId("daily-patterns-status").textContent = "Indica un inicio y un fin inclusivos para el rango.";
+    return;
+  }
+  const sequence = ++dailyPatternsRequestSequence;
+  if (dailyPatternsAbortController) dailyPatternsAbortController.abort();
+  const controller = new AbortController();
+  dailyPatternsAbortController = controller;
+  const results = byId("daily-patterns-results");
+  results.setAttribute("aria-busy", "true");
+  byId("daily-patterns-submit").disabled = true;
+  byId("daily-patterns-status").textContent = "Reconstruyendo estados y cruces al corte…";
+  const parameters = new URLSearchParams({
+    asset_id: assetId,
+    start,
+    end,
+    known_at: cut,
+  });
+  try {
+    const payload = await api(`/api/v1/market-patterns?${parameters.toString()}`, {
+      signal: controller.signal,
+    });
+    if (sequence !== dailyPatternsRequestSequence || controller.signal.aborted) return;
+    if (
+      assetId !== selectedMarketAsset
+      || cut !== byId("report-known-at").value.trim()
+    ) {
+      return;
+    }
+    renderDailyMarketPatterns(payload);
+  } catch (error) {
+    if (sequence !== dailyPatternsRequestSequence || controller.signal.aborted) return;
+    byId("daily-patterns-status").textContent = error.message;
+  } finally {
+    if (sequence === dailyPatternsRequestSequence) {
+      results.setAttribute("aria-busy", "false");
+      byId("daily-patterns-submit").disabled = false;
+    }
+  }
+}
+
+byId("daily-patterns-form").addEventListener("submit", (event) => {
+  void queryDailyMarketPatterns(event);
+});
+prepareDailyPatternsRange();

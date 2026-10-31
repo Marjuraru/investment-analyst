@@ -1626,6 +1626,7 @@ function renderKnownAtCut(effectiveKnownAt) {
     detail.append(renderAbsenceMark("missing", "Sin evidencia", "Sin ejecución completa registrada"));
     header.append(renderAbsenceMark("missing", "Sin evidencia"));
   }
+  if (typeof resetDailyMarketPatterns === "function") resetDailyMarketPatterns();
 }
 
 function renderAbsenceMark(kind, label, reason) {
