@@ -58,6 +58,21 @@
 > fila `FUNDAMENTALS-COVERAGE` permanece `NEXT`: la adopción operacional no declara cobertura completa
 > ni precisión predictiva.
 >
+> `COVERAGE-AND-ASSET-EXPANSION`/#385 (`ADVANCES`, sin cierre) aporta evidencia acotada a V1-U1,
+> V1-U5 y V1-U6 sin cambiar su estado `UNKNOWN`. Quinta regla anual `SILENT` con las mismas
+> condiciones y umbrales que la trimestral, despacho por frecuencia del intento y consulta
+> fundamental con selección previa de IDs (activo, claves, `available_to`, fuente, frecuencia) e
+> hidratación en lotes ≤256. A2 real READ_ONLY: AAPL no cumple (pasivos/activos `0.794753…`, corte
+> `2025-09-27`, disponible `2025-10-31`) y Barrick `equity:us:b` cumple (`0.303643…`, `0.421915…`,
+> `0.312180…`, corte `2025-12-31`, disponible `2026-02-27`), sin candidato ni recibo persistido.
+> A3 usó el runtime integrado `200db2d6`: QQQ y SOL pasaron a watchlist/refresco programado
+> (3→5 activos, 13→15 jobs, un `market_daily` por activo) con plan incremental de un día
+> (`2026-10-30`), 30/1260 y 27/1780 creadas/reutilizadas, 7,8 s y 9,1 s, pico RSS
+> +315,6/+316,4 MiB, DB+WAL sin crecimiento y estado +1 736 B. RSI/MACD persistidos como
+> `incremental-v2` no son evaluables por las reglas legacy `v1`; la causa queda explícita y la
+> regla de volumen relativo sí evaluó (QQQ `2,5827`; SOL `2,3596`). La fila sigue `NEXT`; no hay
+> `MET`, cobertura completa, recomendación ni precisión predictiva.
+>
 > Las notas siguientes y las narrativas fechadas de este documento son registro histórico. No
 > describen un Issue activo ni autorizan ejecución: la única autoridad de Work Block es el Issue
 > abierto con `workflow:active` resuelto desde GitHub vivo.

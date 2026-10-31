@@ -18,7 +18,9 @@ from investment_analyst.alerts.analytical_monitor import (
 )
 from investment_analyst.alerts.analytical_rule_catalog import (
     INITIAL_ANALYTICAL_RULES,
+    INITIAL_ANNUAL_FUNDAMENTAL_RULE,
     INITIAL_MARKET_ACTIVITY_RULE,
+    INITIAL_QUARTERLY_FUNDAMENTAL_RULE,
 )
 from investment_analyst.alerts.analytical_rule_registry import AnalyticalRuleRegistryStore
 from investment_analyst.alerts.analytical_state import (
@@ -40,6 +42,12 @@ from investment_analyst.workspace.service import WorkspaceService
 
 _ASSET_ID = "equity:us:aapl"
 _SOURCE_ID = "alpaca-market-data:iex:aapl:daily-bars:adjustment-all"
+_FUNDAMENTAL_SOURCE_ID = "sec-edgar:aapl:companyfacts"
+_FUNDAMENTAL_ALGORITHMS = {
+    "fundamental.liabilities_to_assets": "sec-fundamental-liabilities-to-assets-v1-decimal34",
+    "fundamental.net_margin": "sec-fundamental-net-margin-v1-decimal34",
+    "fundamental.revenue_yoy_growth": "sec-fundamental-revenue-yoy-growth-v1-decimal34",
+}
 _MACD_KEY = "market.technical.macd.histogram"
 _MACD_ALGORITHM = "market-macd-v1-decimal34"
 _MACD_PARAMS: dict[str, object] = {
@@ -183,6 +191,113 @@ def _attempt(
             source_ids=(_SOURCE_ID,),
             created_count=1,
             reused_count=0,
+        ),
+    )
+
+
+def _fundamental_metric(
+    metric_key: str,
+    value: str,
+    *,
+    identifier: int,
+    frequency: str,
+    as_of: datetime,
+    available_at: datetime,
+) -> MetricResult:
+    return MetricResult(
+        result_id=UUID(f"83000000-0000-4000-8000-{identifier:012d}"),
+        asset_id=_ASSET_ID,
+        metric_key=metric_key,
+        value=Decimal(value),
+        unit="ratio",
+        as_of=as_of,
+        available_at=available_at,
+        computed_at=available_at,
+        parameters={
+            "source_id": _FUNDAMENTAL_SOURCE_ID,
+            "frequency": frequency,
+        },
+        input_observation_ids=[UUID(f"84000000-0000-4000-8000-{identifier:012d}")],
+        algorithm_version=_FUNDAMENTAL_ALGORITHMS[metric_key],
+        quality=DataQuality.VALID,
+    )
+
+
+def _fundamental_attempt(
+    frequency: str,
+    known_at: datetime,
+    *,
+    attempt_id: UUID,
+) -> ScheduledJobAttempt:
+    scheduled_date = known_at.date()
+    definition = ScheduledJobDefinition(
+        job_id=f"sec:{_ASSET_ID}:fundamentals-{frequency}",
+        asset_id=_ASSET_ID,
+        provider="sec-edgar",
+        domain=ScheduledJobDomain.FUNDAMENTALS,
+        data_frequency=frequency,
+        timezone="America/Lima",
+        run_at=time(hour=7),
+    )
+    scheduled_for = datetime(
+        scheduled_date.year,
+        scheduled_date.month,
+        scheduled_date.day,
+        12,
+        tzinfo=UTC,
+    )
+    return ScheduledJobAttempt(
+        attempt_id=attempt_id,
+        definition=definition,
+        local_date=scheduled_date,
+        scheduled_for=scheduled_for,
+        attempt_number=1,
+        status=ScheduledJobAttemptStatus.SUCCEEDED,
+        started_at=scheduled_for,
+        completed_at=scheduled_for + timedelta(minutes=2),
+        execution=ScheduledJobExecution(
+            job_id=definition.job_id,
+            effective_known_at=known_at,
+            evidence_changed=True,
+            source_ids=(_FUNDAMENTAL_SOURCE_ID,),
+            created_count=1,
+            reused_count=0,
+        ),
+    )
+
+
+def _fundamental_metrics_for_frequency(
+    frequency: str,
+    *,
+    first_identifier: int,
+    liabilities_to_assets: str,
+) -> tuple[MetricResult, ...]:
+    as_of = datetime(2025, 12, 31, tzinfo=UTC)
+    available_at = datetime(2026, 2, 15, 12, tzinfo=UTC)
+    return (
+        _fundamental_metric(
+            "fundamental.liabilities_to_assets",
+            liabilities_to_assets,
+            identifier=first_identifier,
+            frequency=frequency,
+            as_of=as_of,
+            available_at=available_at,
+        ),
+        _fundamental_metric(
+            "fundamental.net_margin",
+            "0.2",
+            identifier=first_identifier + 1,
+            frequency=frequency,
+            as_of=as_of,
+            available_at=available_at,
+        ),
+        _fundamental_metric(
+            "fundamental.revenue_yoy_growth",
+            "0.1",
+            identifier=first_identifier + 2,
+            frequency=frequency,
+            as_of=as_of,
+            available_at=available_at,
         ),
     )
 
@@ -500,6 +615,144 @@ def test_duplicate_v1_revisions_remain_ambiguous() -> None:
             source_id=_SOURCE_ID,
             known_at=known_at,
         )
+
+
+def test_fundamental_dispatch_evaluates_only_the_attempt_frequency(tmp_path: Path) -> None:
+    known_at = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    metrics = (
+        *_fundamental_metrics_for_frequency(
+            "annual",
+            first_identifier=1,
+            liabilities_to_assets="0.5",
+        ),
+        *_fundamental_metrics_for_frequency(
+            "quarterly",
+            first_identifier=10,
+            liabilities_to_assets="0.7",
+        ),
+    )
+    service, paths, runtime = _seed(tmp_path, metrics)
+    store = AnalyticalScreeningStateStore(paths.state_root / "analytical.json")
+    monitor = AnalyticalScreeningMonitor(
+        store,
+        runtime,
+        paths.root,
+        (INITIAL_ANNUAL_FUNDAMENTAL_RULE, INITIAL_QUARTERLY_FUNDAMENTAL_RULE),
+        clock=lambda: datetime(2026, 9, 2, tzinfo=UTC),
+    )
+    annual_attempt = _fundamental_attempt(
+        "annual",
+        known_at,
+        attempt_id=UUID("90000000-0000-4000-8000-000000000021"),
+    )
+    quarterly_attempt = _fundamental_attempt(
+        "quarterly",
+        known_at,
+        attempt_id=UUID("90000000-0000-4000-8000-000000000022"),
+    )
+
+    monitor.reconcile((annual_attempt, quarterly_attempt))
+
+    state = store.load()
+    by_attempt = {
+        receipt.attempt_id: tuple(
+            result for result in state.results if result.result_id in receipt.result_ids
+        )
+        for receipt in state.receipts
+    }
+    annual_result = by_attempt[annual_attempt.attempt_id]
+    quarterly_result = by_attempt[quarterly_attempt.attempt_id]
+
+    assert len(annual_result) == 1
+    assert annual_result[0].rule.rule_id == INITIAL_ANNUAL_FUNDAMENTAL_RULE.rule_id
+    assert annual_result[0].matched is True
+    assert {item.metric_result_id for item in annual_result[0].conditions} == {
+        metrics[0].result_id,
+        metrics[1].result_id,
+        metrics[2].result_id,
+    }
+    assert len(quarterly_result) == 1
+    assert quarterly_result[0].rule.rule_id == INITIAL_QUARTERLY_FUNDAMENTAL_RULE.rule_id
+    assert quarterly_result[0].matched is False
+    assert {item.metric_result_id for item in quarterly_result[0].conditions} == {
+        metrics[3].result_id,
+        metrics[4].result_id,
+        metrics[5].result_id,
+    }
+
+
+def test_fundamental_dispatch_never_falls_back_to_another_frequency(tmp_path: Path) -> None:
+    known_at = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    service, paths, runtime = _seed(
+        tmp_path,
+        _fundamental_metrics_for_frequency(
+            "quarterly",
+            first_identifier=1,
+            liabilities_to_assets="0.5",
+        ),
+    )
+    store = AnalyticalScreeningStateStore(paths.state_root / "analytical.json")
+    monitor = AnalyticalScreeningMonitor(
+        store,
+        runtime,
+        paths.root,
+        (INITIAL_QUARTERLY_FUNDAMENTAL_RULE,),
+        clock=lambda: datetime(2026, 9, 2, tzinfo=UTC),
+    )
+    attempt = _fundamental_attempt(
+        "annual",
+        known_at,
+        attempt_id=UUID("90000000-0000-4000-8000-000000000023"),
+    )
+
+    monitor(attempt)
+
+    state = store.load()
+    assert state.results == ()
+    assert len(state.receipts) == 1
+    assert state.receipts[0].status is AnalyticalMonitorReceiptStatus.SKIPPED
+    assert state.receipts[0].reason == "no_compatible_rules"
+
+
+@pytest.mark.parametrize("mode", ("missing", "contradictory"))
+def test_fundamental_dispatch_fails_closed_on_incoherent_rule_frequency(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    conditions = list(INITIAL_ANNUAL_FUNDAMENTAL_RULE.conditions)
+    replacement = {} if mode == "missing" else {"frequency": "quarterly"}
+    conditions[0] = conditions[0].model_copy(update={"parameter_filters": replacement})
+    rule = INITIAL_ANNUAL_FUNDAMENTAL_RULE.model_copy(update={"conditions": tuple(conditions)})
+    known_at = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    service, paths, runtime = _seed(
+        tmp_path,
+        _fundamental_metrics_for_frequency(
+            "annual",
+            first_identifier=1,
+            liabilities_to_assets="0.5",
+        ),
+    )
+    store = AnalyticalScreeningStateStore(paths.state_root / "analytical.json")
+    monitor = AnalyticalScreeningMonitor(
+        store,
+        runtime,
+        paths.root,
+        (rule,),
+        clock=lambda: datetime(2026, 9, 2, tzinfo=UTC),
+    )
+    attempt = _fundamental_attempt(
+        "annual",
+        known_at,
+        attempt_id=UUID("90000000-0000-4000-8000-000000000024"),
+    )
+
+    monitor(attempt)
+
+    state = store.load()
+    assert state.results == ()
+    assert len(state.receipts) == 1
+    assert state.receipts[0].status is AnalyticalMonitorReceiptStatus.SKIPPED
+    assert state.receipts[0].reason == "no_compatible_rules"
 
 
 def test_empty_market_check_skips_screening_but_new_bar_runs(tmp_path: Path) -> None:
