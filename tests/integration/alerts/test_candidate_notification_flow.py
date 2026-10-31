@@ -83,3 +83,56 @@ def test_reconcile_recovers_after_outbox_write_failure_without_changing_candidat
     assert len(recovered.items) == 1
     assert recovered.transitions == ()
     assert candidate.status.value == "new"
+
+
+def test_batch_observer_receives_the_projected_outbox_without_rehydration(tmp_path) -> None:
+    result_id = uuid4()
+    candidate = AnalyticalCandidateEvent(
+        candidate_id=analytical_candidate_id(result_id),
+        activation_result_id=result_id,
+        rule_id="market.test",
+        rule_version="v1",
+        rule_fingerprint="f" * 64,
+        asset_id="crypto:btc-usd",
+        domain=AnalyticalScreeningDomain.MARKET,
+        source_id="test-source",
+        as_of=datetime(2026, 1, 1, tzinfo=UTC),
+        activated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        cooldown_until=datetime(2026, 1, 3, tzinfo=UTC),
+        confirmations=1,
+    )
+    state = SimpleNamespace(
+        candidates=(candidate,),
+        results=(
+            SimpleNamespace(
+                result_id=result_id,
+                rule=SimpleNamespace(name_es="Regla de prueba"),
+                explanation_es="Evidencia compacta de prueba.",
+                conditions=(
+                    SimpleNamespace(
+                        condition_id="market.test",
+                        state=AnalyticalConditionState.MET,
+                        metric_key="market.test",
+                        unit="ratio",
+                        metric_result_id=None,
+                        as_of=None,
+                        explanation_es="Condición satisfecha.",
+                    ),
+                ),
+            ),
+        ),
+    )
+    observed = []
+    monitor = CandidateNotificationMonitor(
+        CandidateNotificationStore(tmp_path / "outbox.json"),
+        SimpleNamespace(load=lambda: state),
+        batch_observer=lambda analytical, notifications: observed.append(
+            (analytical, notifications)
+        ),
+    )
+    monitor.reconcile()
+    monitor.reconcile()
+    assert len(observed) == 2
+    assert observed[0][0] is state
+    assert len(observed[0][1].items) == 1
+    assert observed[1][1] == observed[0][1]

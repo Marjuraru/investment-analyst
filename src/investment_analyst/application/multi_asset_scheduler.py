@@ -1000,6 +1000,7 @@ class MultiAssetScheduler:
         attempt_id_factory: Callable[[], UUID] = uuid4,
         memory_ceiling_bytes: int | None = None,
         storage_observability: StorageObservabilityCollector | None = None,
+        tick_observer: Callable[[], None] | None = None,
     ) -> None:
         if not jobs:
             raise ValueError("multi-asset scheduler requires at least one job")
@@ -1016,6 +1017,8 @@ class MultiAssetScheduler:
         self._tick_lock = threading.Lock()
         self._active_job_id: str | None = None
         self._observer_issue: str | None = None
+        self._tick_observer = tick_observer
+        self._tick_observer_issue: str | None = None
         self._storage_observability = storage_observability
         self._storage_observability_issue: str | None = None
         self._storage_observability_failure_reason: StorageObservabilityFailureReason | None = None
@@ -1066,6 +1069,7 @@ class MultiAssetScheduler:
                 operation_control.raise_if_cancelled()
             self._retry_notifications()
             self._retry_storage_observations()
+            self._run_tick_observer()
             now = self._now()
             jobs = self._jobs_snapshot()
             state = self._recover_interrupted(now, self._store.load(), completed)
@@ -1333,6 +1337,8 @@ class MultiAssetScheduler:
         issues = tuple(issue for item in statuses for issue in item.issues)
         if self._observer_issue is not None:
             issues = (*issues, self._observer_issue)
+        if self._tick_observer_issue is not None:
+            issues = (*issues, self._tick_observer_issue)
         if self._storage_observability_issue is not None:
             issues = (*issues, self._storage_observability_issue)
         if self._storage_observability_failure_reason is not None:
@@ -1504,6 +1510,17 @@ class MultiAssetScheduler:
         """Retry transient observer failures without rerunning provider jobs."""
         for attempt in tuple(self._pending_notifications.values()):
             self._notify(attempt)
+
+    def _run_tick_observer(self) -> None:
+        """Run one optional per-tick drain without disturbing scheduled jobs."""
+        if self._tick_observer is None:
+            return
+        try:
+            self._tick_observer()
+        except Exception:  # noqa: BLE001
+            self._tick_observer_issue = "scheduled tick observer could not complete"
+        else:
+            self._tick_observer_issue = None
 
     def _retry_storage_observations(self) -> None:
         """Retry frozen collector candidates once per tick, never rerunning the provider."""

@@ -3,6 +3,7 @@
 import json
 import os
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -17,6 +18,7 @@ from investment_analyst.alerts.analytical_models import (
 )
 from investment_analyst.alerts.analytical_state import (
     AnalyticalCandidateStatus,
+    AnalyticalScreeningState,
     AnalyticalScreeningStateStore,
 )
 from investment_analyst.application.operational_state import AaplOperationalStateError
@@ -247,6 +249,11 @@ class CandidateNotificationReconciliation:
         self._state = state
         self._notification_ids = {item.notification_id for item in state.items}
 
+    @property
+    def state(self) -> CandidateNotificationState:
+        """Return the current projected outbox for one batch consumer."""
+        return self._state
+
     def contains(self, identifier: UUID) -> bool:
         return identifier in self._notification_ids
 
@@ -276,10 +283,17 @@ class CandidateNotificationMonitor:
     """Enqueue persisted new candidates without evaluating rules or touching providers."""
 
     def __init__(
-        self, store: CandidateNotificationStore, analytical_store: AnalyticalScreeningStateStore
+        self,
+        store: CandidateNotificationStore,
+        analytical_store: AnalyticalScreeningStateStore,
+        *,
+        batch_observer: (
+            Callable[[AnalyticalScreeningState, CandidateNotificationState], None] | None
+        ) = None,
     ) -> None:
         self._store = store
         self._analytical_store = analytical_store
+        self._batch_observer = batch_observer
 
     def __call__(self, _attempt: object) -> None:
         self.reconcile()
@@ -303,6 +317,8 @@ class CandidateNotificationMonitor:
             )
             if not reconciliation.contains(item.notification_id):
                 reconciliation.enqueue(item)
+        if self._batch_observer is not None:
+            self._batch_observer(state, reconciliation.state)
 
 
 def _notification_payload(result: AnalyticalScreeningResult) -> CandidateNotificationPayload:

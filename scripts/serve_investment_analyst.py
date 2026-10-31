@@ -25,6 +25,12 @@ from investment_analyst.alerts.candidate_notifications import (
     CandidateNotificationStore,
 )
 from investment_analyst.alerts.cazatiburones_notifications import CazatiburonesNotificationStore
+from investment_analyst.alerts.desktop_notifications import (
+    DesktopNotificationMonitor,
+    DesktopNotificationService,
+    DesktopNotificationStore,
+)
+from investment_analyst.alerts.windows_notifications import WindowsToastAdapter
 from investment_analyst.application.aapl_bootstrap_models import AaplRefreshMode
 from investment_analyst.application.aapl_daily_runner import AaplDailyRunner
 from investment_analyst.application.aapl_scheduler import (
@@ -90,6 +96,7 @@ _CAZATIBURONES_NOTIFICATION_OUTBOX_STATE_FILE = "cazatiburones_notification_outb
 _ANALYTICAL_RULE_REGISTRY_FILE = "analytical_rule_registry_state_v1.json"
 _MANUAL_OPERATION_STATE_FILE = "manual_operation_state_v1.json"
 _ASSET_PREFERENCES_STATE_FILE = "asset_preferences_state_v1.json"
+_DESKTOP_NOTIFICATIONS_STATE_DIR = "desktop_notifications"
 _SERVICE_LOCK_FILE = "aapl_local_service.lock"
 _SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS = 60.0
 _BYTES_PER_MEGABYTE = 1024 * 1024
@@ -277,6 +284,20 @@ def _serve_after_lock(
         workspace_root,
         analytical_rule_store,
     )
+    manifest = runtime.workspace_service.manifest(workspace_root)
+    desktop_notification_service = DesktopNotificationService(
+        DesktopNotificationStore(
+            state_root / _DESKTOP_NOTIFICATIONS_STATE_DIR,
+            workspace_uuid=manifest.workspace_id,
+        ),
+        WindowsToastAdapter(),
+        rules=analytical_rule_store.snapshot,
+    )
+    desktop_notification_monitor = DesktopNotificationMonitor(
+        desktop_notification_service,
+        batch_loader=lambda: (analytical_store.load(), notification_store.load()),
+    )
+    desktop_notification_service.recover()
     selected_asset_ids = tuple(
         sorted(
             {
@@ -345,9 +366,12 @@ def _serve_after_lock(
             analytical_rule_store.rules,
         )
         analytical_monitor.reconcile(schedule_attempts)
-        notification_monitor = CandidateNotificationMonitor(notification_store, analytical_store)
+        notification_monitor = CandidateNotificationMonitor(
+            notification_store,
+            analytical_store,
+            batch_observer=desktop_notification_monitor.observe_batch,
+        )
         notification_monitor.reconcile()
-        manifest = runtime.workspace_service.manifest(workspace_root)
         storage_paths = StoragePaths.from_workspace_root(
             workspace_root,
             format_version=manifest.format_version,
@@ -373,6 +397,7 @@ def _serve_after_lock(
                 else None
             ),
             storage_observability=storage_observability,
+            tick_observer=desktop_notification_monitor.observe_tick,
         )
 
     preference_service = AssetPreferencesService(
@@ -393,6 +418,7 @@ def _serve_after_lock(
         notification_store=notification_store,
         cazatiburones_notification_store=cazatiburones_notification_store,
         asset_preferences=preference_service,
+        desktop_notifications=desktop_notification_service,
     )
     manual_operations = ManualOperationQueue(
         ManualOperationStateStore(state_root / _MANUAL_OPERATION_STATE_FILE),

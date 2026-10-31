@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
+
 from investment_analyst.alerts.analytical_models import (
     AnalyticalConditionState,
     AnalyticalScreeningDomain,
@@ -114,3 +116,62 @@ def test_reconcile_enqueues_only_new_candidates_once(tmp_path) -> None:
     assert len(state.items) == 1
     assert state.items[0].candidate_id == new_candidate.candidate_id
     assert state.items[0].notification_id == notification_id(new_candidate.candidate_id)
+
+
+def test_reconcile_persists_before_an_optional_batch_observer(tmp_path) -> None:
+    def candidate(result_id):
+        return AnalyticalCandidateEvent(
+            candidate_id=analytical_candidate_id(result_id),
+            activation_result_id=result_id,
+            rule_id="market.test",
+            rule_version="v1",
+            rule_fingerprint="f" * 64,
+            asset_id="crypto:btc-usd",
+            domain=AnalyticalScreeningDomain.MARKET,
+            source_id="test-source",
+            as_of=datetime(2026, 1, 1, tzinfo=UTC),
+            activated_at=datetime(2026, 1, 2, tzinfo=UTC),
+            cooldown_until=datetime(2026, 1, 3, tzinfo=UTC),
+            confirmations=1,
+        )
+
+    new_candidate = candidate(uuid4())
+    analytical_state = SimpleNamespace(
+        candidates=(new_candidate,),
+        results=(
+            SimpleNamespace(
+                result_id=new_candidate.activation_result_id,
+                rule=SimpleNamespace(name_es="Regla de prueba"),
+                explanation_es="Evidencia compacta de prueba.",
+                conditions=(
+                    SimpleNamespace(
+                        condition_id="market.test",
+                        state=AnalyticalConditionState.MET,
+                        metric_key="market.test",
+                        unit="ratio",
+                        metric_result_id=None,
+                        as_of=None,
+                        explanation_es="Condición satisfecha.",
+                    ),
+                ),
+            ),
+        ),
+    )
+    observed = []
+
+    def observer(analytical, notifications):
+        observed.append((analytical, notifications))
+        raise RuntimeError("channel failure")
+
+    store = CandidateNotificationStore(tmp_path / "notifications.json")
+    monitor = CandidateNotificationMonitor(
+        store,
+        SimpleNamespace(load=lambda: analytical_state),
+        batch_observer=observer,
+    )
+    with pytest.raises(RuntimeError, match="channel failure"):
+        monitor.reconcile()
+
+    persisted = store.load()
+    assert len(persisted.items) == 1
+    assert observed == [(analytical_state, persisted)]

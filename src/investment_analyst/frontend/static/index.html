@@ -1400,6 +1400,41 @@
               </div>
             </details>
 
+            <details id="desktop-notification-panel" class="operation-panel">
+              <summary>
+                <span>
+                  <strong>Avisos Windows</strong>
+                  <small id="desktop-notification-summary">Canal local opcional · sin señal de inversión</small>
+                </span>
+                <span class="summary-action">Abrir</span>
+              </summary>
+              <p class="panel-copy">
+                Entrega candidatos ya persistidos como avisos del sistema. No crea señales, no
+                ejecuta órdenes y no sustituye la revisión humana. Que Windows acepte el aviso no
+                demuestra que se haya visto.
+              </p>
+              <p id="desktop-notification-capability">Capacidad sin consultar.</p>
+              <div class="run-actions">
+                <button id="desktop-notification-toggle" class="button primary compact" type="button">
+                  Activar avisos Windows
+                </button>
+                <button id="desktop-notification-test" class="button secondary compact" type="button">
+                  PRUEBA — sin señal de inversión
+                </button>
+                <span id="desktop-notification-status" role="status" aria-live="polite"></span>
+              </div>
+              <ul id="desktop-notification-limitations" class="panel-copy">
+                <li>La interfaz puede estar cerrada; el servicio local decide si hay trabajo elegible.</li>
+                <li>Windows puede suprimir el aviso si el equipo está apagado, bloqueado o sin sesión interactiva.</li>
+                <li>Un estado aceptado o desconocido nunca se reenvía automáticamente.</li>
+              </ul>
+              <div id="desktop-notification-counts" class="alert-inbox"></div>
+              <p id="desktop-notification-budget" class="panel-copy"></p>
+              <div id="desktop-notifications" class="alert-inbox" aria-live="polite">
+                <p>Sin consultar.</p>
+              </div>
+            </details>
+
             <details id="asset-preferences-panel" class="preferences-panel">
               <summary>
                 <span>

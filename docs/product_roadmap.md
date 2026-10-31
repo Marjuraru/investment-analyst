@@ -78,6 +78,14 @@ La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de
 La implementación vigente de reglas, replay y entrega se reconcilia en
 [`automated_screening_alerts.md`](automated_screening_alerts.md).
 
+`ALERTS-DELIVERY`/#381 (`ADVANCES`) integra el primer canal local Windows, cerrado por defecto,
+con identidad propia, journal append-only, reintentos acotados y presupuesto de 8 MiB / 10 000
+entregas. Es una entrega descriptiva: no crea señales, recomendaciones ni ejecución, y una
+aceptación del sistema operativo no acredita lectura humana. La fila `FUNDAMENTALS-COVERAGE`
+permanece el único `NEXT`; este bloque no la cierra, no declara `DONE`, `MET` ni cobertura completa.
+La entrega real desde el servicio desplegado y sus costes observados pertenecen a la aceptación
+posterior, no a este candidato.
+
 ## Prioridad operativa de 2026-10-27
 
 DATA-CHASSIS cerró con `DATA-CHASSIS-48`/#357 (`COMPLETES`) tras la reparación temporal R4, el delta físico de la vista packed compatible y el restore final verificado desde el padre retenido más los objetos remotos. `FUNDAMENTALS-COVERAGE` queda como el único `NEXT`. `FUNDAMENTALS-COVERAGE-READINESS`/#361 (`ADVANCES`) dejó v2 listo para retomar desarrollo: lecturas críticas acotadas, recuperación remota utilizable, espacio local seguro y documentación vigente. `FUNDAMENTALS-COVERAGE-CYCLE`/#363 (`ADVANCES`) avanza los prerrequisitos operativos sin cerrar la fila: ciclo semanal determinista con fines de semana, feriados y reintentos acotados; frecuencia IFRS no declarada explicada como `not_implemented`/`not_queried`; ausencias de valoración visibles; y precio PIT compartido entre cobertura y valoración. No declara más cobertura fundamental ni cierra la ruta. Se permite adquisición reciente y warm-up necesario mediante fuentes existentes; el archivo anterior no se re-descarga masivamente. Las cronologías inferiores conservan contexto histórico, no autoridad para sustituir esta secuencia.

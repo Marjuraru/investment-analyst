@@ -160,9 +160,9 @@ sincroniza al iniciar, cambiar de activo y editar el control. BVL muestra `Abre 
 con los dos periodos y días laborables ya declarados; no modela feriados ni sesiones especiales. El
 formulario `run-form` aparece una sola vez en un panel colapsable de mantenimiento avanzado dentro de
 Sistema, cerrado por defecto. Sistema conserva
-la configuración global de watchlist, reglas y notificaciones, se titula `Configuración y
-automatización`, y el encabezado de marca es el control accesible del lateral; Sistema permanece
-último y separado.
+la configuración global de watchlist, reglas, notificaciones locales y **Avisos Windows**, se
+titula `Configuración y automatización`, y el encabezado de marca es el control accesible del
+lateral; Sistema permanece último y separado.
 
 ## Navegación contextual y superficies accesibles (`UI-14`)
 
@@ -174,7 +174,9 @@ crea tableros, rutas públicas, hashes o endpoints nuevos y conserva el `known_a
 Mesa convierte el `asset_id` del universo y sus celdas de Mercado, Fundamentales y Valoración en
 controles semánticos hacia el activo exacto, incluso cuando la celda está vencida, bloqueada o sin
 evidencia. Sus novedades abren el `candidate_id` exacto en Revisar, la incidencia por `alert_id` y
-la notificación Caz por su `asset_id` y familia. Revisar conserva la espera mientras la bandeja lazy
+la notificación Caz por su `asset_id` y familia. El canal **Avisos Windows** no añade otra bandeja:
+consume la outbox de candidatos ya existente y sólo se consulta al abrir su panel o ejecutar una
+acción explícita. Revisar conserva la espera mientras la bandeja lazy
 carga y declara honestamente una ausencia si la identidad ya no existe; su detalle y las tarjetas
 de Técnico ofrecen `Abrir en Activo` sólo para un activo identificado.
 
@@ -881,6 +883,25 @@ condiciones completas ni evidencia financiera. `POST /api/v1/candidate-notificat
 acepta exclusivamente `notification_id`, registra como máximo un acuse append-only y es idempotente.
 El acuse no cambia el estado del candidato y no envía notificaciones del navegador, sistema o red.
 
+El panel **Avisos Windows** (`desktop-notification-panel`) permanece cerrado y sólo consulta
+`GET /api/v1/desktop-notifications?limit=50` al abrirse o tras una acción del usuario. La lectura es
+de solo lectura: no ejecuta sondeos, no registra la identidad del sistema operativo y no escribe.
+Muestra el estado del canal, la capacidad verificada o su causa, los conteos por estado
+(pendientes, reintentos, aceptados, desconocidos, fallidos y cancelados), el consumo frente al
+presupuesto y una página estable de entregas con activo, regla, intento y causa cerrada.
+
+`POST /api/v1/desktop-notifications/configure` acepta exclusivamente `{"enabled": true|false}`.
+Activar registra la identidad propia `Marjuraru.InvestmentAnalyst` y la frontera temporal; los
+candidatos anteriores no se encolan. Desactivar cancela los pendientes de esa habilitación sin
+borrar evidencia. El panel explica que la interfaz puede estar cerrada y que Windows puede
+suspender el aviso si el equipo está apagado, bloqueado o sin sesión interactiva; no promete
+entrega con el equipo apagado.
+
+`POST /api/v1/desktop-notifications/test` exige `{"confirm": true}` y se limita a una prueba por
+minuto. Envía un aviso rotulado **PRUEBA — sin señal de inversión**, no crea un candidato
+financiero ficticio y registra aceptación o causa. Un estado `accepted` significa que Windows aceptó
+el transporte, no que la persona lo haya visto; `unknown` nunca se reenvía automáticamente.
+
 ## Servicio persistente con systemd
 
 El instalador genera una unidad privada y revisable. No ejecuta `systemctl`, no utiliza `sudo` y no
@@ -1124,6 +1145,8 @@ Todos permanecen dentro del workspace seleccionado:
   analíticas append-only;
 - `state/candidate_notification_outbox_state_v1.json`: recepciones locales inmutables y acuses
   append-only, independientes del ciclo de vida del candidato;
+- `state/desktop_notifications/`: configuración del canal Windows y journal append-only de entregas,
+  con límite total de 8 MiB y 10 000 entregas retenidas; no contiene evidencia financiera;
 - `state/analytical_rule_registry_state_v1.json`: revisiones locales completas de reglas con
   fingerprints encadenados;
 - `state/sec_institutional_cycle_state_v1.json`: cursor de gestores, snapshot activo y estado del ciclo institucional 13F.

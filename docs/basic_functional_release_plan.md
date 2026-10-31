@@ -261,11 +261,23 @@ motivo verificado; este bloque no lo declara cumplido ni reduce compromisos hist
 
 `route_transition:FUNDAMENTALS-COVERAGE:ADVANCES`
 
+`ALERTS-DELIVERY`/#381 (`ADVANCES`) integra el primer canal local Windows `windows_toast`, cerrado
+por defecto y con consentimiento explícito. El canal consume la outbox de candidatos ya existente,
+exige regla `active` en activación y configuración vigente, cancela con causa los cambios
+incompatibles, persiste intención antes del envío y trata timeout o resultado ilegible como
+`unknown` sin reenvío automático. Su journal vive en `state/desktop_notifications/` con presupuesto
+total de 8 MiB y 10 000 entregas; un lote envía como máximo cinco avisos con un proceso PowerShell y
+un ritmo de un lote por minuto.
+
+La integración no demuestra entrega real: eso exige el smoke post-despliegue y la observación del
+mismo release. `FUNDAMENTALS-COVERAGE` permanece el único `NEXT`; no se declara `DONE`, `MET`,
+cobertura completa ni otro `NEXT`, y no se añade un segundo canal.
+
 ### Secuencia táctica
 
 | Entrega | Salida | Dependencia | Pendiente | Candidato detallado |
 | --- | --- | --- | --- | --- |
-| ALERTS-DELIVERY | Cuatro reglas existentes verificadas sobre perfiles compatibles, un canal de entrega y explicación en la interfaz. | Monitor, outbox y bandeja integrados; runtime local activo. | Elegir un solo canal —local del sistema o equivalente— con UI cerrada y soporte WSL; no varias integraciones a la vez. | `ALERTS-DELIVERY` |
+| ALERTS-DELIVERY | Cuatro reglas existentes verificadas sobre perfiles compatibles, un canal local Windows integrado y explicación en la interfaz. | Monitor, outbox y bandeja integrados; runtime local activo. | El canal queda cerrado por defecto; falta la entrega real post-despliegue y su observación. No añadir un segundo canal. | `ALERTS-DELIVERY` |
 | COVERAGE-AND-ASSET-EXPANSION | Brechas que impidan las detecciones elegidas cubiertas y un lote acotado de identidades compatibles. | `ALERTS-DELIVERY` y carencia demostrada. | Medir coste marginal antes del lote siguiente; no fijar un número arbitrario de activos como garantía. | `COVERAGE-AND-ASSET-EXPANSION` |
 | CYCLES-AND-PATTERNS | Primera definición reproducible de régimen y un conjunto pequeño de patrones diarios, con resultados posteriores separados de coincidencias. | Cobertura suficiente para el universo elegido. | No prometer valor predictivo por disponer de indicadores. | `CYCLES-AND-PATTERNS` |
 | PREDICTIVE-RESEARCH | Una hipótesis, universo y horizonte, agrupando P0–P1 de dataset y P2–P3 de baseline/validación; P4–P6 de explicación/calibración, sombra y promoción reversible cuando corresponda. | Rutas PIT y gates existentes. | Mantener todas las puertas; no elegir booster, LLM ni dependencias por anticipado. | `PREDICTIVE-RESEARCH` |
