@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from investment_analyst.alerts.analytical_models import AnalyticalRuleState
 from investment_analyst.alerts.analytical_rule_catalog import (
     INITIAL_ANALYTICAL_RULES,
+    INITIAL_ANNUAL_FUNDAMENTAL_RULE,
     INITIAL_MARKET_ACTIVITY_RULE,
 )
 from investment_analyst.alerts.analytical_rule_registry import (
@@ -56,8 +57,35 @@ def test_registry_uses_packaged_defaults_without_creating_state(tmp_path: Path) 
 
     assert not path.exists()
     assert snapshot.total_revisions == 0
+    assert len(snapshot.configurations) == 5
     assert tuple(item.rule for item in snapshot.configurations) == INITIAL_ANALYTICAL_RULES
     assert all(not item.customized for item in snapshot.configurations)
+
+
+def test_registry_adopts_fifth_default_without_rewriting_existing_revision(tmp_path: Path) -> None:
+    path = tmp_path / "rules.json"
+    legacy_defaults = tuple(
+        rule
+        for rule in INITIAL_ANALYTICAL_RULES
+        if rule.rule_id != INITIAL_ANNUAL_FUNDAMENTAL_RULE.rule_id
+    )
+    legacy = AnalyticalRuleRegistryStore(path, legacy_defaults)
+    legacy.update(
+        _request(legacy, threshold="2.0", exit_threshold="1.6"),
+        recorded_at=_RECORDED_AT,
+    )
+
+    restarted = AnalyticalRuleRegistryStore(path, INITIAL_ANALYTICAL_RULES)
+    snapshot = restarted.snapshot()
+    market = restarted.get(INITIAL_MARKET_ACTIVITY_RULE.rule_id)
+
+    assert len(snapshot.configurations) == 5
+    assert snapshot.total_revisions == 1
+    assert market.rule_version == "1.0.local.1"
+    assert str(market.conditions[0].threshold) == "2.0"
+    assert restarted.get(INITIAL_ANNUAL_FUNDAMENTAL_RULE.rule_id) == (
+        INITIAL_ANNUAL_FUNDAMENTAL_RULE
+    )
 
 
 def test_registry_persists_audited_revision_and_survives_restart(tmp_path: Path) -> None:

@@ -31,6 +31,7 @@ _ASSET_ID = "equity:us:aapl"
 _SOURCE_ID = "alpaca-market-data:iex:aapl:daily-bars:adjustment-all"
 _MARKET_RULE_ID = "market.activity.relative-volume-review"
 _FUNDAMENTAL_RULE_ID = "fundamentals.quarterly-balance-growth-review"
+_ANNUAL_FUNDAMENTAL_RULE_ID = "fundamentals.annual-balance-growth-review"
 _FUNDAMENTAL_SOURCE_ID = "sec-edgar:aapl:companyfacts"
 _V2_OBSERVATION_NAMESPACE = UUID("6b000000-0000-4000-8000-000000000001")
 
@@ -70,6 +71,7 @@ def _fundamental_metric(
     identifier: int,
     as_of: datetime,
     available_at: datetime,
+    frequency: str = "quarterly",
 ) -> MetricResult:
     algorithms = {
         "fundamental.liabilities_to_assets": ("sec-fundamental-liabilities-to-assets-v1-decimal34"),
@@ -87,7 +89,7 @@ def _fundamental_metric(
         computed_at=available_at,
         parameters={
             "source_id": _FUNDAMENTAL_SOURCE_ID,
-            "frequency": "quarterly",
+            "frequency": frequency,
         },
         input_observation_ids=[UUID(f"63000000-0000-4000-8000-{identifier:012d}")],
         algorithm_version=algorithms[metric_key],
@@ -354,6 +356,75 @@ def test_fundamental_backtest_uses_available_at_and_latest_revision(tmp_path: Pa
     assert result.evaluations[1].result.matched is True
     assert result.evaluations[1].result.conditions[0].observed_value == Decimal("0.5")
     assert result.candidate_activation_count == 1
+
+
+def test_annual_fundamental_backtest_replays_only_annual_evidence(tmp_path: Path) -> None:
+    first_as_of = datetime(2025, 12, 31, tzinfo=UTC)
+    second_as_of = datetime(2026, 6, 30, tzinfo=UTC)
+    metrics = (
+        _fundamental_metric(
+            "fundamental.liabilities_to_assets",
+            "0.7",
+            identifier=1,
+            as_of=first_as_of,
+            available_at=datetime(2026, 2, 15, tzinfo=UTC),
+            frequency="annual",
+        ),
+        _fundamental_metric(
+            "fundamental.net_margin",
+            "0.2",
+            identifier=2,
+            as_of=first_as_of,
+            available_at=datetime(2026, 2, 15, tzinfo=UTC),
+            frequency="annual",
+        ),
+        _fundamental_metric(
+            "fundamental.revenue_yoy_growth",
+            "0.1",
+            identifier=3,
+            as_of=first_as_of,
+            available_at=datetime(2026, 2, 15, tzinfo=UTC),
+            frequency="annual",
+        ),
+        _fundamental_metric(
+            "fundamental.liabilities_to_assets",
+            "0.5",
+            identifier=4,
+            as_of=second_as_of,
+            available_at=datetime(2026, 8, 15, tzinfo=UTC),
+            frequency="annual",
+        ),
+        _fundamental_metric(
+            "fundamental.net_margin",
+            "0.25",
+            identifier=5,
+            as_of=second_as_of,
+            available_at=datetime(2026, 8, 15, tzinfo=UTC),
+            frequency="annual",
+        ),
+        _fundamental_metric(
+            "fundamental.revenue_yoy_growth",
+            "0.12",
+            identifier=6,
+            as_of=second_as_of,
+            available_at=datetime(2026, 8, 15, tzinfo=UTC),
+            frequency="annual",
+        ),
+    )
+
+    result = _service(tmp_path, metrics).run(
+        AnalyticalBacktestRequest(
+            rule_id=_ANNUAL_FUNDAMENTAL_RULE_ID,
+            asset_id=_ASSET_ID,
+            max_cuts=20,
+        )
+    )
+
+    assert result.total_available_cuts == 2
+    assert result.evaluations[0].result.matched is False
+    assert result.evaluations[1].result.matched is True
+    assert result.evaluations[1].result.conditions[0].observed_value == Decimal("0.5")
+    assert result.matched_count == 1
 
 
 def test_backtest_rejects_missing_or_ambiguous_sources(tmp_path: Path) -> None:

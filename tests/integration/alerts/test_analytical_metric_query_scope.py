@@ -15,6 +15,7 @@ from investment_analyst.alerts.analytical_backtest import (
 from investment_analyst.alerts.analytical_monitor import AnalyticalScreeningMonitor
 from investment_analyst.alerts.analytical_rule_catalog import (
     INITIAL_ANALYTICAL_RULES,
+    INITIAL_ANNUAL_FUNDAMENTAL_RULE,
     INITIAL_MARKET_ACTIVITY_RULE,
 )
 from investment_analyst.alerts.analytical_rule_registry import AnalyticalRuleRegistryStore
@@ -40,6 +41,12 @@ _ASSET_ID = "equity:us:aapl"
 _SOURCE_ID = "alpaca-market-data:iex:aapl:daily-bars:adjustment-all"
 _METRIC_KEY = "market.history.relative_volume"
 _METRIC_ALGORITHM = "market-relative-volume-v1-decimal34"
+_FUNDAMENTAL_SOURCE_ID = "sec-edgar:aapl:companyfacts"
+_FUNDAMENTAL_METRICS = {
+    "fundamental.liabilities_to_assets": "sec-fundamental-liabilities-to-assets-v1-decimal34",
+    "fundamental.net_margin": "sec-fundamental-net-margin-v1-decimal34",
+    "fundamental.revenue_yoy_growth": "sec-fundamental-revenue-yoy-growth-v1-decimal34",
+}
 
 
 def _metric(
@@ -162,6 +169,134 @@ def _attempt(known_at: datetime) -> ScheduledJobAttempt:
     )
 
 
+def _fundamental_metric(
+    metric_key: str,
+    value: str,
+    *,
+    identifier: int,
+    frequency: str = "annual",
+    source_id: str = _FUNDAMENTAL_SOURCE_ID,
+    asset_id: str = _ASSET_ID,
+) -> MetricResult:
+    as_of = datetime(2025, 12, 31, tzinfo=UTC)
+    available_at = datetime(2026, 2, 15, 12, tzinfo=UTC)
+    return MetricResult(
+        result_id=UUID(f"85000000-0000-4000-8000-{identifier:012d}"),
+        asset_id=asset_id,
+        metric_key=metric_key,
+        value=Decimal(value),
+        unit="ratio",
+        as_of=as_of,
+        available_at=available_at,
+        computed_at=available_at,
+        parameters={"source_id": source_id, "frequency": frequency},
+        input_observation_ids=[UUID(f"86000000-0000-4000-8000-{identifier:012d}")],
+        algorithm_version=_FUNDAMENTAL_METRICS.get(metric_key, "unused-fundamental-v1"),
+        quality=DataQuality.VALID,
+    )
+
+
+def _fundamental_corpus(*, foreign_assets: int) -> tuple[MetricResult, ...]:
+    in_scope = (
+        _fundamental_metric("fundamental.liabilities_to_assets", "0.5", identifier=1),
+        _fundamental_metric("fundamental.net_margin", "0.2", identifier=2),
+        _fundamental_metric("fundamental.revenue_yoy_growth", "0.1", identifier=3),
+    )
+    foreign_asset_rows = tuple(
+        metric
+        for index in range(foreign_assets)
+        for metric in (
+            _fundamental_metric(
+                "fundamental.liabilities_to_assets",
+                "0.9",
+                identifier=10 + index * 3,
+                asset_id=f"equity:us:foreign{index}",
+            ),
+            _fundamental_metric(
+                "fundamental.net_margin",
+                "0.9",
+                identifier=11 + index * 3,
+                asset_id=f"equity:us:foreign{index}",
+            ),
+            _fundamental_metric(
+                "fundamental.revenue_yoy_growth",
+                "0.9",
+                identifier=12 + index * 3,
+                asset_id=f"equity:us:foreign{index}",
+            ),
+        )
+    )
+    foreign_source = tuple(
+        _fundamental_metric(
+            "fundamental.liabilities_to_assets",
+            "0.9",
+            identifier=100 + index,
+            source_id=f"sec-edgar:foreign{index}:companyfacts",
+        )
+        for index in range(3)
+    )
+    foreign_frequency = tuple(
+        _fundamental_metric(
+            "fundamental.liabilities_to_assets",
+            "0.9",
+            identifier=200 + index,
+            frequency="quarterly",
+        )
+        for index in range(3)
+    )
+    unrelated_key = (_fundamental_metric("fundamental.asset_turnover", "9", identifier=300),)
+    later_cut = (
+        _fundamental_metric(
+            "fundamental.liabilities_to_assets",
+            "0.9",
+            identifier=400,
+        ).model_copy(
+            update={
+                "available_at": datetime(2026, 9, 2, tzinfo=UTC),
+                "computed_at": datetime(2026, 9, 2, tzinfo=UTC),
+            }
+        ),
+    )
+    return (
+        *in_scope,
+        *foreign_asset_rows,
+        *foreign_source,
+        *foreign_frequency,
+        *unrelated_key,
+        *later_cut,
+    )
+
+
+def _fundamental_attempt(known_at: datetime, *, attempt_id: UUID) -> ScheduledJobAttempt:
+    definition = ScheduledJobDefinition(
+        job_id="sec:equity:us:aapl:fundamentals-annual",
+        asset_id=_ASSET_ID,
+        provider="sec-edgar",
+        domain=ScheduledJobDomain.FUNDAMENTALS,
+        data_frequency="annual",
+        timezone="America/Lima",
+        run_at=time(hour=7),
+    )
+    return ScheduledJobAttempt(
+        attempt_id=attempt_id,
+        definition=definition,
+        local_date=date(2026, 9, 1),
+        scheduled_for=datetime(2026, 9, 1, 12, tzinfo=UTC),
+        attempt_number=1,
+        status=ScheduledJobAttemptStatus.SUCCEEDED,
+        started_at=datetime(2026, 9, 1, 12, tzinfo=UTC),
+        completed_at=datetime(2026, 9, 1, 12, 2, tzinfo=UTC),
+        execution=ScheduledJobExecution(
+            job_id=definition.job_id,
+            effective_known_at=known_at,
+            evidence_changed=True,
+            source_ids=(_FUNDAMENTAL_SOURCE_ID,),
+            created_count=1,
+            reused_count=0,
+        ),
+    )
+
+
 def _run_monitor(
     root: Path,
     metrics: tuple[MetricResult, ...],
@@ -259,6 +394,113 @@ def _run_backtest(
 
     assert len(observed_rows) == 1
     return result, observed_rows[0]
+
+
+def _run_fundamental_scope(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    foreign_assets: int,
+) -> tuple[AnalyticalScreeningState, int, list[dict[str, object]], list[tuple[UUID, ...]]]:
+    known_at = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    service, paths, runtime = _seed(root, _fundamental_corpus(foreign_assets=foreign_assets))
+    store = AnalyticalScreeningStateStore(paths.state_root / "analytical.json")
+    list_calls = 0
+    list_id_calls: list[dict[str, object]] = []
+    hydration_runs: list[tuple[UUID, ...]] = []
+    original_list = DuckDBMetricResultRepository.list
+    original_list_ids = DuckDBMetricResultRepository.list_ids
+    original_get_many = DuckDBMetricResultRepository.get_many
+
+    def tracked_list(
+        repository: DuckDBMetricResultRepository, **kwargs: object
+    ) -> list[MetricResult]:
+        nonlocal list_calls
+        list_calls += 1
+        return original_list(repository, **kwargs)
+
+    def tracked_list_ids(
+        repository: DuckDBMetricResultRepository,
+        **kwargs: object,
+    ) -> list[UUID]:
+        list_id_calls.append(dict(kwargs))
+        return original_list_ids(repository, **kwargs)
+
+    def tracked_get_many(
+        repository: DuckDBMetricResultRepository,
+        result_ids: tuple[UUID, ...] | list[UUID],
+    ) -> dict[UUID, MetricResult]:
+        hydration_runs[-1] = (*hydration_runs[-1], *result_ids)
+        return original_get_many(repository, result_ids)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DuckDBMetricResultRepository, "list", tracked_list)
+        patch.setattr(DuckDBMetricResultRepository, "list_ids", tracked_list_ids)
+        patch.setattr(DuckDBMetricResultRepository, "get_many", tracked_get_many)
+        monitor = AnalyticalScreeningMonitor(
+            store,
+            runtime,
+            paths.root,
+            (INITIAL_ANNUAL_FUNDAMENTAL_RULE,),
+            clock=lambda: datetime(2026, 9, 2, tzinfo=UTC),
+        )
+        for attempt_id in (
+            UUID("87000000-0000-4000-8000-000000000001"),
+            UUID("87000000-0000-4000-8000-000000000002"),
+        ):
+            hydration_runs.append(())
+            monitor(_fundamental_attempt(known_at, attempt_id=attempt_id))
+
+    return store.load(), list_calls, list_id_calls, hydration_runs
+
+
+def test_fundamental_query_hydrates_only_scope_across_1x_and_10x_foreign_corpora(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    known_at = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    expected_ids = {
+        UUID("85000000-0000-4000-8000-000000000001"),
+        UUID("85000000-0000-4000-8000-000000000002"),
+        UUID("85000000-0000-4000-8000-000000000003"),
+    }
+
+    baseline, baseline_list_calls, baseline_list_ids, baseline_runs = _run_fundamental_scope(
+        tmp_path / "corpus-1x",
+        monkeypatch,
+        foreign_assets=1,
+    )
+    scaled, scaled_list_calls, scaled_list_ids, scaled_runs = _run_fundamental_scope(
+        tmp_path / "corpus-10x",
+        monkeypatch,
+        foreign_assets=10,
+    )
+
+    expected_call = {
+        "asset_id": _ASSET_ID,
+        "metric_keys": tuple(sorted(_FUNDAMENTAL_METRICS)),
+        "available_to": known_at,
+        "parameter_equals": {
+            "source_id": _FUNDAMENTAL_SOURCE_ID,
+            "frequency": "annual",
+        },
+    }
+    assert baseline_list_calls == scaled_list_calls == 0
+    assert baseline_list_ids == [expected_call, expected_call]
+    assert scaled_list_ids == [expected_call, expected_call]
+    assert tuple(baseline_runs[0]) == tuple(sorted(expected_ids, key=str))
+    assert baseline_runs[0] == baseline_runs[1]
+    assert scaled_runs[0] == scaled_runs[1] == baseline_runs[0]
+    assert all(len(batch) <= 256 for batch in (*baseline_runs, *scaled_runs))
+    assert len(baseline.results) == len(scaled.results) == 1
+    baseline_result = baseline.results[0]
+    scaled_result = scaled.results[0]
+    assert baseline_result.result_id == scaled_result.result_id
+    assert baseline_result.as_of == scaled_result.as_of == datetime(2025, 12, 31, tzinfo=UTC)
+    assert baseline_result.matched is scaled_result.matched is True
+    assert baseline_result.conditions[0].observed_value == Decimal("0.5")
+    assert {item.metric_result_id for item in baseline_result.conditions} == expected_ids
+    assert {receipt.result_ids for receipt in baseline.receipts} == {(baseline_result.result_id,)}
 
 
 def test_bounded_monitor_query_reduces_rows_without_changing_screening_result(

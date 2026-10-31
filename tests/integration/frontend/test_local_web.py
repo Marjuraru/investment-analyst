@@ -3619,7 +3619,11 @@ def test_local_api_versions_rule_updates_and_rejects_stale_edits(tmp_path: Path)
         )
     ) as (_, root):
         initial_status, initial, _ = _json_request(Request(f"{root}/api/screening-rules"))
-        configuration = initial["configurations"][1]
+        configuration = next(
+            item
+            for item in initial["configurations"]
+            if item["rule"]["rule_id"] == "market.activity.relative-volume-review"
+        )
         rule = configuration["rule"]
         payload = {
             "schema_version": "analytical-rule-configuration-update-v1",

@@ -39,6 +39,8 @@ from investment_analyst.workspace.models import WorkspaceAccessMode
 
 ANALYTICAL_WINDOW_REVISION_SELECTION_POLICY = "analytical-window-revision-selection-v1"
 
+_FUNDAMENTAL_METRIC_HYDRATION_BATCH_SIZE = 256
+
 WINDOW_DEPENDENT_METRIC_KEYS: frozenset[str] = frozenset(
     {
         "market.technical.ema",
@@ -196,6 +198,8 @@ class AnalyticalScreeningMonitor:
             )
             if item.domain is domain and asset.asset_class in item.asset_classes
         )
+        if domain is AnalyticalScreeningDomain.FUNDAMENTALS:
+            rules = _fundamental_rules_for_frequency(rules, attempt.definition.data_frequency)
         if not rules:
             self._record_skipped(attempt, "no_compatible_rules", reconciliation=reconciliation)
             return
@@ -211,12 +215,35 @@ class AnalyticalScreeningMonitor:
             StorageLocationRequest(workspace=self._workspace),
             access_mode=WorkspaceAccessMode.READ_ONLY,
         ) as storage:
-            metrics = tuple(
-                storage.metric_results.list(
+            if domain is AnalyticalScreeningDomain.FUNDAMENTALS:
+                identifiers = storage.metric_results.list_ids(
                     asset_id=asset.asset_id,
                     metric_keys=metric_keys,
+                    available_to=known_at,
+                    parameter_equals={
+                        "source_id": source_id,
+                        "frequency": attempt.definition.data_frequency,
+                    },
                 )
-            )
+                hydrated: list[MetricResult] = []
+                for start in range(
+                    0,
+                    len(identifiers),
+                    _FUNDAMENTAL_METRIC_HYDRATION_BATCH_SIZE,
+                ):
+                    hydrated.extend(
+                        storage.metric_results.get_many(
+                            identifiers[start : start + _FUNDAMENTAL_METRIC_HYDRATION_BATCH_SIZE]
+                        ).values()
+                    )
+                metrics = tuple(sorted(hydrated, key=lambda item: (item.as_of, item.result_id)))
+            else:
+                metrics = tuple(
+                    storage.metric_results.list(
+                        asset_id=asset.asset_id,
+                        metric_keys=metric_keys,
+                    )
+                )
         computed_at = self._normalized_clock()
         if computed_at < known_at:
             computed_at = known_at
@@ -316,6 +343,30 @@ class AnalyticalScreeningMonitor:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("analytical monitor clock must be timezone-aware")
         return value.astimezone(UTC)
+
+
+def _fundamental_rules_for_frequency(
+    rules: tuple[AnalyticalScreeningRule, ...],
+    frequency: str,
+) -> tuple[AnalyticalScreeningRule, ...]:
+    """Dispatch only rules whose single declared frequency matches the attempt."""
+    dispatched: list[AnalyticalScreeningRule] = []
+    for rule in rules:
+        declared = _fundamental_rule_frequency(rule)
+        if declared is None:
+            return ()
+        if declared == frequency:
+            dispatched.append(rule)
+    return tuple(dispatched)
+
+
+def _fundamental_rule_frequency(rule: AnalyticalScreeningRule) -> str | None:
+    """Resolve one coherent frequency without inventing a per-asset fallback."""
+    declared = tuple(condition.parameter_filters.get("frequency") for condition in rule.conditions)
+    if not declared or any(item != declared[0] for item in declared):
+        return None
+    frequency = declared[0]
+    return frequency if isinstance(frequency, str) and frequency else None
 
 
 def _analytical_domain(domain: ScheduledJobDomain) -> AnalyticalScreeningDomain | None:

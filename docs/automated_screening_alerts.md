@@ -405,19 +405,26 @@ por frescura y presupuestos observados por proveedor sin alterar resultados ya p
 ### Etapa B — Screening analítico
 
 Primer corte determinista implementado localmente el 29 de julio de 2026; el catálogo empaquetado se
-amplió después hasta las cuatro plantillas actuales:
+amplió después hasta las cinco plantillas actuales:
 
 - contratos estrictos de regla, condición, solicitud, resultado trivaluado y evidencia;
 - motor puro sin I/O que recibe una instantánea métrica ya seleccionada point-in-time;
 - validación de activo, clase, fuente, período común, disponibilidad, algoritmo, unidad, parámetros
   y calidad;
 - identidad reproducible independiente de `computed_at`;
-- cuatro plantillas empaquetadas `SILENT`: actividad relativa de mercado para acciones, ETF y cripto;
-  RSI Wilder bajo; histograma MACD positivo; y balance, margen y crecimiento trimestral para acciones;
+- cinco plantillas empaquetadas `SILENT`: actividad relativa de mercado para acciones, ETF y cripto;
+  RSI Wilder bajo; histograma MACD positivo; balance, margen y crecimiento trimestral para acciones;
+  y la misma revisión de balance, margen y crecimiento con evidencia anual;
 - defaults `SILENT` versionados en el catálogo; Cazatiburones conserva sus reglas separadas y ninguna
   plantilla se activa por el solo hecho de estar integrada;
 - ausencia como `not_evaluable`, sin convertirla en cero;
 - mercado y fundamentales evaluados por separado, sin score ni recomendación;
+- despacho fundamental por la frecuencia del intento: un job anual evalúa sólo reglas anuales y uno
+  trimestral sólo reglas trimestrales; una regla sin frecuencia única coherente no se ejecuta y el
+  intento se registra como omitido, sin fallback por ticker ni mezcla de períodos;
+- antes de hidratar métricas fundamentales se seleccionan IDs por activo, claves, `available_to`,
+  fuente y frecuencia, y sólo después se hidratan en lotes de hasta 256; no se lista el histórico
+  completo para descartarlo en memoria;
 - persistencia atómica de resultados, recibos por intento, candidatos y transiciones;
 - conexión al scheduler únicamente tras éxito, cobertura completa y evidencia nueva;
 - selección del corte métrico exacto por activo, fuente, `known_at`, período, algoritmo, parámetros,
@@ -434,8 +441,9 @@ amplió después hasta las cuatro plantillas actuales:
 - replay histórico acotado y de solo lectura por regla y activo;
 - resolución dinámica de la versión vigente en cada nuevo intento del scheduler.
 
-Pendiente en esta etapa: ampliar el catálogo de reglas y observar varios ciclos silenciosos reales
-antes de habilitar cualquier canal externo.
+Pendiente en esta etapa: observar varios ciclos silenciosos reales de las reglas anuales y
+trimestrales antes de habilitar notificaciones financieras; la quinta plantilla permanece `SILENT` y
+no se calibra con el resultado de un piloto.
 
 ### Etapa C — Valoración y notificaciones
 

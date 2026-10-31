@@ -111,6 +111,58 @@ MACD_POSITIVE_HISTOGRAM_REVIEW_RULE = AnalyticalScreeningRule(
     limitations=("No es una señal predictiva ni una recomendación.",),
 )
 
+INITIAL_ANNUAL_FUNDAMENTAL_RULE = AnalyticalScreeningRule(
+    rule_id="fundamentals.annual-balance-growth-review",
+    rule_version="1.0",
+    name_es="Balance, margen y crecimiento anual para revisión",
+    description_es=("Evalúa simultáneamente tres condiciones fundamentales anuales configuradas."),
+    state=AnalyticalRuleState.SILENT,
+    domain=AnalyticalScreeningDomain.FUNDAMENTALS,
+    asset_classes=(AssetClass.EQUITY,),
+    conditions=(
+        AnalyticalScreeningCondition(
+            condition_id="liabilities_to_assets_lte_0_6",
+            label_es="Pasivos sobre activos",
+            domain=AnalyticalScreeningDomain.FUNDAMENTALS,
+            metric_key="fundamental.liabilities_to_assets",
+            algorithm_version="sec-fundamental-liabilities-to-assets-v1-decimal34",
+            unit="ratio",
+            operator=AnalyticalConditionOperator.LESS_THAN_OR_EQUAL,
+            threshold=Decimal("0.6"),
+            parameter_filters={"frequency": "annual"},
+        ),
+        AnalyticalScreeningCondition(
+            condition_id="net_margin_gt_0",
+            label_es="Margen neto",
+            domain=AnalyticalScreeningDomain.FUNDAMENTALS,
+            metric_key="fundamental.net_margin",
+            algorithm_version="sec-fundamental-net-margin-v1-decimal34",
+            unit="ratio",
+            operator=AnalyticalConditionOperator.GREATER_THAN,
+            threshold=Decimal("0"),
+            parameter_filters={"frequency": "annual"},
+        ),
+        AnalyticalScreeningCondition(
+            condition_id="revenue_yoy_growth_gt_0",
+            label_es="Crecimiento interanual de ingresos",
+            domain=AnalyticalScreeningDomain.FUNDAMENTALS,
+            metric_key="fundamental.revenue_yoy_growth",
+            algorithm_version="sec-fundamental-revenue-yoy-growth-v1-decimal34",
+            unit="ratio",
+            operator=AnalyticalConditionOperator.GREATER_THAN,
+            threshold=Decimal("0"),
+            parameter_filters={"frequency": "annual"},
+        ),
+    ),
+    confirmations_required=1,
+    cooldown_seconds=604_800,
+    limitations=(
+        "Los umbrales son una plantilla inicial configurable, no una definición universal "
+        "de calidad.",
+        "La regla no incorpora valoración, precio, sector ni contexto macro.",
+    ),
+)
+
 INITIAL_QUARTERLY_FUNDAMENTAL_RULE = AnalyticalScreeningRule(
     rule_id="fundamentals.quarterly-balance-growth-review",
     rule_version="1.0",
@@ -166,6 +218,7 @@ INITIAL_QUARTERLY_FUNDAMENTAL_RULE = AnalyticalScreeningRule(
 )
 
 INITIAL_ANALYTICAL_RULES = (
+    INITIAL_ANNUAL_FUNDAMENTAL_RULE,
     INITIAL_QUARTERLY_FUNDAMENTAL_RULE,
     INITIAL_MARKET_ACTIVITY_RULE,
     MACD_POSITIVE_HISTOGRAM_REVIEW_RULE,
@@ -174,6 +227,7 @@ INITIAL_ANALYTICAL_RULES = (
 
 __all__ = [
     "INITIAL_ANALYTICAL_RULES",
+    "INITIAL_ANNUAL_FUNDAMENTAL_RULE",
     "INITIAL_MARKET_ACTIVITY_RULE",
     "INITIAL_QUARTERLY_FUNDAMENTAL_RULE",
     "RSI_LOW_REVIEW_RULE",

@@ -130,9 +130,17 @@ La página permite:
 - seleccionar opcionalmente fechas `as-of` independientes para mercado y fundamentales;
 - ver diagnósticos, métricas, frescura, limitaciones y el contrato JSON versionado;
 - editar reglas de screening mediante revisiones locales auditadas y restaurar sus valores
-  iniciales sin borrar historia;
+  iniciales sin borrar historia; el catálogo conserva cinco plantillas y expone si cada una usa
+  evidencia anual o trimestral;
 - ejecutar un replay point-in-time de frecuencia y ruido sobre el activo seleccionado;
-- mantener actualizaciones diarias de la watchlist mientras el servicio está activo.
+- mantener actualizaciones diarias de la watchlist mientras el servicio está activo; el piloto
+  operacional de `COVERAGE-AND-ASSET-EXPANSION` añade `etf:us:qqq` y `crypto:sol-usd` sin crear
+  fuentes nuevas ni emplear las fórmulas de screening como recomendación.
+
+El monitor fundamental despacha por la frecuencia del job: un intento anual evalúa únicamente la
+regla anual y uno trimestral la trimestral. No reutiliza métricas de otra frecuencia ni completa
+ausencias con períodos anteriores; la selección point-in-time y el replay conservan las mismas
+reglas de fuente, período, algoritmo y unidad.
 
 Mercado y fundamentales se muestran en tarjetas separadas. La interfaz no calcula ni muestra un
 veredicto, confianza, calidad, recomendación o ranking combinado.

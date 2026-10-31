@@ -87,6 +87,27 @@ descriptiva: no crea señales, recomendaciones ni ejecución. La fila `FUNDAMENT
 permanece el único `NEXT`; esta adopción no la cierra, no declara `DONE`, `MET` ni cobertura
 completa.
 
+> `COVERAGE-AND-ASSET-EXPANSION`/#385 (`ADVANCES`, sin cierre) amplía el screening fundamental y el
+> piloto operacional sin cerrar `FUNDAMENTALS-COVERAGE`. El catálogo pasa a cinco plantillas
+> `SILENT`: la nueva revisión anual comparte condiciones, umbrales, versiones y unidades con la
+> trimestral y sólo cambia `frequency=annual`; el monitor despacha por la frecuencia del intento y
+> rechaza frecuencia ausente o contradictoria. La consulta fundamental selecciona IDs por activo,
+> claves, `available_to`, fuente y frecuencia antes de hidratar lotes de hasta 256.
+> Evidencia real READ_ONLY: AAPL `2025-09-27` (disponible `2025-10-31`) no cumple con
+> pasivos/activos `0.794753…`; Barrick `equity:us:b` `2025-12-31` (disponible `2026-02-27`) cumple
+> con `0.303643…`, `0.421915…` y `0.312180…`; no se persistió candidato ni recibo para la regla
+> nueva. El piloto habilitó `etf:us:qqq` y `crypto:sol-usd` en watchlist y refresco programado:
+> 3→5 activos y 13→15 jobs, sólo un `market_daily` por activo, preservando BTC/AAPL/AMD, favoritos,
+> reglas y canal cerrado. Ambas operaciones usaron el runtime integrado `200db2d6` con plan
+> incremental de un solo día (`2026-10-30`): QQQ creó 30 y reutilizó 1260 en 7,8 s; SOL creó 27 y
+> reutilizó 1780 en 9,1 s; los deltas fueron +2/+7/+20/+1 y +1/+5/+20/+1 filas
+> (raw/observaciones/métricas/diagnósticos), sin adquisición inicial ni `full`. El delta físico de
+> DB+WAL fue negativo o cero y el estado sumó 1 736 B; el pico RSS observado fue
+> +315,6/+316,4 MiB. RSI y MACD quedaron persistidos como `incremental-v2`, mientras las reglas
+> legacy exigen `v1`: no son evaluables por contrato y esa ausencia tiene causa explícita; la regla
+> de volumen relativo sí evaluó (QQQ `2,5827`; SOL `2,3596`). La fila sigue `NEXT`; no se declara
+> `MET`, cobertura completa, recomendación ni precisión predictiva.
+
 ## Prioridad operativa de 2026-10-27
 
 DATA-CHASSIS cerró con `DATA-CHASSIS-48`/#357 (`COMPLETES`) tras la reparación temporal R4, el delta físico de la vista packed compatible y el restore final verificado desde el padre retenido más los objetos remotos. `FUNDAMENTALS-COVERAGE` queda como el único `NEXT`. `FUNDAMENTALS-COVERAGE-READINESS`/#361 (`ADVANCES`) dejó v2 listo para retomar desarrollo: lecturas críticas acotadas, recuperación remota utilizable, espacio local seguro y documentación vigente. `FUNDAMENTALS-COVERAGE-CYCLE`/#363 (`ADVANCES`) avanza los prerrequisitos operativos sin cerrar la fila: ciclo semanal determinista con fines de semana, feriados y reintentos acotados; frecuencia IFRS no declarada explicada como `not_implemented`/`not_queried`; ausencias de valoración visibles; y precio PIT compartido entre cobertura y valoración. No declara más cobertura fundamental ni cierra la ruta. Se permite adquisición reciente y warm-up necesario mediante fuentes existentes; el archivo anterior no se re-descarga masivamente. Las cronologías inferiores conservan contexto histórico, no autoridad para sustituir esta secuencia.

@@ -24,6 +24,7 @@ from investment_analyst.alerts.analytical_models import (
 )
 from investment_analyst.alerts.analytical_rule_catalog import (
     INITIAL_ANALYTICAL_RULES,
+    INITIAL_ANNUAL_FUNDAMENTAL_RULE,
     INITIAL_MARKET_ACTIVITY_RULE,
     INITIAL_QUARTERLY_FUNDAMENTAL_RULE,
 )
@@ -89,31 +90,33 @@ def _fundamental_metrics(
     liabilities_to_assets: str = "0.45",
     net_margin: str = "0.18",
     revenue_growth: str = "0.07",
+    frequency: str = "quarterly",
+    first_identifier: int = 10,
 ) -> tuple[MetricResult, ...]:
     return (
         _metric(
-            identifier=10,
+            identifier=first_identifier,
             metric_key="fundamental.liabilities_to_assets",
             value=liabilities_to_assets,
             algorithm_version="sec-fundamental-liabilities-to-assets-v1-decimal34",
             source_id=_FUNDAMENTAL_SOURCE_ID,
-            parameters={"frequency": "quarterly"},
+            parameters={"frequency": frequency},
         ),
         _metric(
-            identifier=11,
+            identifier=first_identifier + 1,
             metric_key="fundamental.net_margin",
             value=net_margin,
             algorithm_version="sec-fundamental-net-margin-v1-decimal34",
             source_id=_FUNDAMENTAL_SOURCE_ID,
-            parameters={"frequency": "quarterly"},
+            parameters={"frequency": frequency},
         ),
         _metric(
-            identifier=12,
+            identifier=first_identifier + 2,
             metric_key="fundamental.revenue_yoy_growth",
             value=revenue_growth,
             algorithm_version="sec-fundamental-revenue-yoy-growth-v1-decimal34",
             source_id=_FUNDAMENTAL_SOURCE_ID,
-            parameters={"frequency": "quarterly"},
+            parameters={"frequency": frequency},
         ),
     )
 
@@ -160,11 +163,28 @@ def test_initial_rule_catalog_is_ordered_silent_and_domain_separated() -> None:
         all(condition.domain is rule.domain for condition in rule.conditions)
         for rule in INITIAL_ANALYTICAL_RULES
     )
+    assert len(INITIAL_ANALYTICAL_RULES) == 5
     assert INITIAL_MARKET_ACTIVITY_RULE.confirmations_required == 2
     assert INITIAL_MARKET_ACTIVITY_RULE.cooldown_seconds == 86_400
     assert INITIAL_MARKET_ACTIVITY_RULE.conditions[0].retention_threshold == Decimal("1.2")
     assert INITIAL_QUARTERLY_FUNDAMENTAL_RULE.confirmations_required == 1
     assert INITIAL_QUARTERLY_FUNDAMENTAL_RULE.cooldown_seconds == 604_800
+    assert INITIAL_ANNUAL_FUNDAMENTAL_RULE.confirmations_required == 1
+    assert INITIAL_ANNUAL_FUNDAMENTAL_RULE.cooldown_seconds == 604_800
+    assert "anual" in INITIAL_ANNUAL_FUNDAMENTAL_RULE.name_es
+    assert {
+        condition.parameter_filters["frequency"]
+        for condition in INITIAL_ANNUAL_FUNDAMENTAL_RULE.conditions
+    } == {"annual"}
+    assert {condition.condition_id for condition in INITIAL_ANNUAL_FUNDAMENTAL_RULE.conditions} == {
+        condition.condition_id for condition in INITIAL_QUARTERLY_FUNDAMENTAL_RULE.conditions
+    }
+    assert tuple(rule.semantic_fingerprint() for rule in INITIAL_ANALYTICAL_RULES[1:]) == (
+        "9f71b79bcfa4038bc9901cc615f04afef98c9bfe064b304ab918aae313a9bc20",
+        "c373eecd729f44d9cd3b0e7cb3170246ac407f69f08c539164b7322e722d0479",
+        "7057bf0c0ea7a9a1f8b1211225454f0b0d9254753599b067b70fafda8075d223",
+        "a088479cc62022ed8dd7e49a5b0d6e5b1d92f1da4c8b70302c5f42290aba100c",
+    )
 
 
 def test_market_rule_activates_silently_with_partial_iex_evidence_and_stable_identity() -> None:
@@ -241,6 +261,85 @@ def test_fundamental_rule_keeps_conditions_independent_and_requires_all() -> Non
     assert not_matched.matched is False
     assert not_matched.activated is False
     assert "no se activa un candidato" in not_matched.explanation_es
+
+
+def test_annual_fundamental_rule_matches_and_declines_with_the_same_contract() -> None:
+    engine = AnalyticalScreeningEngine()
+    matched = engine.evaluate(
+        _request(
+            INITIAL_ANNUAL_FUNDAMENTAL_RULE,
+            _fundamental_metrics(frequency="annual"),
+            source_id=_FUNDAMENTAL_SOURCE_ID,
+        )
+    )
+    not_matched = engine.evaluate(
+        _request(
+            INITIAL_ANNUAL_FUNDAMENTAL_RULE,
+            _fundamental_metrics(frequency="annual", liabilities_to_assets="0.75"),
+            source_id=_FUNDAMENTAL_SOURCE_ID,
+        )
+    )
+
+    assert tuple(item.state for item in matched.conditions) == (
+        AnalyticalConditionState.MET,
+        AnalyticalConditionState.MET,
+        AnalyticalConditionState.MET,
+    )
+    assert matched.matched is True
+    assert matched.activated is True
+    assert not_matched.conditions[0].state is AnalyticalConditionState.NOT_MET
+    assert not_matched.matched is False
+    assert not_matched.activated is False
+
+
+def test_fundamental_rules_never_mix_annual_and_quarterly_evidence() -> None:
+    engine = AnalyticalScreeningEngine()
+    annual_with_quarterly = engine.evaluate(
+        _request(
+            INITIAL_ANNUAL_FUNDAMENTAL_RULE,
+            _fundamental_metrics(frequency="quarterly"),
+            source_id=_FUNDAMENTAL_SOURCE_ID,
+        )
+    )
+    quarterly_with_annual = engine.evaluate(
+        _request(
+            INITIAL_QUARTERLY_FUNDAMENTAL_RULE,
+            _fundamental_metrics(frequency="annual"),
+            source_id=_FUNDAMENTAL_SOURCE_ID,
+        )
+    )
+
+    for result in (annual_with_quarterly, quarterly_with_annual):
+        assert result.matched is False
+        assert all(
+            item.state is AnalyticalConditionState.NOT_EVALUABLE for item in result.conditions
+        )
+        assert all(item.metric_result_id is None for item in result.conditions)
+
+
+def test_annual_rule_identity_is_stable_across_two_clocks() -> None:
+    engine = AnalyticalScreeningEngine()
+    metrics = _fundamental_metrics(frequency="annual")
+    first = engine.evaluate(
+        _request(
+            INITIAL_ANNUAL_FUNDAMENTAL_RULE,
+            metrics,
+            source_id=_FUNDAMENTAL_SOURCE_ID,
+        )
+    )
+    repeated = engine.evaluate(
+        _request(
+            INITIAL_ANNUAL_FUNDAMENTAL_RULE,
+            metrics,
+            source_id=_FUNDAMENTAL_SOURCE_ID,
+            computed_at=_COMPUTED_AT + timedelta(hours=6),
+        )
+    )
+
+    assert first.result_id == repeated.result_id
+    assert first.as_of == repeated.as_of == _AS_OF
+    assert first.computed_at != repeated.computed_at
+    assert first.semantic_fingerprint() == repeated.semantic_fingerprint()
 
 
 def test_missing_or_unaccepted_evidence_is_not_evaluable_never_zero() -> None:
