@@ -21,9 +21,13 @@ from investment_analyst.alerts.analytical_rule_catalog import (
     INITIAL_ANNUAL_FUNDAMENTAL_RULE,
     INITIAL_MARKET_ACTIVITY_RULE,
     INITIAL_QUARTERLY_FUNDAMENTAL_RULE,
+    MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE,
+    RSI_INCREMENTAL_LOW_REVIEW_RULE,
+    RSI_LOW_REVIEW_RULE,
 )
 from investment_analyst.alerts.analytical_rule_registry import AnalyticalRuleRegistryStore
 from investment_analyst.alerts.analytical_state import (
+    AnalyticalCandidateStatus,
     AnalyticalMonitorReceiptStatus,
     AnalyticalScreeningStateStore,
 )
@@ -56,6 +60,10 @@ _MACD_PARAMS: dict[str, object] = {
     "slow_window": 26,
     "signal_window": 9,
 }
+_RSI_KEY = "market.technical.rsi"
+_RSI_LEGACY_ALGORITHM = "market-rsi-wilder-v1-decimal34"
+_RSI_INCREMENTAL_ALGORITHM = "market-rsi-incremental-v2-decimal34"
+_MACD_INCREMENTAL_ALGORITHM = "market-macd-incremental-v2-decimal34"
 
 
 def _get_macd_rule():
@@ -134,6 +142,41 @@ def _build_v1_metric(
         input_observation_ids=[UUID(f"81000000-0000-4000-8000-{identifier:012d}")],
         algorithm_version=algorithm_version,
         quality=DataQuality.VALID,
+    )
+
+
+def _incremental_metrics(
+    *,
+    start: datetime,
+    day: int,
+    rsi_value: str,
+    histogram_value: str,
+) -> tuple[MetricResult, MetricResult]:
+    as_of = start + timedelta(days=day)
+    available_at = as_of + timedelta(hours=12)
+    return (
+        _build_v2_metric(
+            rsi_value,
+            identifier=100 + day,
+            as_of=as_of,
+            available_at=available_at,
+            computed_at=available_at,
+            metric_key=_RSI_KEY,
+            algorithm_version=_RSI_INCREMENTAL_ALGORITHM,
+            unit="index",
+            parameters={"source_id": _SOURCE_ID, "window": 14},
+        ),
+        _build_v2_metric(
+            histogram_value,
+            identifier=200 + day,
+            as_of=as_of,
+            available_at=available_at,
+            computed_at=available_at,
+            metric_key=_MACD_KEY,
+            algorithm_version=_MACD_INCREMENTAL_ALGORITHM,
+            unit="USD",
+            parameters=dict(_MACD_PARAMS),
+        ),
     )
 
 
@@ -801,3 +844,160 @@ def test_empty_market_check_skips_screening_but_new_bar_runs(tmp_path: Path) -> 
         scheduled_date=date(2026, 7, 29),
     )
     assert legacy == base
+
+
+def test_incremental_technical_rules_flow_through_monitor_lifecycle_and_replay(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 7, 20, tzinfo=UTC)
+    values = (
+        ("25", "0.5"),
+        ("24", "0.7"),
+        ("40", "-0.2"),
+        ("23", "0.6"),
+        ("22", "0.9"),
+    )
+    metrics = tuple(
+        metric
+        for day, (rsi_value, histogram_value) in enumerate(values)
+        for metric in _incremental_metrics(
+            start=start,
+            day=day,
+            rsi_value=rsi_value,
+            histogram_value=histogram_value,
+        )
+    )
+    service, paths, runtime = _seed(tmp_path, metrics)
+    store = AnalyticalScreeningStateStore(paths.state_root / "analytical.json")
+    clocks = iter(
+        (
+            start + timedelta(hours=12, minutes=5),
+            start + timedelta(days=1, hours=12, minutes=5),
+            start + timedelta(days=2, hours=12),
+            start + timedelta(days=3, hours=12),
+            start + timedelta(days=4, hours=12),
+        )
+    )
+    monitor = AnalyticalScreeningMonitor(
+        store,
+        runtime,
+        paths.root,
+        (RSI_INCREMENTAL_LOW_REVIEW_RULE, MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE),
+        clock=lambda: next(clocks),
+    )
+    attempts = tuple(
+        _attempt(
+            "alpaca:equity:us:aapl:market-daily",
+            start + timedelta(days=day, hours=12),
+            attempt_id=UUID(f"90000000-0000-4000-8000-{day + 100:012d}"),
+            scheduled_date=(start + timedelta(days=day)).date(),
+        )
+        for day in range(len(values))
+    )
+
+    for attempt in attempts:
+        monitor(attempt)
+    state = store.load()
+
+    assert len(state.results) == 10
+    assert len(state.candidates) == 4
+    assert (
+        sum(candidate.status is AnalyticalCandidateStatus.NEW for candidate in state.candidates)
+        == 2
+    )
+    assert (
+        sum(
+            candidate.status is AnalyticalCandidateStatus.RESOLVED for candidate in state.candidates
+        )
+        == 2
+    )
+    assert len(state.transitions) == 2
+    assert len(state.receipts) == 5
+
+    monitor(attempts[-1])
+    assert store.load() == state
+
+    registry = AnalyticalRuleRegistryStore(
+        paths.state_root / "rules.json",
+        INITIAL_ANALYTICAL_RULES,
+    )
+    backtest = AnalyticalBacktestService(runtime, paths.root, registry)
+    metric_ids = {
+        rule_id: {metric.result_id for metric in metrics if metric.metric_key == metric_key}
+        for rule_id, metric_key in (
+            (RSI_INCREMENTAL_LOW_REVIEW_RULE.rule_id, _RSI_KEY),
+            (MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE.rule_id, _MACD_KEY),
+        )
+    }
+    for rule_id, expected_ids in metric_ids.items():
+        replay = backtest.run(
+            AnalyticalBacktestRequest(
+                rule_id=rule_id,
+                asset_id=_ASSET_ID,
+                max_cuts=20,
+            )
+        )
+
+        assert replay.total_available_cuts == 5
+        assert len(replay.evaluations) == 5
+        assert replay.evaluations[-1].result.conditions[0].metric_result_id in expected_ids
+
+
+def test_monitor_keeps_legacy_and_incremental_versions_separate(tmp_path: Path) -> None:
+    known_at = datetime(2026, 7, 29, 12, tzinfo=UTC)
+    as_of = datetime(2026, 7, 28, tzinfo=UTC)
+    available_at = datetime(2026, 7, 28, 20, tzinfo=UTC)
+    legacy_metric = _build_v1_metric(
+        "25",
+        identifier=1,
+        as_of=as_of,
+        available_at=available_at,
+        computed_at=available_at,
+        known_at=known_at,
+        metric_key=_RSI_KEY,
+        algorithm_version=_RSI_LEGACY_ALGORITHM,
+        unit="index",
+        parameters={"source_id": _SOURCE_ID, "window": 14},
+    )
+    incremental_metric = _build_v2_metric(
+        "24",
+        identifier=2,
+        as_of=as_of,
+        available_at=available_at,
+        computed_at=available_at,
+        metric_key=_RSI_KEY,
+        algorithm_version=_RSI_INCREMENTAL_ALGORITHM,
+        unit="index",
+        parameters={"source_id": _SOURCE_ID, "window": 14},
+    )
+    service, paths, runtime = _seed(tmp_path, (legacy_metric, incremental_metric))
+    store = AnalyticalScreeningStateStore(paths.state_root / "analytical.json")
+    monitor = AnalyticalScreeningMonitor(
+        store,
+        runtime,
+        paths.root,
+        (RSI_LOW_REVIEW_RULE, RSI_INCREMENTAL_LOW_REVIEW_RULE),
+        clock=lambda: datetime(2026, 7, 30, 12, tzinfo=UTC),
+    )
+
+    monitor(
+        _attempt(
+            "alpaca:equity:us:aapl:market-daily",
+            known_at,
+            attempt_id=UUID("90000000-0000-4000-8000-000000000031"),
+            scheduled_date=date(2026, 7, 29),
+        )
+    )
+    state = store.load()
+    by_rule = {result.rule.rule_id: result for result in state.results}
+
+    assert len(state.results) == 2
+    assert len(state.candidates) == 0
+    assert (
+        by_rule[RSI_LOW_REVIEW_RULE.rule_id].conditions[0].metric_result_id
+        == legacy_metric.result_id
+    )
+    assert (
+        by_rule[RSI_INCREMENTAL_LOW_REVIEW_RULE.rule_id].conditions[0].metric_result_id
+        == incremental_metric.result_id
+    )

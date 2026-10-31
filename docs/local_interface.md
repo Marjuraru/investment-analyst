@@ -130,8 +130,8 @@ La página permite:
 - seleccionar opcionalmente fechas `as-of` independientes para mercado y fundamentales;
 - ver diagnósticos, métricas, frescura, limitaciones y el contrato JSON versionado;
 - editar reglas de screening mediante revisiones locales auditadas y restaurar sus valores
-  iniciales sin borrar historia; el catálogo conserva cinco plantillas y expone si cada una usa
-  evidencia anual o trimestral;
+  iniciales sin borrar historia; el catálogo conserva siete plantillas y expone si cada una usa
+  evidencia anual, trimestral o técnica incremental v2, sin migración automática desde las legacy;
 - ejecutar un replay point-in-time de frecuencia y ruido sobre el activo seleccionado;
 - mantener actualizaciones diarias de la watchlist mientras el servicio está activo; el piloto
   operacional de `COVERAGE-AND-ASSET-EXPANSION` añade `etf:us:qqq` y `crypto:sol-usd` sin crear
@@ -140,7 +140,9 @@ La página permite:
 El monitor fundamental despacha por la frecuencia del job: un intento anual evalúa únicamente la
 regla anual y uno trimestral la trimestral. No reutiliza métricas de otra frecuencia ni completa
 ausencias con períodos anteriores; la selección point-in-time y el replay conservan las mismas
-reglas de fuente, período, algoritmo y unidad.
+reglas de fuente, período, algoritmo y unidad. En mercado, las reglas legacy y las incrementales
+conviven sin alias: cada una selecciona exclusivamente su `algorithm_version` y comparte las mismas
+claves de métrica RSI/histograma.
 
 Mercado y fundamentales se muestran en tarjetas separadas. La interfaz no calcula ni muestra un
 veredicto, confianza, calidad, recomendación o ranking combinado.
@@ -879,6 +881,10 @@ los umbrales de entrada y salida, las confirmaciones y la espera entre candidato
 valida el contrato completo, rechaza floats para valores financieros, usa el fingerprint mostrado
 como lock optimista y crea una revisión append-only solo si el contenido cambió. Restaurar los
 valores iniciales crea otra revisión; no elimina el historial.
+
+El catálogo muestra siete plantillas; las dos incrementales se identifican por nombre y versión y no
+sustituyen ni migran las cinco anteriores. El replay acepta cualquier `rule_id` del catálogo,
+incluido el incremental, y conserva el mismo contrato point-in-time.
 
 El botón **Replay** usa el activo seleccionado y hasta 200 cortes point-in-time persistidos. Es una
 consulta de solo lectura: muestra cortes, coincidencias, candidatos simulados y condiciones no

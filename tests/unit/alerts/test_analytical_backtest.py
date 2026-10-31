@@ -3,7 +3,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from uuid import UUID, uuid5
+from uuid import NAMESPACE_DNS, UUID, uuid5
 
 import pytest
 from pydantic import ValidationError
@@ -34,6 +34,11 @@ _FUNDAMENTAL_RULE_ID = "fundamentals.quarterly-balance-growth-review"
 _ANNUAL_FUNDAMENTAL_RULE_ID = "fundamentals.annual-balance-growth-review"
 _FUNDAMENTAL_SOURCE_ID = "sec-edgar:aapl:companyfacts"
 _V2_OBSERVATION_NAMESPACE = UUID("6b000000-0000-4000-8000-000000000001")
+_RSI_KEY = "market.technical.rsi"
+_MACD_HISTOGRAM_KEY = "market.technical.macd.histogram"
+_RSI_LEGACY_ALGORITHM = "market-rsi-wilder-v1-decimal34"
+_RSI_INCREMENTAL_ALGORITHM = "market-rsi-incremental-v2-decimal34"
+_MACD_INCREMENTAL_ALGORITHM = "market-macd-incremental-v2-decimal34"
 
 
 def _market_metric(
@@ -128,6 +133,85 @@ def _v2_market_metric(
         parameters=parameters,
         input_observation_ids=input_observation_ids,
         algorithm_version="market-relative-volume-v1-decimal34",
+        quality=DataQuality.PARTIAL,
+    )
+
+
+def _v2_technical_metric(
+    value: str,
+    *,
+    metric_key: str,
+    algorithm_version: str,
+    as_of: datetime,
+    available_at: datetime,
+    unit: str,
+    parameters: dict[str, object],
+) -> MetricResult:
+    """Build one v2 technical row with semantic identity and no legacy cut parameter."""
+    input_observation_ids = [
+        uuid5(
+            _V2_OBSERVATION_NAMESPACE,
+            f"{metric_key}:{algorithm_version}:{as_of.isoformat()}:{value}",
+        )
+    ]
+    scoped_parameters = {"source_id": _SOURCE_ID, **parameters}
+    return MetricResult(
+        result_id=metric_result_id_v2(
+            asset_id=_ASSET_ID,
+            metric_key=metric_key,
+            input_observation_ids=input_observation_ids,
+            algorithm_version=algorithm_version,
+            as_of=as_of,
+            available_at=available_at,
+            unit=unit,
+            quality=DataQuality.PARTIAL,
+            parameters=scoped_parameters,
+        ),
+        asset_id=_ASSET_ID,
+        metric_key=metric_key,
+        value=Decimal(value),
+        unit=unit,
+        as_of=as_of,
+        available_at=available_at,
+        computed_at=available_at,
+        parameters=scoped_parameters,
+        input_observation_ids=input_observation_ids,
+        algorithm_version=algorithm_version,
+        quality=DataQuality.PARTIAL,
+    )
+
+
+def _v1_technical_metric(
+    value: str,
+    *,
+    metric_key: str,
+    algorithm_version: str,
+    as_of: datetime,
+    known_at: datetime,
+    unit: str,
+    parameters: dict[str, object],
+) -> MetricResult:
+    """Build one legacy technical row with its exact persisted cut parameter."""
+    scoped_parameters = {
+        "source_id": _SOURCE_ID,
+        "known_at": known_at.isoformat(),
+        **parameters,
+    }
+    return MetricResult(
+        result_id=uuid5(
+            NAMESPACE_DNS,
+            f"v1-{metric_key}-{algorithm_version}-{as_of.isoformat()}-{value}",
+        ),
+        asset_id=_ASSET_ID,
+        metric_key=metric_key,
+        value=Decimal(value),
+        unit=unit,
+        as_of=as_of,
+        available_at=known_at,
+        computed_at=known_at,
+        parameters=scoped_parameters,
+        input_observation_ids=[uuid5(_V2_OBSERVATION_NAMESPACE, f"input:{as_of.isoformat()}")],
+        algorithm_version=algorithm_version,
         quality=DataQuality.PARTIAL,
     )
 
@@ -540,3 +624,112 @@ def test_market_backtest_preserves_legacy_known_at_parameter_errors(
                 asset_id=_ASSET_ID,
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("rule_id", "metric_key", "algorithm_version", "unit", "parameters", "values"),
+    (
+        (
+            "market.technical.rsi-incremental-low-review",
+            _RSI_KEY,
+            _RSI_INCREMENTAL_ALGORITHM,
+            "index",
+            {"window": 14},
+            ("25", "24", "40", "22"),
+        ),
+        (
+            "market.technical.macd-incremental-positive-histogram-review",
+            _MACD_HISTOGRAM_KEY,
+            _MACD_INCREMENTAL_ALGORITHM,
+            "USD",
+            {"fast_window": 12, "slow_window": 26, "signal_window": 9},
+            ("0.5", "0.7", "-0.2", "0.9"),
+        ),
+    ),
+)
+def test_incremental_technical_rules_replay_v2_evidence(
+    tmp_path: Path,
+    rule_id: str,
+    metric_key: str,
+    algorithm_version: str,
+    unit: str,
+    parameters: dict[str, object],
+    values: tuple[str, ...],
+) -> None:
+    start = datetime(2026, 7, 20, tzinfo=UTC)
+    metrics = tuple(
+        _v2_technical_metric(
+            value,
+            metric_key=metric_key,
+            algorithm_version=algorithm_version,
+            as_of=start + timedelta(days=index),
+            available_at=start + timedelta(days=index, hours=12),
+            unit=unit,
+            parameters=parameters,
+        )
+        for index, value in enumerate(values)
+    )
+
+    result = _service(tmp_path, metrics).run(
+        AnalyticalBacktestRequest(
+            rule_id=rule_id,
+            asset_id=_ASSET_ID,
+            max_cuts=20,
+        )
+    )
+
+    assert result.total_available_cuts == 4
+    assert len(result.evaluations) == 4
+    assert result.matched_count == 3
+    assert result.candidate_activation_count == 1
+    assert result.first_known_at == start + timedelta(hours=12)
+    assert result.last_known_at == start + timedelta(days=3, hours=12)
+    assert result.evaluations[0].result.conditions[0].metric_result_id == metrics[0].result_id
+    assert result.evaluations[1].candidate_opened is True
+    assert {item.result.rule.rule_id for item in result.evaluations} == {rule_id}
+
+
+def test_legacy_and_incremental_backtests_keep_versions_separate(tmp_path: Path) -> None:
+    start = datetime(2026, 7, 20, tzinfo=UTC)
+    legacy_metric = _v1_technical_metric(
+        "25",
+        metric_key=_RSI_KEY,
+        algorithm_version=_RSI_LEGACY_ALGORITHM,
+        as_of=start,
+        known_at=start + timedelta(hours=12),
+        unit="index",
+        parameters={"window": 14},
+    )
+    incremental_metric = _v2_technical_metric(
+        "24",
+        metric_key=_RSI_KEY,
+        algorithm_version=_RSI_INCREMENTAL_ALGORITHM,
+        as_of=start + timedelta(days=1),
+        available_at=start + timedelta(days=1, hours=12),
+        unit="index",
+        parameters={"window": 14},
+    )
+    service = _service(tmp_path, (legacy_metric, incremental_metric))
+
+    legacy = service.run(
+        AnalyticalBacktestRequest(
+            rule_id="market.technical.rsi-low-review",
+            asset_id=_ASSET_ID,
+            max_cuts=20,
+        )
+    )
+    incremental = service.run(
+        AnalyticalBacktestRequest(
+            rule_id="market.technical.rsi-incremental-low-review",
+            asset_id=_ASSET_ID,
+            max_cuts=20,
+        )
+    )
+
+    assert legacy.total_available_cuts == 1
+    assert legacy.evaluations[0].result.conditions[0].metric_result_id == legacy_metric.result_id
+    assert incremental.total_available_cuts == 1
+    assert (
+        incremental.evaluations[0].result.conditions[0].metric_result_id
+        == incremental_metric.result_id
+    )

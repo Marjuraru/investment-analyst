@@ -27,6 +27,10 @@ from investment_analyst.alerts.analytical_rule_catalog import (
     INITIAL_ANNUAL_FUNDAMENTAL_RULE,
     INITIAL_MARKET_ACTIVITY_RULE,
     INITIAL_QUARTERLY_FUNDAMENTAL_RULE,
+    MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE,
+    MACD_POSITIVE_HISTOGRAM_REVIEW_RULE,
+    RSI_INCREMENTAL_LOW_REVIEW_RULE,
+    RSI_LOW_REVIEW_RULE,
 )
 from investment_analyst.core.models import AssetClass, DataQuality, MetricResult
 
@@ -36,6 +40,29 @@ _KNOWN_AT = datetime(2026, 7, 29, 16, tzinfo=UTC)
 _COMPUTED_AT = datetime(2026, 7, 29, 16, 5, tzinfo=UTC)
 _MARKET_SOURCE_ID = "alpaca-market-data:iex:aapl:daily-bars:adjustment-all"
 _FUNDAMENTAL_SOURCE_ID = "sec-edgar:aapl:companyfacts"
+_RSI_KEY = "market.technical.rsi"
+_MACD_HISTOGRAM_KEY = "market.technical.macd.histogram"
+_RSI_LEGACY_ALGORITHM = "market-rsi-wilder-v1-decimal34"
+_RSI_INCREMENTAL_ALGORITHM = "market-rsi-incremental-v2-decimal34"
+_MACD_LEGACY_ALGORITHM = "market-macd-v1-decimal34"
+_MACD_INCREMENTAL_ALGORITHM = "market-macd-incremental-v2-decimal34"
+_LEGACY_FINGERPRINTS = {
+    "fundamentals.annual-balance-growth-review": (
+        "8ef13c4c7804c4e3c9140395d7abff026f0490f2796a0a47367667217c176269"
+    ),
+    "fundamentals.quarterly-balance-growth-review": (
+        "9f71b79bcfa4038bc9901cc615f04afef98c9bfe064b304ab918aae313a9bc20"
+    ),
+    "market.activity.relative-volume-review": (
+        "c373eecd729f44d9cd3b0e7cb3170246ac407f69f08c539164b7322e722d0479"
+    ),
+    "market.technical.macd-positive-histogram-review": (
+        "7057bf0c0ea7a9a1f8b1211225454f0b0d9254753599b067b70fafda8075d223"
+    ),
+    "market.technical.rsi-low-review": (
+        "a088479cc62022ed8dd7e49a5b0d6e5b1d92f1da4c8b70302c5f42290aba100c"
+    ),
+}
 
 
 def _metric(
@@ -85,6 +112,40 @@ def _market_metric(
     )
 
 
+def _technical_metric(
+    value: str,
+    *,
+    metric_key: str,
+    algorithm_version: str,
+    identifier: int,
+    unit: str = "index",
+    asset_id: str = "equity:us:aapl",
+    source_id: str = _MARKET_SOURCE_ID,
+    parameters: dict[str, object] | None = None,
+    quality: DataQuality = DataQuality.PARTIAL,
+    as_of: datetime = _AS_OF,
+    available_at: datetime = _AVAILABLE_AT,
+) -> MetricResult:
+    defaults = (
+        {"window": 14}
+        if metric_key == _RSI_KEY
+        else {"fast_window": 12, "slow_window": 26, "signal_window": 9}
+    )
+    return _metric(
+        identifier=identifier,
+        metric_key=metric_key,
+        value=value,
+        algorithm_version=algorithm_version,
+        source_id=source_id,
+        parameters=defaults if parameters is None else parameters,
+        quality=quality,
+        unit=unit,
+        asset_id=asset_id,
+        as_of=as_of,
+        available_at=available_at,
+    )
+
+
 def _fundamental_metrics(
     *,
     liabilities_to_assets: str = "0.45",
@@ -126,12 +187,13 @@ def _request(
     metrics: tuple[MetricResult, ...],
     *,
     source_id: str,
+    asset_id: str = "equity:us:aapl",
     asset_class: AssetClass = AssetClass.EQUITY,
     computed_at: datetime = _COMPUTED_AT,
 ) -> AnalyticalScreeningRequest:
     return AnalyticalScreeningRequest(
         rule=rule,
-        asset_id="equity:us:aapl",
+        asset_id=asset_id,
         asset_class=asset_class,
         source_id=source_id,
         known_at=_KNOWN_AT,
@@ -163,7 +225,7 @@ def test_initial_rule_catalog_is_ordered_silent_and_domain_separated() -> None:
         all(condition.domain is rule.domain for condition in rule.conditions)
         for rule in INITIAL_ANALYTICAL_RULES
     )
-    assert len(INITIAL_ANALYTICAL_RULES) == 5
+    assert len(INITIAL_ANALYTICAL_RULES) == 7
     assert INITIAL_MARKET_ACTIVITY_RULE.confirmations_required == 2
     assert INITIAL_MARKET_ACTIVITY_RULE.cooldown_seconds == 86_400
     assert INITIAL_MARKET_ACTIVITY_RULE.conditions[0].retention_threshold == Decimal("1.2")
@@ -179,11 +241,37 @@ def test_initial_rule_catalog_is_ordered_silent_and_domain_separated() -> None:
     assert {condition.condition_id for condition in INITIAL_ANNUAL_FUNDAMENTAL_RULE.conditions} == {
         condition.condition_id for condition in INITIAL_QUARTERLY_FUNDAMENTAL_RULE.conditions
     }
-    assert tuple(rule.semantic_fingerprint() for rule in INITIAL_ANALYTICAL_RULES[1:]) == (
-        "9f71b79bcfa4038bc9901cc615f04afef98c9bfe064b304ab918aae313a9bc20",
-        "c373eecd729f44d9cd3b0e7cb3170246ac407f69f08c539164b7322e722d0479",
-        "7057bf0c0ea7a9a1f8b1211225454f0b0d9254753599b067b70fafda8075d223",
-        "a088479cc62022ed8dd7e49a5b0d6e5b1d92f1da4c8b70302c5f42290aba100c",
+    assert {
+        rule.rule_id: rule.semantic_fingerprint()
+        for rule in INITIAL_ANALYTICAL_RULES
+        if rule.rule_id in _LEGACY_FINGERPRINTS
+    } == _LEGACY_FINGERPRINTS
+    incremental = {
+        rule.rule_id: rule
+        for rule in INITIAL_ANALYTICAL_RULES
+        if rule.rule_id
+        in {
+            RSI_INCREMENTAL_LOW_REVIEW_RULE.rule_id,
+            MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE.rule_id,
+        }
+    }
+    assert set(incremental) == {
+        "market.technical.rsi-incremental-low-review",
+        "market.technical.macd-incremental-positive-histogram-review",
+    }
+    assert all(rule.state is AnalyticalRuleState.SILENT for rule in incremental.values())
+    assert all(rule.rule_version == "1.0" for rule in incremental.values())
+    assert all(rule.confirmations_required == 2 for rule in incremental.values())
+    assert all(rule.cooldown_seconds == 86_400 for rule in incremental.values())
+    assert (
+        incremental["market.technical.rsi-incremental-low-review"].conditions[0].algorithm_version
+        == _RSI_INCREMENTAL_ALGORITHM
+    )
+    assert (
+        incremental["market.technical.macd-incremental-positive-histogram-review"]
+        .conditions[0]
+        .algorithm_version
+        == _MACD_INCREMENTAL_ALGORITHM
     )
 
 
@@ -662,3 +750,288 @@ def test_rule_contract_rejects_float_thresholds_and_cross_domain_conditions() ->
             asset_classes=(AssetClass.EQUITY,),
             conditions=(market_condition,),
         )
+
+
+def test_incremental_technical_rules_evaluate_v2_evidence_across_asset_classes() -> None:
+    engine = AnalyticalScreeningEngine()
+    cases = (
+        ("equity:us:aapl", AssetClass.EQUITY, _MARKET_SOURCE_ID),
+        (
+            "etf:us:qqq",
+            AssetClass.ETF,
+            "alpaca-market-data:iex:qqq:daily-bars:adjustment-all",
+        ),
+        ("crypto:sol-usd", AssetClass.CRYPTO, "coinbase:sol-usd:daily-candles"),
+    )
+
+    for index, (asset_id, asset_class, source_id) in enumerate(cases):
+        rsi_metric = _technical_metric(
+            "25",
+            metric_key=_RSI_KEY,
+            algorithm_version=_RSI_INCREMENTAL_ALGORITHM,
+            identifier=100 + index,
+            asset_id=asset_id,
+            source_id=source_id,
+        )
+        macd_metric = _technical_metric(
+            "0.5",
+            metric_key=_MACD_HISTOGRAM_KEY,
+            algorithm_version=_MACD_INCREMENTAL_ALGORITHM,
+            identifier=200 + index,
+            unit="USD",
+            asset_id=asset_id,
+            source_id=source_id,
+        )
+        for rule, metric in (
+            (RSI_INCREMENTAL_LOW_REVIEW_RULE, rsi_metric),
+            (MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE, macd_metric),
+        ):
+            result = engine.evaluate(
+                _request(
+                    rule,
+                    (metric,),
+                    source_id=source_id,
+                    asset_id=asset_id,
+                    asset_class=asset_class,
+                )
+            )
+
+            assert result.rule == rule
+            assert result.matched is True
+            assert result.activated is True
+            assert result.conditions[0].state is AnalyticalConditionState.MET
+            assert result.conditions[0].metric_result_id == metric.result_id
+            assert result.conditions[0].observed_value == metric.value
+
+
+@pytest.mark.parametrize(
+    ("rule", "metric_key", "algorithm_version", "value", "unit"),
+    (
+        (
+            RSI_INCREMENTAL_LOW_REVIEW_RULE,
+            _RSI_KEY,
+            _RSI_INCREMENTAL_ALGORITHM,
+            "40",
+            "index",
+        ),
+        (
+            MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE,
+            _MACD_HISTOGRAM_KEY,
+            _MACD_INCREMENTAL_ALGORITHM,
+            "-0.5",
+            "USD",
+        ),
+    ),
+)
+def test_incremental_technical_rules_decline_values_outside_threshold(
+    rule: AnalyticalScreeningRule,
+    metric_key: str,
+    algorithm_version: str,
+    value: str,
+    unit: str,
+) -> None:
+    metric = _technical_metric(
+        value,
+        metric_key=metric_key,
+        algorithm_version=algorithm_version,
+        identifier=1,
+        unit=unit,
+    )
+
+    result = AnalyticalScreeningEngine().evaluate(
+        _request(rule, (metric,), source_id=_MARKET_SOURCE_ID)
+    )
+
+    assert result.matched is False
+    assert result.activated is False
+    assert result.conditions[0].state is AnalyticalConditionState.NOT_MET
+
+
+@pytest.mark.parametrize(
+    (
+        "incremental_rule",
+        "legacy_rule",
+        "metric_key",
+        "legacy_algorithm",
+        "incremental_algorithm",
+        "unit",
+    ),
+    (
+        (
+            RSI_INCREMENTAL_LOW_REVIEW_RULE,
+            RSI_LOW_REVIEW_RULE,
+            _RSI_KEY,
+            _RSI_LEGACY_ALGORITHM,
+            _RSI_INCREMENTAL_ALGORITHM,
+            "index",
+        ),
+        (
+            MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE,
+            MACD_POSITIVE_HISTOGRAM_REVIEW_RULE,
+            _MACD_HISTOGRAM_KEY,
+            _MACD_LEGACY_ALGORITHM,
+            _MACD_INCREMENTAL_ALGORITHM,
+            "USD",
+        ),
+    ),
+)
+def test_incremental_and_legacy_technical_rules_do_not_alias_versions(
+    incremental_rule: AnalyticalScreeningRule,
+    legacy_rule: AnalyticalScreeningRule,
+    metric_key: str,
+    legacy_algorithm: str,
+    incremental_algorithm: str,
+    unit: str,
+) -> None:
+    engine = AnalyticalScreeningEngine()
+    legacy_metric = _technical_metric(
+        "25",
+        metric_key=metric_key,
+        algorithm_version=legacy_algorithm,
+        identifier=1,
+        unit=unit,
+    )
+    incremental_metric = _technical_metric(
+        "25",
+        metric_key=metric_key,
+        algorithm_version=incremental_algorithm,
+        identifier=2,
+        unit=unit,
+    )
+    unknown_metric = _technical_metric(
+        "25",
+        metric_key=metric_key,
+        algorithm_version="unknown-v9-decimal34",
+        identifier=3,
+        unit=unit,
+    )
+
+    with pytest.raises(IncompatibleAnalyticalMetricError, match="algorithm version"):
+        engine.evaluate(_request(incremental_rule, (legacy_metric,), source_id=_MARKET_SOURCE_ID))
+    with pytest.raises(IncompatibleAnalyticalMetricError, match="algorithm version"):
+        engine.evaluate(_request(legacy_rule, (incremental_metric,), source_id=_MARKET_SOURCE_ID))
+    with pytest.raises(IncompatibleAnalyticalMetricError, match="algorithm version"):
+        engine.evaluate(_request(incremental_rule, (unknown_metric,), source_id=_MARKET_SOURCE_ID))
+
+
+def test_incremental_technical_rules_reject_incompatible_or_foreign_evidence() -> None:
+    engine = AnalyticalScreeningEngine()
+    metric = _technical_metric(
+        "25",
+        metric_key=_RSI_KEY,
+        algorithm_version=_RSI_INCREMENTAL_ALGORITHM,
+        identifier=1,
+    )
+
+    with pytest.raises(IncompatibleAnalyticalMetricError, match="unit"):
+        engine.evaluate(
+            _request(
+                RSI_INCREMENTAL_LOW_REVIEW_RULE,
+                (metric.model_copy(update={"unit": "USD"}),),
+                source_id=_MARKET_SOURCE_ID,
+            )
+        )
+
+    wrong_parameters = metric.model_copy(update={"parameters": {**metric.parameters, "window": 7}})
+    not_evaluable = engine.evaluate(
+        _request(
+            RSI_INCREMENTAL_LOW_REVIEW_RULE,
+            (wrong_parameters,),
+            source_id=_MARKET_SOURCE_ID,
+        )
+    )
+    assert not_evaluable.matched is False
+    assert not_evaluable.conditions[0].state is AnalyticalConditionState.NOT_EVALUABLE
+
+    with pytest.raises(ValidationError, match="another asset"):
+        _request(
+            RSI_INCREMENTAL_LOW_REVIEW_RULE,
+            (metric,),
+            source_id=_MARKET_SOURCE_ID,
+            asset_id="equity:us:amd",
+        )
+    with pytest.raises(ValidationError, match="source_id"):
+        _request(
+            RSI_INCREMENTAL_LOW_REVIEW_RULE,
+            (metric,),
+            source_id="other-source",
+        )
+    with pytest.raises(ValidationError, match="unavailable at known_at"):
+        _request(
+            RSI_INCREMENTAL_LOW_REVIEW_RULE,
+            (
+                metric.model_copy(
+                    update={
+                        "available_at": _KNOWN_AT + timedelta(seconds=1),
+                        "computed_at": _KNOWN_AT + timedelta(seconds=2),
+                    }
+                ),
+            ),
+            source_id=_MARKET_SOURCE_ID,
+        )
+    with pytest.raises(AmbiguousAnalyticalMetricError, match="multiple compatible"):
+        engine.evaluate(
+            _request(
+                RSI_INCREMENTAL_LOW_REVIEW_RULE,
+                (
+                    metric,
+                    _technical_metric(
+                        "22",
+                        metric_key=_RSI_KEY,
+                        algorithm_version=_RSI_INCREMENTAL_ALGORITHM,
+                        identifier=2,
+                    ),
+                ),
+                source_id=_MARKET_SOURCE_ID,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("rule", "metric_key", "algorithm_version", "unit"),
+    (
+        (
+            RSI_INCREMENTAL_LOW_REVIEW_RULE,
+            _RSI_KEY,
+            _RSI_INCREMENTAL_ALGORITHM,
+            "index",
+        ),
+        (
+            MACD_INCREMENTAL_POSITIVE_HISTOGRAM_REVIEW_RULE,
+            _MACD_HISTOGRAM_KEY,
+            _MACD_INCREMENTAL_ALGORITHM,
+            "USD",
+        ),
+    ),
+)
+def test_incremental_rule_identity_is_stable_across_two_clocks(
+    rule: AnalyticalScreeningRule,
+    metric_key: str,
+    algorithm_version: str,
+    unit: str,
+) -> None:
+    metric = _technical_metric(
+        "25",
+        metric_key=metric_key,
+        algorithm_version=algorithm_version,
+        identifier=1,
+        unit=unit,
+    )
+    engine = AnalyticalScreeningEngine()
+
+    first = engine.evaluate(
+        _request(rule, (metric,), source_id=_MARKET_SOURCE_ID, computed_at=_COMPUTED_AT)
+    )
+    repeated = engine.evaluate(
+        _request(
+            rule,
+            (metric,),
+            source_id=_MARKET_SOURCE_ID,
+            computed_at=_COMPUTED_AT + timedelta(hours=4),
+        )
+    )
+
+    assert first.result_id == repeated.result_id
+    assert first.as_of == repeated.as_of == _AS_OF
+    assert first.computed_at != repeated.computed_at
+    assert first.semantic_fingerprint() == repeated.semantic_fingerprint()
