@@ -1691,6 +1691,7 @@ _BASELINE_API_ROUTES = frozenset(
         "/api/v1/cazatiburones/universe-activity",
         "/api/v1/crypto-derivatives",
         "/api/v1/market-comparison",
+        "/api/v1/market-patterns",
         "/api/v1/overview",
         "/api/v1/sec-document-timeline",
         "/api/v1/universe-coverage",

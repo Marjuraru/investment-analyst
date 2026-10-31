@@ -25,6 +25,9 @@ from investment_analyst.analytics.market.comparison_service import (
     InsufficientCommonMarketSampleError,
 )
 from investment_analyst.analytics.market.intraday_models import IntradayInterval
+from investment_analyst.analytics.market.pattern_models import (
+    DailyMarketPatternsRequest,
+)
 from investment_analyst.analytics.valuation import (
     CorporateValuationHistoryRequest,
     CorporateValuationRequest,
@@ -656,6 +659,59 @@ def test_market_comparison_uses_contractual_daily_enum_and_rejects_non_daily(
     )
     with pytest.raises(ValueError, match="visible daily market asset"):
         application.query_market_comparison(
+            request,
+            location=StorageLocationRequest(workspace=workspace),
+        )
+
+
+def test_daily_market_patterns_is_empty_bounded_and_read_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    application = _application(home)
+    workspace = (
+        WorkspaceService(environ={}, home=home)
+        .initialize(tmp_path / "workspace", format_version=2)
+        .paths.root
+    )
+    request = DailyMarketPatternsRequest(
+        asset_id="equity:us:aapl",
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 2, 5),
+        known_at=datetime(2025, 2, 6, tzinfo=UTC),
+    )
+
+    result = application.query_daily_market_patterns(
+        request,
+        location=StorageLocationRequest(workspace=workspace),
+    )
+
+    assert result.schema_version == "daily-market-patterns-v1"
+    assert result.points == ()
+    assert result.segments == ()
+    assert result.events == ()
+    assert result.coverage.close_observations_read == 0
+    assert result.coverage.point_count == 0
+    assert result.limitations
+
+    missing = tmp_path / "missing"
+    unknown = request.model_copy(update={"asset_id": "equity:us:missing"})
+    with pytest.raises(ValueError, match="not supported"):
+        application.query_daily_market_patterns(
+            unknown,
+            location=StorageLocationRequest(workspace=missing),
+        )
+    assert not missing.exists()
+
+    real_schema = get_market_bar_schema
+    monkeypatch.setattr(
+        facade_module,
+        "get_market_bar_schema",
+        lambda source_id: real_schema(COINBASE_INTRADAY_SOURCE_ID),
+    )
+    with pytest.raises(ValueError, match="visible daily market asset"):
+        application.query_daily_market_patterns(
             request,
             location=StorageLocationRequest(workspace=workspace),
         )

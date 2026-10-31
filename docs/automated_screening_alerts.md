@@ -245,6 +245,18 @@ Estas serán las primeras alertas activas porque no interpretan una oportunidad 
 Una alerta diaria solo puede activarse después de actualizar barras diarias. “Inmediata” significa
 inmediatamente después de ingerir evidencia nueva, no tiempo real.
 
+La reconstrucción `daily-market-patterns-v1` de la vista técnica es una lectura descriptiva
+independiente de estas reglas y de la outbox. Usa cierres diarios observados y las métricas RSI(14) e
+histograma MACD(12,26,9) incrementales v2 ya persistidas, elige la última revisión disponible al
+corte y rompe la continuidad ante una métrica ausente o incompatible. Describe el signo del
+histograma (`positive`, `negative`, `neutral` o `unavailable`), tramos con censura de borde y
+exactamente tres cruces: `macd_cross_positive` (`previo <= 0 < actual`), `macd_cross_negative`
+(`previo >= 0 > actual`) y `rsi_cross_above_30` (`previo <= 30 < actual`). No es una regla, no usa
+confirmaciones, histéresis, cooldown, scheduling, outbox ni canal, no modifica las siete plantillas y
+no produce señal, recomendación ni instrucción. El rango público es inclusivo, máximo 180 días, con
+`known_at` explícito y `end <= known_at.date()`; una lectura vacía declara ausencia de evidencia y no
+se convierte en cero.
+
 ### Fundamentales
 
 - crecimiento;

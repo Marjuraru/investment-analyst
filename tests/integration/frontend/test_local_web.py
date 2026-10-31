@@ -102,6 +102,10 @@ from investment_analyst.analytics.market.comparison_models import (
     MarketMultiAssetComparisonResult,
 )
 from investment_analyst.analytics.market.intraday_models import IntradayInterval
+from investment_analyst.analytics.market.pattern_models import (
+    DailyMarketPatternsRequest,
+    DailyMarketPatternsResult,
+)
 from investment_analyst.analytics.valuation import (
     CorporateValuationFilingOption,
     CorporateValuationFilingOptions,
@@ -477,6 +481,8 @@ class _FakeApplication:
         self.crypto_derivatives_locations: list[StorageLocationRequest] = []
         self.comparison_requests: list[MarketComparisonRequest] = []
         self.comparison_locations: list[StorageLocationRequest] = []
+        self.daily_pattern_requests: list[DailyMarketPatternsRequest] = []
+        self.daily_pattern_locations: list[StorageLocationRequest] = []
         self.sec_document_timeline_queries: list[SecDocumentTimelineQuery] = []
         self.sec_document_timeline_locations: list[StorageLocationRequest] = []
         self.sec_document_timeline_result: SecDocumentTimelineResult | None = None
@@ -668,6 +674,48 @@ class _FakeApplication:
                     "asset_ids": list(request.canonical_asset_ids),
                     "known_at": request.known_at.isoformat(),
                     "traceability_verified": True,
+                }
+            ),
+        )
+
+    def query_daily_market_patterns(
+        self,
+        request: DailyMarketPatternsRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> DailyMarketPatternsResult:
+        self.daily_pattern_requests.append(request)
+        self.daily_pattern_locations.append(location)
+        return cast(
+            DailyMarketPatternsResult,
+            _JsonResult(
+                {
+                    "schema_version": "daily-market-patterns-v1",
+                    "algorithm_version": "daily-market-patterns-v1-decimal34",
+                    "request": request.model_dump(mode="json"),
+                    "asset_id": request.asset_id,
+                    "source_id": "alpaca-market-data:iex:aapl:daily-bars:adjustment-all",
+                    "currency": "USD",
+                    "points": [],
+                    "segments": [],
+                    "events": [],
+                    "coverage": {
+                        "close_observations_read": 0,
+                        "close_periods": 0,
+                        "discarded_close_revisions": 0,
+                        "point_count": 0,
+                        "rsi_available_points": 0,
+                        "rsi_missing_points": 0,
+                        "macd_available_points": 0,
+                        "macd_missing_points": 0,
+                        "metric_periods_without_close": 0,
+                        "segment_count": 0,
+                        "event_count": 0,
+                        "earliest_as_of": None,
+                        "latest_as_of": None,
+                        "maximum_evidence_available_at": None,
+                    },
+                    "limitations": ["Descriptive reconstruction at the requested cut."],
                 }
             ),
         )
@@ -4710,6 +4758,80 @@ def test_market_comparison_api_accepts_repeated_assets_and_is_read_only(tmp_path
     assert application.comparison_locations[0].workspace == tmp_path / "workspace"
     assert invalid_status == 400
     assert invalid["error"]["code"] == "invalid_request"
+
+
+def test_daily_market_patterns_api_is_bounded_read_only_and_empty_safe(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    valid = urlencode(
+        [
+            ("asset_id", "equity:us:aapl"),
+            ("start", "2026-01-01"),
+            ("end", "2026-03-31"),
+            ("known_at", "2026-04-01T00:00:00Z"),
+        ]
+    )
+
+    with _server(web) as (_, root):
+        status, payload, _ = _json_request(Request(f"{root}/api/v1/market-patterns?{valid}"))
+        invalid_queries = {
+            "missing": (
+                "asset_id=equity%3Aus%3Aaapl&start=2026-01-01&known_at=2026-04-01T00%3A00%3A00Z"
+            ),
+            "duplicate": (
+                "asset_id=equity%3Aus%3Aaapl&asset_id=equity%3Aus%3Aaapl"
+                "&start=2026-01-01&end=2026-03-31&known_at=2026-04-01T00%3A00%3A00Z"
+            ),
+            "unknown": (
+                "asset_id=equity%3Aus%3Aaapl&start=2026-01-01&end=2026-03-31"
+                "&known_at=2026-04-01T00%3A00%3A00Z&extra=1"
+            ),
+            "inverted": (
+                "asset_id=equity%3Aus%3Aaapl&start=2026-03-01&end=2026-01-01"
+                "&known_at=2026-04-01T00%3A00%3A00Z"
+            ),
+            "future": (
+                "asset_id=equity%3Aus%3Aaapl&start=2026-01-01&end=2026-04-02"
+                "&known_at=2026-04-01T00%3A00%3A00Z"
+            ),
+            "unsupported": (
+                "asset_id=equity%3Aus%3Amissing&start=2026-01-01&end=2026-03-31"
+                "&known_at=2026-04-01T00%3A00%3A00Z"
+            ),
+        }
+        failures = {
+            name: _json_request(Request(f"{root}/api/v1/market-patterns?{query}"))
+            for name, query in invalid_queries.items()
+        }
+
+    assert status == 200
+    assert payload["schema_version"] == "daily-market-patterns-v1"
+    assert payload["algorithm_version"] == "daily-market-patterns-v1-decimal34"
+    assert payload["points"] == []
+    assert payload["coverage"]["point_count"] == 0
+    assert payload["limitations"]
+    assert len(application.daily_pattern_requests) == 1
+    request = application.daily_pattern_requests[0]
+    assert request.asset_id == "equity:us:aapl"
+    assert request.start_date == date(2026, 1, 1)
+    assert request.end_date == date(2026, 3, 31)
+    assert application.daily_pattern_locations[0].workspace == tmp_path / "workspace"
+    assert not application.requests
+    assert not application.comparison_requests
+    assert not application.crypto_chart_requests
+    assert not application.listed_chart_requests
+    for name, (failure_status, failure, _) in failures.items():
+        assert failure_status == 400, name
+        assert failure["error"]["code"] == "invalid_request", name
 
 
 def test_sec_document_timeline_endpoint_reuses_contract_verbatim(tmp_path: Path) -> None:

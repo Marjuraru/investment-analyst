@@ -1143,6 +1143,44 @@
               </details>
             </div>
           </section>
+          <section id="patrones-diarios" class="patterns-section" aria-labelledby="patrones-diarios-titulo">
+            <div class="section-intro">
+              <div>
+                <p class="eyebrow">RECONSTRUCCIÓN AL CORTE</p>
+                <h2 id="patrones-diarios-titulo">Estados y patrones diarios</h2>
+                <p>Momentum del histograma MACD y tres cruces sobre cierres diarios observados, RSI(14) e histograma MACD(12,26,9) ya persistidos. Reconstrucción descriptiva al corte; no es una señal, predicción ni recomendación.</p>
+              </div>
+            </div>
+            <form id="daily-patterns-form" class="patterns-controls">
+              <label class="field"><span>Inicio</span><input id="daily-patterns-start" type="date" required></label>
+              <label class="field"><span>Fin</span><input id="daily-patterns-end" type="date" required></label>
+              <button id="daily-patterns-submit" class="button primary" type="submit">Consultar patrones</button>
+            </form>
+            <p id="daily-patterns-status" class="chart-status" aria-live="polite">Sin consultar. Elige un rango inclusivo de hasta 180 días y consulta al corte global.</p>
+            <div id="daily-patterns-results" class="patterns-results hidden" aria-busy="false">
+              <p id="daily-patterns-summary" class="patterns-summary"></p>
+              <div class="patterns-grid">
+                <article class="patterns-card" aria-labelledby="daily-patterns-current-title">
+                  <h3 id="daily-patterns-current-title">Estado del último período</h3>
+                  <div id="daily-patterns-current" aria-live="polite"></div>
+                </article>
+                <article class="patterns-card" aria-labelledby="daily-patterns-segments-title">
+                  <h3 id="daily-patterns-segments-title">Tramos observados</h3>
+                  <div id="daily-patterns-segments"></div>
+                </article>
+                <article class="patterns-card" aria-labelledby="daily-patterns-events-title">
+                  <h3 id="daily-patterns-events-title">Cruces</h3>
+                  <div id="daily-patterns-events"></div>
+                </article>
+              </div>
+              <p id="daily-patterns-coverage" class="patterns-coverage"></p>
+              <ul id="daily-patterns-limitations" class="patterns-limitations"></ul>
+              <details class="json-disclosure">
+                <summary>Contrato técnico y evidencia exacta</summary>
+                <pre id="daily-patterns-json" tabindex="0"></pre>
+              </details>
+            </div>
+          </section>
           </div>
 
           <div class="board" id="board-revisar" data-board="revisar" tabindex="-1" hidden>

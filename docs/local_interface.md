@@ -51,6 +51,8 @@ peticiones same-origin de assets y la continuidad de globals compartidos por scr
 
 `GET /api/v1/market-comparison` acepta `asset_id` repetido, `benchmark_id`, `start`, `end` y `known_at`. Devuelve `market-multi-asset-comparison-v1` desde almacenamiento local de solo lectura; la interfaz carga el gráfico normalizado bajo demanda.
 
+`GET /api/v1/market-patterns` acepta exactamente `asset_id`, `start`, `end` y `known_at` (los cuatro obligatorios). El rango público es inclusivo y admite como máximo 180 días naturales; `end` no puede superar la fecha UTC del corte. Devuelve `daily-market-patterns-v1` con puntos, tramos, eventos, cobertura y limitaciones desde almacenamiento local de solo lectura. Usa únicamente cierres diarios observados y las claves RSI(14) e histograma MACD(12,26,9) incrementales v2 del mismo activo, fuente, rango y `available_at <= known_at`; una métrica ausente o incompatible rompe la continuidad. El estado es el signo del histograma (`positive`, `negative`, `neutral` o `unavailable`) y los tres cruces son `macd_cross_positive`, `macd_cross_negative` y `rsi_cross_above_30`. No adquiere proveedores, no escribe dominio, no persiste el resultado y no produce señal, predicción, ranking ni recomendación. Esta versión admite únicamente cotizaciones USD.
+
 `GET /api/v1/cazatiburones/universe-activity` acepta `known_at` obligatorio y `asset_id` repetido
 opcional (hasta 40). Devuelve `cazatiburones-universe-activity-v1` desde almacenamiento local de
 solo lectura, con `insider`, `beneficial` e `institutional` separados por activo. El corte
@@ -226,8 +228,9 @@ visible:
 - `mesa` (`UI-6`) carga el snapshot operativo, las novedades de reglas analíticas, las
   incidencias operativas y, una sola vez por activación, la matriz de cobertura del universo;
 - `activo` carga el reporte, el gráfico de mercado y las dos lecturas fundamentales;
-- `tecnico` no hace peticiones en este bloque; `sistema` tampoco añade ninguna nueva, más allá de
-  las que ya disparaba bajo demanda su panel de watchlist, ahora alojado en este tablero;
+- `tecnico` no hace peticiones automáticas en este bloque; su panel de estados y patrones sólo
+  consulta al enviar un formulario explícito. `sistema` tampoco añade ninguna nueva, más allá de las
+  que ya disparaba bajo demanda su panel de watchlist, ahora alojado en este tablero;
 - `revisar` carga las bandejas de candidatos y alertas;
 - `cazatiburones` carga una vez el índice `universe-activity`; sus tres lecturas SEC/13F sólo se
   solicitan tras elegir una fila local y conservan su propio estado.
@@ -390,6 +393,26 @@ muestra **No aplica**. La lista presenta inicialmente diez filas y ofrece `Mostr
 del servidor. La navegación a una identidad inicialmente oculta amplía hasta el elemento exacto; si
 la identidad seleccionada desaparece tras una actualización, el detalle lo declara sin ejecutar una
 acción sobre otra fila.
+
+### Estados y patrones diarios
+
+`tecnico` añade un panel opt-in **Estados y patrones diarios** que consume
+`GET /api/v1/market-patterns`. Usa el activo global seleccionado y el corte `known_at` global; no
+crea un segundo selector, reloj ni corte. Al cargar, propone los últimos 90 días hasta la fecha del
+corte, pero no consulta nada hasta que se envía el formulario. El rango es inclusivo y el servidor
+rechaza más de 180 días, fechas invertidas o un final posterior al corte.
+
+El panel muestra el estado del último período observado, los tramos con número de períodos y
+duración UTC observada, la lista cronológica de cruces y el detalle de evidencia. Distingue una
+ausencia de evidencia de un rango sin cruces: la primera usa la gramática de ausencia y la segunda
+declara explícitamente que no hubo cruce sin prometer continuidad futura. Los valores visibles se
+redondean; el detalle técnico y el JSON conservan IDs, versiones y `Decimal` exacto. No se añade una
+librería gráfica, una descarga automática ni una tabla de todas las revisiones.
+
+Al cambiar el activo o el corte se limpia el estado del panel, se cancelan las peticiones en vuelo
+con `AbortController` y se descartan respuestas tardías mediante una secuencia; el panel nunca mezcla
+AAPL/QQQ/SOL. El hook de reset vive en `app-core.js` y la implementación y los eventos del panel en
+`app-technical.js`. La configuración de reglas, bandeja y canal Windows no se modifica.
 
 La franja de sesiones conserva Nueva York y NYSE, y reemplaza el reloj corriente de Lima por el
 estado regular de BVL en `America/Lima`. Muestra `Abre en…` o `Cierra en…` y usa sólo días laborables y dos periodos oficiales: del

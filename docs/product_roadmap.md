@@ -207,8 +207,11 @@ Una primera versión completa deberá:
 - continuar funcionando sin un LLM, un proveedor pagado o una conexión permanente;
 - poder instalarse, respaldarse, restaurarse y supervisarse en una laptop o equipo dedicado.
 
-La IA cualitativa y la investigación predictiva son módulos opcionales posteriores. No son
-dependencias del núcleo determinista.
+La IA cualitativa y la investigación predictiva no son dependencias del núcleo determinista, pero
+«opcional para ejecutar el núcleo» no significa «fuera del objetivo del producto». Entregar una
+capacidad predictiva experimental, evaluada fuera de muestra y explicable, es una meta explícita de
+la ruta; el LLM es una capa posterior e intercambiable que interpreta un paquete ya calculado y
+nunca la condición para que exista un pronóstico cuantitativo.
 
 ## Decisión de arquitectura híbrida local-first
 
@@ -245,6 +248,37 @@ produce narrativa, nunca el diagnóstico matemático ni una recomendación.
 No se permite que el dominio 3 escriba observaciones, recalcule el dominio 2 o modifique evidencia
 del dominio 1. Tampoco se desplegará una base de datos o servidor de inferencia cloud como
 dependencia del análisis central.
+
+### Capacidad predictiva e interpretación: estado verificable (2026-10-31)
+
+Esta matriz vive en la hoja de ruta vigente y no crea un inventario paralelo. «Integrado» significa
+código en `main` con evidencia; no acredita `MET`, cobertura completa ni capacidad predictiva.
+
+| Función | Integrado | Por construir | Aceptación / límite actual |
+| --- | --- | --- | --- |
+| Evidencia PIT, runtime, catálogo, `available_at` y lineage | Sí: fuentes oficiales, almacenamiento append-only y lectura acotada. | Nuevas fuentes sólo si la pregunta demuestra la carencia y hay licencia/PIT/coste verificados. | Una fuente ausente no se sustituye ni se retrofecha. |
+| Métricas deterministas, screening y reconstrucción descriptiva de ciclos/patrones | Sí: RSI/MACD diarios persistidos, siete plantillas `SILENT` y estados/tramos/cruces reconstructivos al corte. | Resultados posteriores por detección/horizonte, sólo cuando exista el módulo autorizado. | La reconstrucción es descriptiva: no es señal, no se notificó en sus fechas históricas y no demuestra anticipación. |
+| `FeatureSetSpec`/`FeatureSetResult`/`extract_features` | Sí: proyección por dominio de métricas persistidas. | Selección histórica explícita, label y `label_available_at`. | No es matriz de entrenamiento ni dataset predictivo; preserva series y revisiones. |
+| Label/target y dataset PIT | No. | `PREDICTIVE-FOUNDATION` P0–P1: pregunta, horizonte/unidad, universo, calendario, `decision_at`, label y regla de rechazo predeclarados. | Un snapshot PIT reproducible y maduro/no maduro por muestra; sin tuning sobre holdout. |
+| Motor ML y validación fuera de muestra | No. | `ML-BASELINE-VALIDATION` P2–P4: baseline ingenuo + estadístico/lineal y, como máximo, un booster candidato. | Purged walk-forward/embargo, calibración cuando aplique, incertidumbre y explicación; ni usar ML ni completar infraestructura garantiza ventaja. |
+| Inferencia, shadow y promoción reversible | No. | `PREDICTION-SHADOW-DELIVERY` P5–P6: contrato versionado, drift, latencia/memoria, umbral de promoción y rollback. | Inferencia separada del polling; sin recomendación ni ejecución implícita. |
+| `ModelExplanationPacket` e interpretación LLM | No. | `LLM-INTERPRETATION`: un adaptador opcional e intercambiable sobre un paquete ya calculado. | No calcula la predicción, no cambia evidencia, no decide operaciones y puede desconectarse sin afectar datos ni interfaz numérica. |
+| V1-U4 predicción | `UNKNOWN`. | Depende de la cadena anterior. | No hay modelo validado ni porcentaje de avance; no se declara predictor existente por documentación. |
+
+La conclusión trazable es que el proyecto ya contemplaba `DuckDB/Parquet → modelo tabular →
+explicación local → LLM`, pero la secuencia reciente enfatizó indicadores y la frase «ML
+opcional/diferido» podía confundirse con una renuncia al objetivo. La corrección es explícita:
+«opcional para ejecutar el núcleo» no equivale a «fuera del objetivo del producto». Las conclusiones
+de la investigación cripto ([síntesis 2026-08](research/crypto/crypto_research_synthesis_2026-08.md)
+§3.1–3.2 y [brief del planificador](research/crypto/crypto_planner_brief.md)) son evidencia
+anti-anclaje: más RSI/MACD no es una ventaja predictiva demostrada y ninguna fuente adicional se
+admite sin una pregunta que justifique su coste. La [revisión estratégica externa de
+2026-09](planning_context/external_strategy_review_decisions_2026-09.md) aporta las dieciocho
+recomendaciones sobre label/validación, forecasting frente a ranking, ML complementario e
+interpretación intercambiable; [historical_research_data.md](historical_research_data.md) documenta
+universo y disponibilidad histórica; [research_information_strategy.md](research_information_strategy.md)
+fija admisión de evidencia, PIT, costes y sesgos. Son evidencia de investigación, no hechos vigentes
+sobre proveedores o implementación.
 
 La disciplina de desarrollo usará requisitos, diseño, implementación y verificación trazados de
 forma bidireccional. Puede inspirarse en el V-model de VDI/VDE 2206, pero el proyecto no afirmará
@@ -287,6 +321,9 @@ pero no describen por sí solos el estado operativo actual.
   evidencia PIT, tablero local conectado por `UI-4` y evidencia viva en 19 de 20 activos; las
   limitaciones reales se conservan (retraso real entre evento, filing y disponibilidad; `beneficial`
   sin evidencia; ausencia distinta de cero).
+- estados y transiciones diarias descriptivas del histograma MACD, con tres cruces RSI/MACD,
+  cobertura, duración observada, censura de borde y corte PIT explícito; es una reconstrucción
+  descriptiva al corte, no una señal, predicción ni recomendación.
 
 ### Parcial
 
@@ -299,11 +336,13 @@ pero no describen por sí solos el estado operativo actual.
 ### Diseñado, no implementado
 
 - fundamentales SMV;
-- indicadores técnicos adicionales y plantillas;
+- indicadores técnicos adicionales distintos de los ya persistidos;
 - fundamentales de red para cripto;
 - catálogo macro y workspace de historia larga;
 - corpus y búsqueda de noticias;
-- IA cualitativa opcional y laboratorio predictivo;
+- label/target predictivo, constructor de dataset de entrenamiento, adaptador de inferencia,
+  evaluación fuera de muestra, calibración/shadow y paquete de explicación del modelo;
+- interpretación LLM opcional sobre paquetes ya calculados;
 - autenticación o exposición remota segura.
 
 ## Alcance inicial de activos
@@ -645,11 +684,14 @@ con un adaptador de compatibilidad versionado para el estado operativo ya persis
 ya quedó integrado en `a56f851`, retirando los contratos cripto legados y los defaults Apple de los resolvers del
 catálogo y cerrando `EQUITY-UNIVERSE`. `FUNDAMENTALS-COVERAGE` es el único `NEXT`, avanzado por
 `FUNDAMENTALS-COVERAGE-1`/#228 (acciones ordinarias y frescura honesta). `BVL-MARKET` permanece `BLOCKED` y
-`PREDICTIVE-RESEARCH` permanece `DEFERRED`.
+`PREDICTIVE-RESEARCH` permanece `DEFERRED`, no iniciado y no descartado: el siguiente PLAN debe
+resolver explícitamente su transición desde `main`; no es un segundo `NEXT` ni una implementación
+activa. `CYCLES-AND-PATTERNS-DAILY` aporta la lectura descriptiva de estados y cruces, no
+predicción, calibración ni recomendación.
 
 ## Fase 12 — IA cualitativa opcional
 
-Solo después del corpus de noticias:
+Capa independiente y opcional; no es prerrequisito de la investigación cuantitativa:
 
 - adaptador independiente del proveedor;
 - ejecución bajo demanda o activada por una alerta;
@@ -706,6 +748,13 @@ Una predicción seguirá siendo investigación, no una orden ni una recomendaci�
 de todas las puertas PIT, validación temporal, calibración cuando aplique, explicación, shadow mode
 y rollback podrá promoverse a una señal o detección de oportunidad versionada; cualquier
 recomendación futura seguirá siendo un artefacto separado y trazable.
+
+La Fase 12 no es prerrequisito de esta fase. El motor ML consume features/datasets PIT y no depende
+del corpus de noticias ni de un LLM; la interpretación LLM es una capa posterior sobre un
+`ModelExplanationPacket` ya calculado. El siguiente candidato concreto es `PREDICTIVE-FOUNDATION`
+(P0–P1), sujeto a un PLAN que fije la pregunta, el universo, el horizonte, el label y la regla de
+rechazo antes de mirar resultados. No se elige aquí un booster, una dependencia ML ni un proveedor
+LLM.
 
 ## Fase 14 — Operación 24/7 y release
 

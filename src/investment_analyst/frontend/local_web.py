@@ -109,6 +109,14 @@ from investment_analyst.analytics.market.comparison_models import (
     MarketComparisonRequest,
     MarketMultiAssetComparisonResult,
 )
+from investment_analyst.analytics.market.pattern_models import (
+    DailyMarketPatternsRequest,
+    DailyMarketPatternsResult,
+)
+from investment_analyst.analytics.market.statistics_definitions import (
+    MACD_HISTOGRAM_KEY,
+    RSI_KEY,
+)
 from investment_analyst.analytics.valuation import (
     CorporateValuationError,
     CorporateValuationFilingOptions,
@@ -493,6 +501,15 @@ class _ApplicationOperations(Protocol):
         """Query one read-only daily comparison from the visible universe."""
         ...
 
+    def query_daily_market_patterns(
+        self,
+        request: DailyMarketPatternsRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> DailyMarketPatternsResult:
+        """Query one read-only daily state and crossing reconstruction."""
+        ...
+
     def query_crypto_spot_daily_market_chart(
         self,
         request: CryptoSpotDailyMarketChartRequest,
@@ -830,6 +847,10 @@ class _WebOperations(Protocol):
 
     def market_chart(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Return one bounded point-in-time market chart."""
+        ...
+
+    def daily_market_patterns(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return one bounded descriptive daily state and crossing reconstruction."""
         ...
 
     def crypto_derivatives(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
@@ -1249,6 +1270,48 @@ class AaplLocalController:
         return self._signed_read(
             query,
             lambda: self._application.query_market_comparison(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
+        )
+
+    def daily_market_patterns_request(
+        self,
+        request: DailyMarketPatternsRequest,
+    ) -> DailyMarketPatternsResult:
+        """Query one descriptive daily reconstruction without providers or writes."""
+        descriptor = self._market_assets_by_id.get(request.asset_id)
+        if descriptor is None:
+            raise ValueError("daily market patterns asset_id is not supported")
+        source_id = descriptor.source_id
+        start = request.start_utc
+        end = request.end_before_utc
+        metrics_query = ReadDependencyQuery(
+            family=ReadDependencyFamily.METRICS,
+            endpoint="/api/v1/market-patterns",
+            asset_ids=(request.asset_id,),
+            source_ids=(source_id,),
+            metric_keys=tuple(sorted((RSI_KEY, MACD_HISTOGRAM_KEY))),
+            start=start,
+            end=end,
+            known_at=request.known_at,
+            selector="daily-market-patterns",
+        )
+        bars_query = ReadDependencyQuery(
+            family=ReadDependencyFamily.MARKET_BARS,
+            endpoint="/api/v1/market-patterns",
+            asset_ids=(request.asset_id,),
+            source_ids=(source_id,),
+            field_names=("close",),
+            frequency="day_1",
+            start=start,
+            end=end,
+            known_at=request.known_at,
+            selector="daily-market-patterns",
+        )
+        return self._signed_read_composite(
+            (metrics_query, bars_query),
+            lambda: self._application.query_daily_market_patterns(
                 request,
                 location=StorageLocationRequest(workspace=self._workspace),
             ),
@@ -2501,6 +2564,20 @@ class AaplLocalWebApplication:
         )
         return self._controller.market_comparison_request(request).to_json_dict()
 
+    def daily_market_patterns(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Validate the exact four-parameter daily pattern query contract."""
+        allowed = {"asset_id", "start", "end", "known_at"}
+        if set(parameters) - allowed:
+            raise ValueError("daily market patterns query contains unsupported parameters")
+        descriptor = self._market_asset(_one_parameter(parameters, "asset_id", required=True))
+        request = DailyMarketPatternsRequest(
+            asset_id=descriptor.asset_id,
+            start_date=_date_parameter(_one_parameter(parameters, "start", required=True)),
+            end_date=_date_parameter(_one_parameter(parameters, "end", required=True)),
+            known_at=_aware_datetime(_one_parameter(parameters, "known_at", required=True)),
+        )
+        return self._controller.daily_market_patterns_request(request).to_json_dict()
+
     def crypto_derivatives(
         self,
         parameters: Mapping[str, tuple[str, ...]],
@@ -3219,6 +3296,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=9)
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(HTTPStatus.OK, server.application.market_comparison(parameters))
+                return
+            if parsed.path == "/api/v1/market-patterns":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.daily_market_patterns(parameters),
+                )
                 return
             if parsed.path == "/api/v1/crypto-derivatives":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
