@@ -78,13 +78,14 @@ La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de
 La implementación vigente de reglas, replay y entrega se reconcilia en
 [`automated_screening_alerts.md`](automated_screening_alerts.md).
 
-`ALERTS-DELIVERY`/#381 (`ADVANCES`) integra el primer canal local Windows, cerrado por defecto,
+`ALERTS-DELIVERY`/#381 (`ADVANCES`) integró el primer canal local Windows, cerrado por defecto,
 con identidad propia, journal append-only, reintentos acotados y presupuesto de 8 MiB / 10 000
-entregas. Es una entrega descriptiva: no crea señales, recomendaciones ni ejecución, y una
-aceptación del sistema operativo no acredita lectura humana. La fila `FUNDAMENTALS-COVERAGE`
-permanece el único `NEXT`; este bloque no la cierra, no declara `DONE`, `MET` ni cobertura completa.
-La entrega real desde el servicio desplegado y sus costes observados pertenecen a la aceptación
-posterior, no a este candidato.
+entregas. `ALERTS-OPERATIONAL-ADOPTION`/#383 completó la entrega real: el release `200db2d6` está
+desplegado, una prueba de transporte fue aceptada por Windows desde el servicio y el canal se
+restituyó a deshabilitado, sin entrega financiera ni lectura humana observada. Es una capacidad
+descriptiva: no crea señales, recomendaciones ni ejecución. La fila `FUNDAMENTALS-COVERAGE`
+permanece el único `NEXT`; esta adopción no la cierra, no declara `DONE`, `MET` ni cobertura
+completa.
 
 ## Prioridad operativa de 2026-10-27
 
