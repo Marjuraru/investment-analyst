@@ -1,11 +1,12 @@
 # Hoja de ruta estratégica del producto
 
-> Estado vigente 2026-10-31: `DATA-CHASSIS` está `DONE` y `FUNDAMENTALS-COVERAGE` es el único
-> `NEXT`. La readiness operativa v2 se registra en
+> Estado vigente 2026-10-31: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
+> `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` conservando su deuda y evidencia, sin declararse `DONE`.
+> La readiness operativa v2 se registra en
 > [`v2_operational_readiness.md`](v2_operational_readiness.md): avanza prerrequisitos de interfaz,
 > lectura, limpieza y entrega, sin declarar cobertura fundamental nueva ni cerrar la ruta. La
 > adopción operacional de `FUNDAMENTALS-COVERAGE-OPERATIONS`/#373 se registra abajo; no cambia el
-> estado de la fila.
+> estado `PLANNED` de la fila.
 
 
 > `FUNDAMENTALS-SEC-PROVENANCE`/#365 (`ADVANCES`, sin cierre) integra la evidencia local de
@@ -70,8 +71,9 @@ ciclos y patrones, investigación predictiva y release. La contribución mínima
 selección PIT trazable por perfil, moneda y frecuencia —con base ADR cuando aplique— cuyas métricas
 usadas por las detecciones elegidas sean evaluables o declaren ausencia legítima. No exige 11/11
 universal ni trimestral IFRS inventado, y distingue carencia de producto de carencia de fuente.
-`FUNDAMENTALS-COVERAGE` permanece el único `NEXT`: este bloque lo avanza documentalmente, no lo
-cierra, no lo declara `DONE` y no publica Issues futuros.
+`PREDICTIVE-RESEARCH` es el único `NEXT`: `PREDICTIVE-FOUNDATION` abre su fundación contractual y de
+datos sin cerrarla. `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` conservando la deuda y la evidencia ya
+registrada, sin declararse `DONE` ni publicar Issues futuros.
 
 La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de crecimiento viven en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md).
@@ -83,9 +85,8 @@ con identidad propia, journal append-only, reintentos acotados y presupuesto de 
 entregas. `ALERTS-OPERATIONAL-ADOPTION`/#383 completó la entrega real: el release `200db2d6` está
 desplegado, una prueba de transporte fue aceptada por Windows desde el servicio y el canal se
 restituyó a deshabilitado, sin entrega financiera ni lectura humana observada. Es una capacidad
-descriptiva: no crea señales, recomendaciones ni ejecución. La fila `FUNDAMENTALS-COVERAGE`
-permanece el único `NEXT`; esta adopción no la cierra, no declara `DONE`, `MET` ni cobertura
-completa.
+descriptiva: no crea señales, recomendaciones ni ejecución. `PREDICTIVE-RESEARCH` es el único
+`NEXT`; `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` sin declararse `DONE`, `MET` ni cobertura completa.
 
 > `COVERAGE-AND-ASSET-EXPANSION`/#385 (`ADVANCES`, sin cierre) amplía el screening fundamental y el
 > piloto operacional sin cerrar `FUNDAMENTALS-COVERAGE`. El catálogo pasa a cinco plantillas
@@ -682,12 +683,11 @@ lectura— y `RUNTIME-EFFICIENCY-6` retira los contratos Apple productivos `aapl
 `AaplDailyRunRequestSnapshot`, dejando a Apple como un valor y no como una categoría del sistema de tipos,
 con un adaptador de compatibilidad versionado para el estado operativo ya persistido. `RUNTIME-EFFICIENCY-7`
 ya quedó integrado en `a56f851`, retirando los contratos cripto legados y los defaults Apple de los resolvers del
-catálogo y cerrando `EQUITY-UNIVERSE`. `FUNDAMENTALS-COVERAGE` es el único `NEXT`, avanzado por
-`FUNDAMENTALS-COVERAGE-1`/#228 (acciones ordinarias y frescura honesta). `BVL-MARKET` permanece `BLOCKED` y
-`PREDICTIVE-RESEARCH` permanece `DEFERRED`, no iniciado y no descartado: el siguiente PLAN debe
-resolver explícitamente su transición desde `main`; no es un segundo `NEXT` ni una implementación
-activa. `CYCLES-AND-PATTERNS-DAILY` aporta la lectura descriptiva de estados y cruces, no
-predicción, calibración ni recomendación.
+catálogo y cerrando `EQUITY-UNIVERSE`. En ese corte, `FUNDAMENTALS-COVERAGE` era el único `NEXT`,
+avanzado por `FUNDAMENTALS-COVERAGE-1`/#228 (acciones ordinarias y frescura honesta). `BVL-MARKET`
+permanece `BLOCKED` y `PREDICTIVE-RESEARCH` permanecía `DEFERRED`, no iniciado y no descartado.
+`CYCLES-AND-PATTERNS-DAILY` aporta la lectura descriptiva de estados y cruces, no predicción,
+calibración ni recomendación.
 
 ## Fase 12 — IA cualitativa opcional
 
@@ -751,10 +751,13 @@ recomendación futura seguirá siendo un artefacto separado y trazable.
 
 La Fase 12 no es prerrequisito de esta fase. El motor ML consume features/datasets PIT y no depende
 del corpus de noticias ni de un LLM; la interpretación LLM es una capa posterior sobre un
-`ModelExplanationPacket` ya calculado. El siguiente candidato concreto es `PREDICTIVE-FOUNDATION`
-(P0–P1), sujeto a un PLAN que fije la pregunta, el universo, el horizonte, el label y la regla de
-rechazo antes de mirar resultados. No se elige aquí un booster, una dependencia ML ni un proveedor
-LLM.
+`ModelExplanationPacket` ya calculado. `PREDICTIVE-FOUNDATION` (bajo `PREDICTIVE-RESEARCH`,
+`ADVANCES`) abre la fundación: pregunta, target, horizonte, `decision_at`, features, label,
+`label_available_at`, dataset/export PIT y regla de rechazo quedaron preregistrados antes de mirar
+resultados. La autoridad técnica y operativa es
+[`predictive_foundation.md`](predictive_foundation.md). No se elige aquí un booster, una dependencia
+ML ni un proveedor LLM; la ejecución real no alcanzó muestra elegible y no se entrena ni se promueve
+un predictor.
 
 ## Fase 14 — Operación 24/7 y release
 

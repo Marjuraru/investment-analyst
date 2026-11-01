@@ -141,6 +141,24 @@ implementación.
 5. Crear búsqueda local y una línea temporal que relacione documentos y datos sin inferir causalidad.
 6. Abrir la investigación predictiva con `PREDICTIVE-FOUNDATION` (P0–P1): pregunta y label
    versionados, elegibilidad temporal, dataset PIT mínimo, baselines y criterio de rechazo antes de
-   mirar resultados. La interpretación cualitativa no bloquea este paso.
+   mirar resultados. La fundación ya quedó abierta por #391; la evaluación de un baseline sólo
+   procede si la muestra PIT elegible es suficiente. La interpretación cualitativa no bloquea este
+   paso.
 7. Evaluar análisis cualitativo opcional mediante IA sobre paquetes ya calculados, con presupuesto,
    citas y auditoría; puede desconectarse sin afectar datos, inferencia ni interfaz numérica.
+
+## Estado de la fundación predictiva (2026-10-31)
+
+`PREDICTIVE-RESEARCH` es el único `NEXT`. `PREDICTIVE-FOUNDATION`/#391 (`ADVANCES`) fijó la
+pregunta, el target, el horizonte, `decision_at`, las tres features y el label de cinco intervalos,
+y construyó el dataset/export PIT aislado sobre el workspace operativo en solo lectura. La autoridad
+técnica y operativa es [`predictive_foundation.md`](predictive_foundation.md).
+
+La ejecución real sobre BTC 2026-08-03..2026-10-31 con corte `2026-10-31T23:21:30.756664Z` produjo
+90 decisiones, 1 feature PIT disponible, 89 `not_yet_available`, 84 labels maduros, 6 pendientes y
+0 elegibles antes de split; readiness `insufficient_pit_sample`. SOL como control READ_ONLY
+reprodujo la misma carencia. La historia de precios existe, pero su `available_at` empieza en
+2026-10-21: no es historia entrenable point-in-time. No se entrena, no se retrofecha y no se
+promueve un predictor. `ML-BASELINE-VALIDATION` es el siguiente esperado sólo si existe muestra
+elegible suficiente; si no, el siguiente PLAN resuelve la carencia temporal demostrada usando
+primero evidencia histórica recuperable o captura prospectiva existente.
