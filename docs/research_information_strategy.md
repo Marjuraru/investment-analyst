@@ -162,3 +162,24 @@ reprodujo la misma carencia. La historia de precios existe, pero su `available_a
 promueve un predictor. `ML-BASELINE-VALIDATION` es el siguiente esperado sólo si existe muestra
 elegible suficiente; si no, el siguiente PLAN resuelve la carencia temporal demostrada usando
 primero evidencia histórica recuperable o captura prospectiva existente.
+
+## Decisión sobre historia externa (2026-11-01)
+
+`PREDICTIVE-HISTORICAL-DATA`/#393 (`ADVANCES`) resuelve la carencia temporal con un archivo
+histórico oficial acotado en lugar de esperar captura prospectiva. La fuente es Coinbase Exchange
+diario para `crypto:btc-usd` (`2019-01-01..2025-12-31`, ≤2.560 días y ≤12 GET), ya integrada en el
+catálogo y en USD; no se sustituye por Binance/USDT ni por precios ajustados de otro mercado.
+
+La historia de precios no es historia de recepción. El archivo conserva `retrieved_at` real y el
+dataset declara `availability_policy=historical-close-plus-1h-assumed-v1`,
+`availability_basis=historical_reconstruction_assumed` y `strict_pit_verified=false`. Un precio
+revisado hoy pudo tener otra primera publicación entonces; esa limitación no se resuelve con el
+timestamp de la vela. La reconstrucción permite investigación retrospectiva condicional y nunca
+satisface por sustitución el gate de PIT observado ni autoriza promoción o señal.
+
+Las ausencias se conservan, no se rellenan y no se interpretan como precio cero. No se crea un
+segundo pipeline de noticias ni se combina mercado con fundamentales. Para unos miles de barras no
+se requiere Drive, Colab ni NotebookLM: son opciones de almacenamiento, cómputo o apoyo documental
+posteriores, no dependencias del análisis central. No se compran ni descargan modelos grandes y no se
+consume un LLM. La autoridad técnica y los comandos viven en
+[`predictive_foundation.md`](predictive_foundation.md).
