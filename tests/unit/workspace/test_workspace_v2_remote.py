@@ -139,7 +139,7 @@ def test_retention_preview_requires_latest_recovery_and_complete_parent_chain(
     remote, backup_root = _remote(tmp_path)
     base = remote.plan_base(backup_root, configuration_fingerprint="a" * 64).manifest
     changed = base.model_copy(
-        update={"backup_id": uuid4(), "created_at": datetime(2026, 11, 1, tzinfo=UTC)}
+        update={"backup_id": uuid4(), "created_at": base.created_at + timedelta(days=1)}
     )
     receipt = RemoteBackupRestoreReceipt(
         backup_id=base.backup_id,

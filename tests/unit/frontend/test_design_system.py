@@ -1597,8 +1597,8 @@ def _check_route_declares_completed_dependencies_and_next_route(doc_text: str) -
     assert re.search(r"\|\s*`DATA-CHASSIS`\s*\|\s*`DONE`\s*\|", doc_text), (
         "DATA-CHASSIS must be DONE after its route closes"
     )
-    assert re.search(r"\|\s*`FUNDAMENTALS-COVERAGE`\s*\|\s*`NEXT`\s*\|", doc_text), (
-        "FUNDAMENTALS-COVERAGE must be the next route"
+    assert re.search(r"\|\s*`PREDICTIVE-RESEARCH`\s*\|\s*`NEXT`\s*\|", doc_text), (
+        "PREDICTIVE-RESEARCH must be the next route"
     )
 
 
@@ -2185,8 +2185,8 @@ def _check_route_keeps_a_single_next_after_data_chassis_closes(doc_text: str) ->
         "DATA-CHASSIS must be DONE after its route closes"
     )
     next_rows = re.findall(r"\|\s*`([A-Z-]+)`\s*\|\s*`NEXT`\s*\|", doc_text)
-    assert next_rows == ["FUNDAMENTALS-COVERAGE"], (
-        f"expected exactly one NEXT row (FUNDAMENTALS-COVERAGE), found {next_rows}"
+    assert next_rows == ["PREDICTIVE-RESEARCH"], (
+        f"expected exactly one NEXT row (PREDICTIVE-RESEARCH), found {next_rows}"
     )
 
 
@@ -4601,7 +4601,10 @@ def _check_ui8_composition_is_documented(design_doc: str, local_doc: str, plan_d
     assert "`UI-13`" in local_doc
     assert "`UI-13`" in plan_doc
     assert "`SEC-CORPUS` completó su ruta" in plan_doc
-    assert "`DATA-CHASSIS` quedó `DONE` y `FUNDAMENTALS-COVERAGE` es el único `NEXT`." in plan_doc
+    assert (
+        "`DATA-CHASSIS` quedó `DONE` y, en ese corte, `FUNDAMENTALS-COVERAGE` era el único `NEXT`."
+        in plan_doc
+    )
 
 
 def test_ui8_composition_and_route_are_documented() -> None:
@@ -5022,7 +5025,10 @@ def test_docs_state_technical_review_bvl_and_clean_ui_boundaries() -> None:
         assert "master-detail" in document
     assert "Anexo2TextodcRentaFija.pdf" in local_doc
     assert "`SEC-CORPUS` completó su ruta" in plan_doc
-    assert "`DATA-CHASSIS` quedó `DONE` y `FUNDAMENTALS-COVERAGE` es el único `NEXT`." in plan_doc
+    assert (
+        "`DATA-CHASSIS` quedó `DONE` y, en ese corte, `FUNDAMENTALS-COVERAGE` era el único `NEXT`."
+        in plan_doc
+    )
     assert "UI-11" in plan_doc
 
 
@@ -5149,9 +5155,9 @@ def test_canonical_roadmap_reflects_live_sec_caz_ui12_runtime_efficiency_and_pri
     assert "SEC-CORPUS" in release_plan and "DONE" in release_plan
     assert "`EQUITY-UNIVERSE` | `DONE`" in release_plan
     assert "`DATA-CHASSIS` | `DONE`" in release_plan
-    assert "`FUNDAMENTALS-COVERAGE` | `NEXT`" in release_plan
+    assert "`FUNDAMENTALS-COVERAGE` | `PLANNED`" in release_plan
     assert "BVL-MARKET" in release_plan and "BLOCKED" in release_plan
-    assert "PREDICTIVE-RESEARCH" in release_plan and "DEFERRED" in release_plan
+    assert "`PREDICTIVE-RESEARCH` | `NEXT`" in release_plan
     assert "UI-14/#202" in release_plan + roadmap
     assert "RUNTIME-EFFICIENCY" in roadmap
     assert "UI-12" in roadmap

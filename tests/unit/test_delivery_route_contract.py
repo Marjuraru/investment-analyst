@@ -108,7 +108,7 @@ def test_route_is_compact_non_authorizing_and_reconciles_mkt3() -> None:
     assert "`MARKET-COMPARISON` | `DONE`" in release_plan
     assert "MKT-3/#56/#57" in release_plan
     assert "benchmarks sectoriales" in release_plan
-    assert "PREDICTIVE-RESEARCH` | `DEFERRED`" in release_plan
+    assert "`PREDICTIVE-RESEARCH` | `NEXT`" in release_plan
     assert "Sólo main expresa el estado integrado" in release_plan
     assert "`DELIVERY-GOVERNANCE` | `DONE`" in release_plan
     assert "`ANALYST-READINESS` | `BLOCKED`" in release_plan
@@ -282,9 +282,9 @@ def test_route_completes_local_interface_and_preserves_live_priority_state() -> 
     assert "LOCAL-INTERFACE" in release_plan and "DONE" in release_plan
     assert "`EQUITY-UNIVERSE` | `DONE`" in release_plan
     assert "`DATA-CHASSIS` | `DONE`" in release_plan
-    assert "`FUNDAMENTALS-COVERAGE` | `NEXT`" in release_plan
+    assert "`FUNDAMENTALS-COVERAGE` | `PLANNED`" in release_plan
     assert "BVL-MARKET" in release_plan and "BLOCKED" in release_plan
-    assert "PREDICTIVE-RESEARCH" in release_plan and "DEFERRED" in release_plan
+    assert "`PREDICTIVE-RESEARCH` | `NEXT`" in release_plan
     assert "UI-14/#202" in release_plan + roadmap
     assert "COMPLETES" in release_plan
     assert "Cazatiburones" in roadmap
@@ -305,7 +305,7 @@ def test_route_pinning_assertions_track_the_new_single_next_after_equity_univers
     assert _route_status(items, "EQUITY-UNIVERSE") == "DONE"
     assert _route_status(items, "DATA-CHASSIS") == "DONE"
     next_rows = re.findall(r"\|\s*`([A-Z-]+)`\s*\|\s*`NEXT`\s*\|", release_plan)
-    assert next_rows == ["FUNDAMENTALS-COVERAGE"]
+    assert next_rows == ["PREDICTIVE-RESEARCH"]
 
 
 def test_no_unrelated_assertion_in_the_two_route_pinning_test_files_is_removed_weakened_or_rewritten() -> (  # noqa: E501
