@@ -20,7 +20,9 @@ dev = [
     "pytest>=8",
     "pytest-cov>=7.1,<8",
     "ruff>=0.6",
+    "scikit-learn>=1.9,<2",
     "setuptools==84.1.0",
+    "threadpoolctl>=3.5,<4",
 ]
 
 [tool.setuptools.packages.find]

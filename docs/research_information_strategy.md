@@ -183,3 +183,20 @@ se requiere Drive, Colab ni NotebookLM: son opciones de almacenamiento, cómputo
 posteriores, no dependencias del análisis central. No se compran ni descargan modelos grandes y no se
 consume un LLM. La autoridad técnica y los comandos viven en
 [`predictive_foundation.md`](predictive_foundation.md).
+
+## Resultado de la hipótesis ML (2026-11-01)
+
+`ML-BASELINE-VALIDATION`/#395 evaluó la hipótesis preregistrada sobre el dataset reconstruido
+`d927c7f1…`: tres folds walk-forward, regresión logística e histogram gradient boosting frente a
+`p=0.5` y al prior de clase, Brier pooled y bootstrap pareado de bloques móviles. El resultado fue
+`no_demonstrated_edge`: ningún candidato alcanzó el 5 % de mejora frente a ambas referencias con
+límites inferiores positivos, y el prior de clase resultó la mejor referencia (0,248527). El holdout
+nunca se abrió y no se ajustó ningún parámetro.
+
+La lectura útil no es "el modelo casi funciona": con estas tres features técnicas y este horizonte,
+la comparación no muestra valor incremental sobre una referencia ingenua. Un resultado negativo es
+una entrega válida y no se convierte en señal, recomendación ni predictor promovido. Tampoco autoriza
+tuning, otra longitud de bloque, más indicadores ni nuevos activos para buscar un ganador. El
+siguiente PLAN decide entre una hipótesis de datos/features distinta sustentada por investigación y
+el cierre de este experimento; la interpretación LLM sigue siendo una capa posterior sobre resultados
+estructurados.
