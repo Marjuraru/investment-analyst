@@ -504,10 +504,10 @@ PY
 
 ### Resultado real (2026-11-01)
 
-`run_id=276e7e72-6e2c-5a4f-b51a-621c588fc6da`, `protocol_sha256=e7256118…`, 2.186 decisiones,
+`run_id=fc4ea570-4ffb-55fc-ac49-17d74c328d24`, `protocol_sha256=e7256118…`, 2.186 decisiones,
 `status=completed`, `decision=no_demonstrated_edge`, `holdout_status=not_evaluated`, 6 fits de
-desarrollo, 0 de holdout y 0 accesos al holdout. 3,40 s de pared, pico RSS 256.200.704 B, artefacto
-45.178 B. El holdout nunca se consultó.
+desarrollo, 0 de holdout y 0 accesos al holdout. 3,68 s de pared, pico RSS 256.180.224 B, artefacto
+45.176 B. El holdout nunca se consultó.
 
 | Fold | train | purge | embargo | eval | logística | HGB | `p=0.5` | prior |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -522,7 +522,7 @@ y `−1,28 %`, con `−0,016330` y `−0,016935`. Ningún candidato alcanza el 5
 referencias y el prior de clase es la mejor referencia. No se ajustó ningún parámetro, no se probó
 otra longitud de bloque ni otro umbral, y no se abrió el holdout para buscar un ganador.
 
-Reutilización real: una segunda ejecución devolvió `status=reused` en 1,73 s con los mismos hashes de
+Reutilización real: una segunda ejecución devolvió `status=reused` en 2,01 s con los mismos hashes de
 `protocol.json`, `predictions.parquet`, `report.json` y `manifest.json`; no hubo fitting, red ni
 rewrite. El dataset `d927c7f1…` conservó exactamente sus hashes antes y después (`manifest.json` y
 `rows.parquet` verificados). El lector core releyó el artefacto sin `sklearn`, `numpy`, `scipy` ni

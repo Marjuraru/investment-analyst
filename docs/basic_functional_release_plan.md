@@ -428,7 +428,7 @@ desarrollo y 0 de holdout. Logística 0,249321, HGB 0,251702, `p=0.5` 0,250000 y
 ningún candidato alcanzó el 5 % frente a ambas referencias con límites inferiores positivos y la
 decisión fue `no_demonstrated_edge`. `selection.json` no se creó, el holdout permaneció intacto (0
 accesos) y no se consultó ninguna métrica suya. El artefacto sellado
-(`run_id=276e7e72-6e2c-5a4f-b51a-621c588fc6da`, 45.178 B) se reutiliza sin fitting y se lee sin
+(`run_id=fc4ea570-4ffb-55fc-ac49-17d74c328d24`, 45.176 B) se reutiliza sin fitting y se lee sin
 dependencias ML; el dataset conservó sus hashes. El bloque no añade una señal, no promueve un
 predictor, no cambia V1-U4 y no abre tuning, nuevos activos ni datos.
 
