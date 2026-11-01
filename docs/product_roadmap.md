@@ -260,7 +260,7 @@ código en `main` con evidencia; no acredita `MET`, cobertura completa ni capaci
 | Evidencia PIT, runtime, catálogo, `available_at` y lineage | Sí: fuentes oficiales, almacenamiento append-only y lectura acotada. | Nuevas fuentes sólo si la pregunta demuestra la carencia y hay licencia/PIT/coste verificados. | Una fuente ausente no se sustituye ni se retrofecha. |
 | Métricas deterministas, screening y reconstrucción descriptiva de ciclos/patrones | Sí: RSI/MACD diarios persistidos, siete plantillas `SILENT` y estados/tramos/cruces reconstructivos al corte. | Resultados posteriores por detección/horizonte, sólo cuando exista el módulo autorizado. | La reconstrucción es descriptiva: no es señal, no se notificó en sus fechas históricas y no demuestra anticipación. |
 | `FeatureSetSpec`/`FeatureSetResult`/`extract_features` | Sí: proyección por dominio de métricas persistidas. | Selección histórica explícita, label y `label_available_at`. | No es matriz de entrenamiento ni dataset predictivo; preserva series y revisiones. |
-| Label/target y dataset PIT | No. | `PREDICTIVE-FOUNDATION` P0–P1: pregunta, horizonte/unidad, universo, calendario, `decision_at`, label y regla de rechazo predeclarados. | Un snapshot PIT reproducible y maduro/no maduro por muestra; sin tuning sobre holdout. |
+| Label/target y dataset PIT | Sí, parcial: constructor PIT read-only (#391) y constructor reconstruido con archivo Coinbase (#393). La muestra PIT observada sigue siendo insuficiente. | `ML-BASELINE-VALIDATION` P2–P4: baseline ingenuo + estadístico/lineal y, como máximo, un booster candidato. | Un snapshot PIT reproducible y maduro/no maduro por muestra; sin tuning sobre holdout. El dataset reconstruido es investigación retrospectiva condicional y no sustituye el gate PIT. |
 | Motor ML y validación fuera de muestra | No. | `ML-BASELINE-VALIDATION` P2–P4: baseline ingenuo + estadístico/lineal y, como máximo, un booster candidato. | Purged walk-forward/embargo, calibración cuando aplique, incertidumbre y explicación; ni usar ML ni completar infraestructura garantiza ventaja. |
 | Inferencia, shadow y promoción reversible | No. | `PREDICTION-SHADOW-DELIVERY` P5–P6: contrato versionado, drift, latencia/memoria, umbral de promoción y rollback. | Inferencia separada del polling; sin recomendación ni ejecución implícita. |
 | `ModelExplanationPacket` e interpretación LLM | No. | `LLM-INTERPRETATION`: un adaptador opcional e intercambiable sobre un paquete ya calculado. | No calcula la predicción, no cambia evidencia, no decide operaciones y puede desconectarse sin afectar datos ni interfaz numérica. |
@@ -754,10 +754,12 @@ del corpus de noticias ni de un LLM; la interpretación LLM es una capa posterio
 `ModelExplanationPacket` ya calculado. `PREDICTIVE-FOUNDATION` (bajo `PREDICTIVE-RESEARCH`,
 `ADVANCES`) abre la fundación: pregunta, target, horizonte, `decision_at`, features, label,
 `label_available_at`, dataset/export PIT y regla de rechazo quedaron preregistrados antes de mirar
-resultados. La autoridad técnica y operativa es
+resultados. `PREDICTIVE-HISTORICAL-DATA`/#393 (`ADVANCES`) añade un archivo histórico oficial
+acotado y un dataset reconstruido con supuesto explícito de disponibilidad, sin entrenar ni abrir el
+workspace operativo; el gate de PIT observado no cambia. La autoridad técnica y operativa es
 [`predictive_foundation.md`](predictive_foundation.md). No se elige aquí un booster, una dependencia
-ML ni un proveedor LLM; la ejecución real no alcanzó muestra elegible y no se entrena ni se promueve
-un predictor.
+ML ni un proveedor LLM; la ejecución real PIT no alcanzó muestra elegible y no se entrena ni se
+promueve un predictor.
 
 ## Fase 14 — Operación 24/7 y release
 

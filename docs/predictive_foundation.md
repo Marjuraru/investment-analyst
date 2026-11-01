@@ -1,10 +1,11 @@
-# Fundación predictiva — experimento diario cripto y dataset PIT
+# Fundación predictiva — experimento diario cripto, dataset PIT y reconstrucción histórica
 
-> Autoridad técnica y operativa única del artefacto abierto por `PREDICTIVE-FOUNDATION`/#391
-> (`PREDICTIVE-RESEARCH`, `ADVANCES`, sin cierre). Estrategia y ruta viven en
-> [`product_roadmap.md`](product_roadmap.md), [`basic_functional_release_plan.md`](basic_functional_release_plan.md)
-> y [`research_information_strategy.md`](research_information_strategy.md). Este documento no
-> autoriza adquisición, entrenamiento, recomendación ni ejecución.
+> Autoridad técnica y operativa única de los artefactos abiertos por `PREDICTIVE-FOUNDATION`/#391 y
+> `PREDICTIVE-HISTORICAL-DATA`/#393 (`PREDICTIVE-RESEARCH`, `ADVANCES`, sin cierre). Estrategia y
+> ruta viven en [`product_roadmap.md`](product_roadmap.md),
+> [`basic_functional_release_plan.md`](basic_functional_release_plan.md) y
+> [`research_information_strategy.md`](research_information_strategy.md). Este documento no autoriza
+> adquisición ilimitada, entrenamiento, recomendación ni ejecución.
 
 ## Estado y alcance
 
@@ -13,12 +14,21 @@ reproducible con separación temporal entre features y label y publica su elegib
 entrena un modelo, no produce una predicción, no genera una señal ni una recomendación y no toca el
 workspace operativo en escritura.
 
+Existen dos modos explícitos y no intercambiables:
+
+1. **PIT observado** (#391): consume el workspace operativo en `READ_ONLY` y sólo admite evidencia
+   cuyo `available_at` ya existía en el corte. Es el único modo que puede satisfacer el gate de
+   evidencia PIT observada.
+2. **Reconstruido** (#393): adquiere un archivo histórico oficial acotado y reconstruye features
+   causales bajo el supuesto explícito de disponibilidad al cierre de barra más una hora. Permite
+   investigación retrospectiva condicional, nunca promoción, señal operacional ni sustitución del
+   gate PIT observado.
+
 Perfil soportado: cripto spot USD, barras diarias UTC y fuente inequívoca del catálogo. La primera
 fuente es Coinbase diario para `crypto:btc-usd`; `crypto:sol-usd` es control de reutilización. La
 lógica no tiene ramas por BTC o SOL. Equity/ETF, intradía, derivados, cross-sectional y mezcla de
 fuentes o perfiles quedan fuera con error explícito. El workspace se abre siempre en
-`READ_ONLY`; el export escribe únicamente en una raíz de investigación explícita, fuera del
-workspace.
+`READ_ONLY` en el modo PIT; el modo reconstruido no abre el workspace ni una conexión de escritura.
 
 ## Experimento preregistrado (P0)
 
@@ -189,6 +199,96 @@ hash. Una revisión o un label nuevo cambia `row_id`/`dataset_id`, sin sobrescri
 Schemas propios: `predictive-experiment-v1` (spec), `predictive-dataset-v1` (dataset/manifest
 determinista) y `predictive-dataset-manifest-v1` (manifiesto sellado del artefacto).
 
+## Modo reconstruido — archivo histórico y dataset causal (#393)
+
+`PREDICTIVE-HISTORICAL-DATA` añade un artefacto **aislado y opt-in**. No modifica el export PIT de
+#391, sus schemas, IDs, validadores ni límites. Un lector PIT previo no acepta este artefacto sin
+una decisión explícita de adaptación.
+
+### Archivo fuente
+
+- Fuente: Coinbase Exchange, producto y `source_id` resueltos por el catálogo central
+  (`resolve_historical_scope`); no hay ramas por ticker ni `source_id` sintetizado.
+- Rango público inclusivo `2019-01-01..2025-12-31` → `[2019-01-01T00:00Z, 2026-01-01T00:00Z)`,
+  máximo 2.560 días y un máximo de 12 GET secuenciales. El cliente Coinbase vigente pagina, filtra,
+  ordena, valida `Decimal`/`raw_values` y rechaza duplicados contradictorios; no se crea otro parser
+  HTTP ni otro paginador.
+- `candles.jsonl` canónico conserva OHLCV, `raw_values` y `bar_start`; el manifest declara activo,
+  producto, granularidad, rango, URLs, `retrieved_at`, conteos de barras y ausencias, hash físico y
+  hash semántico. Un recibo completo acredita peticiones completadas, **no** que todos los días
+  tengan vela. Las ausencias se conservan; nunca se rellenan con el día anterior, el siguiente ni
+  un precio cero.
+- Un destino existente se reutiliza sin red ni reescritura sólo tras verificar identidad,
+  parámetros y checksums. Corrupción o contenido distinto falla cerrado. No hay auto-refresh ni
+  borrado.
+- `bar_content_id = uuid5(namespace, hash canónico(activo, fuente, frecuencia, `bar_start`, OHLCV,
+  raw_values))`; excluye el reloj de cómputo. `archive_id` liga la adquisición (URLs, `retrieved_at`,
+  rango) y el contenido ordenado; otra recepción produce otra identidad y nunca sobrescribe.
+
+Condiciones de uso: el uso previsto es personal y local. El artefacto publica la URL de términos del
+proveedor y no afirma licencia abierta, checksum oficial ni derecho a redistribuir.
+
+### Features causales reconstruidas
+
+`feature_set_version=crypto-market-reconstructed-3-v1`, `target_version` idéntico a #391,
+`experiment_spec_id=crypto-daily-positive-return-5d-historical-v1` y
+`availability_policy=historical-close-plus-1h-assumed-v1`. Precisión 34 `ROUND_HALF_EVEN`, sin
+`float`.
+
+Las features de la decisión D usan sólo cierres hasta D−1:
+
+1. `close_return_1d = close[D-1] / close[D-2] - 1`.
+2. `rsi_14_fraction = RSI14[D-1] / 100`.
+3. `macd_12_26_9_histogram_close_ratio = histograma[D-1] / close[D-1]`.
+
+Se reutilizan `decimal34_mean`, `ema_step` y `wilder_average_step`. RSI siembra con la media de las
+primeras 14 ganancias/pérdidas sobre 15 cierres; MACD siembra EMA12/EMA26 con media simple y señal 9
+con la media de las primeras 9 líneas (34 cierres mínimos). Un recorrido cronológico mantiene estado
+y emite por fecha; no se llama `full_*` ni se recalcula el prefijo completo por muestra. Los tests
+comparan exactamente contra `full_rsi`/`full_macd` vigentes.
+
+Segmentos diarios contiguos: un hueco invalida las fechas afectadas y reinicia el calentamiento en el
+siguiente segmento. `segment_seed_start` y `warmup_bars` quedan por fila. RSI/MACD permanecen
+ausentes hasta calentamiento completo. El prefijo inicial empieza en 2019-01-01 y no se afirma
+igualdad numérica con métricas operativas sembradas en otra fecha.
+
+`assumed_available_at = fin de barra + 1 h` es una hipótesis explícita
+(`availability_basis=historical_reconstruction_assumed`), no primera publicación observada ni SLA.
+`strict_pit_verified=false` siempre. El feature hash liga sólo spec, política, segmento/seed y un
+digest incremental del prefijo causal de `bar_content_id`/cierres hasta D−1; nunca `archive_id`,
+barras futuras, label, split ni reloj del export.
+
+### Label, split y readiness
+
+El label conserva exactamente #391: seis barras continuas D..D+5, `entry_close` de D, `exit_close` de
+D+5, fin de salida D+6, `return_5d=exit/entry−1` y `y=1` sólo si es estrictamente positivo (cero ⇒ 0).
+Ausencia, fin no maduro o divisor inválido nunca se convierten en `y=0`. La evidencia del label
+registra la recepción real y el fin temporal:
+`evidence_available_at = max(exit_bar_end, archive.retrieved_at)`; no se retrofecha una
+disponibilidad observada.
+
+La política es `historical-temporal-split-v1`: 60/20/20 sobre la grilla solicitada antes de filtrar,
+floors para train/validation, purge por solape del intervalo del label y embargo de cinco días UTC al
+inicio de validation/holdout. Una fila por decisión, sin reequilibrar mirando `y`.
+
+`reconstruction_ready` exige ≥300 maduras/elegibles antes del split, ≥150 train / ≥40 validation /
+≥40 holdout después de purge/embargo y ≥20 de cada clase en train; en otro caso
+`insufficient_reconstructed_sample` con los conteos reales. Son pisos de admisión para investigación
+ML posterior; no son significancia, robustez, precisión ni equivalencia al `research_ready` PIT.
+
+### Export y consumidor offline
+
+`<output-dir>/<dataset_id>/rows.parquet` + `manifest.json` sellados de forma atómica. Los números
+financieros son texto decimal canónico; `y` es entero o nulo; los timestamps son UTC. Las columnas
+separan identificadores, las tres features, el target, la metadata futura del label, el split y la
+elegibilidad; el manifest declara orden, unidades, versiones, schema, fronteras de split, supuestos,
+referencia content-addressed al archivo único y los hashes físico/semántico. El archivo fuente no se
+copia dentro del dataset.
+
+El consumidor offline `read_historical_dataset_view` verifica el manifest y lee proyecciones
+explícitas: sólo las tres features, sólo el target o sólo la metadata. La conversión a `float` o a
+un dtype de modelo pertenece a un adaptador externo futuro; no se crea aquí.
+
 ## Comandos exactos
 
 Desde la raíz del repositorio, con intérprete explícito y `PYTHONPATH=src`:
@@ -240,6 +340,50 @@ print(rows)
 PY
 ```
 
+### Modo reconstruido (#393)
+
+```bash
+# Adquisición finita: 9 GET como máximo, sella el archivo y reintenta sin red si ya existe.
+PYTHONPATH=src .venv/bin/python scripts/build_historical_research_dataset.py acquire \
+  --asset-id crypto:btc-usd \
+  --start-date 2019-01-01 --end-date 2025-12-31 \
+  --output-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-historical-data \
+  --json
+
+# Resumen sin escribir: no requiere output-dir ni abre el workspace.
+PYTHONPATH=src .venv/bin/python scripts/build_historical_research_dataset.py build \
+  --archive-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-historical-data/<archive_id> \
+  --start-date 2020-01-01 --end-date 2025-12-25 \
+  --known-at 2026-11-01T02:00:00Z \
+  --json
+
+# Export aislado, fuera del workspace, runtime, release y repositorio.
+PYTHONPATH=src .venv/bin/python scripts/build_historical_research_dataset.py build \
+  --archive-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-historical-data/<archive_id> \
+  --start-date 2020-01-01 --end-date 2025-12-25 \
+  --known-at 2026-11-01T02:00:00Z \
+  --output-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-historical-data/datasets \
+  --json
+```
+
+`build` no acepta `--workspace`, no abre el runtime ni una conexión de escritura y ejecuta desde
+cualquier cwd porque todos los paths se resuelven absolutos. Rechaza destinos dentro del
+repositorio, workspace, runtime, release u `ops`, y cualquier componente simbólico. Verificación
+offline:
+
+```bash
+PYTHONPATH=src .venv/bin/python - <<'PY'
+from pathlib import Path
+from investment_analyst.research.historical_export import read_historical_dataset_view
+
+root = Path("/home/marjuraru/.local/share/investment-analyst/research/predictive-historical-data/datasets")
+dataset_dir = next(path for path in root.iterdir() if path.is_dir())
+view = read_historical_dataset_view(dataset_dir)
+print(view.manifest.dataset.readiness.status, len(view.features), len(view.targets))
+print(view.features[0])
+PY
+```
+
 ## Evidencia real (2026-10-31)
 
 Workspace `70c64668-1738-4dfe-ba1f-7e72026bb7fe` (`active-v2-20261021`), BTC
@@ -264,6 +408,45 @@ manifest 306 317 B, total 360 843 B. Una segunda ejecución idéntica reutilizó
 archivos/bytes). El manifest sellado se releyó con hash semántico coincidente. No se imprimieron
 valores ni targets de holdout.
 
+## Evidencia real reconstruida (2026-11-01)
+
+Adquisición única por Coinbase público, sin credenciales:
+
+- `archive_id=67ec4e68-33f9-53ef-82bb-032258b57786`,
+  `semantic_sha256=a5e3b4dc24e572b14b86d110aecb40aec935be2947a31300e5d739bd30efac18`,
+  `candles_sha256=6a6ecb1250347b6d235facd94dd3eb24471674ae1aca8ff9ef0cd0dbed48e999`.
+- 2.557 días solicitados, 2.557 barras, 0 ausencias, 9 GET secuenciales; primer cierre
+  `2019-01-01 3826.1 USD`, último `2025-12-31 87497.94 USD`; `retrieved_at`
+  `2026-11-01T02:37:32.364526Z`; `candles.jsonl` 712.767 B y manifest 3.237 B.
+- Adquisición medida: 6,61 s de pared y pico RSS 109.388 KiB.
+
+Dataset reconstruido, `known_at=2026-11-01T02:37:32.364526Z`, decisiones
+`2020-01-01..2025-12-25`:
+
+- `dataset_id=d927c7f1-794a-571c-b729-6bb68d311115`,
+  `dataset_content_sha256=16b895451e45d9b286c58779adc501b5707a05c4503aacab99ca88694fcab4f0`.
+- 2.186 decisiones; 2.186 features `available` y 2.186 labels maduros; 0 `missing`, 0
+  `not_yet_available`, 0 `incompatible`; 2.186 elegibles antes del split y 22 purgadas
+  (11 train, 11 validation por calendario).
+- Splits propuestos 1.311 / 437 / 438; elegibles tras purge 1.300 / 426 / 438; clases de train
+  699 positivas / 601 negativas.
+- Readiness `reconstruction_ready` con `strict_pit_verified=false` y
+  `availability_basis=historical_reconstruction_assumed`. No es una validación estadística ni una
+  señal.
+- `rows.parquet` 1.303.425 B, `manifest.json` 6.369.517 B; el dataset completo 7.672.942 B y la raíz
+  total 8.388.946 B, bajo el cap de 32 MiB. Reconstrucción y export medidos: 7,32 s de pared y pico
+  RSS 236.616 KiB.
+- Una repetición idéntica sin red devolvió `reused`, el mismo `rows_sha256`
+  `eaf3d5f85ceedcc6df24b59ffe7e68d5b20beaefb2f8ad478510a89bc1463565`, el mismo `manifest_sha256`
+  `fd56e0917e1ef3133ad7543d3f77541fdb41d82df8e701252a84c88982961444` y no cambió los `mtime`.
+- El consumidor offline releyó 2.186 features, 2.186 targets y 2.186 metadatos con `Decimal`
+  exacto y sin cruzar features con el label.
+
+El workspace operativo no se abrió. Su metadata antes/después es idéntica: `index.duckdb`
+693.383.168 B, mismo `mtime` e inodo; `manifest.json` y `state/**` sin cambios; 4.098.119.661 B y
+870.825 archivos en ambas lecturas; no apareció WAL. El delta atribuible al bloque es 0; la ventana
+no registró actividad concurrente del scheduler.
+
 ## Presupuesto y retención
 
 La raíz real `~/.local/share/investment-analyst/research/predictive-foundation` tiene cap de 16 MiB;
@@ -273,25 +456,39 @@ revisión explícita futura; no hay borrado automático ni un artefacto por ensa
 propios incompletos se retiran tras su último consumidor. No se toca ni se copia el workspace
 operativo.
 
+La raíz reconstruida `~/.local/share/investment-analyst/research/predictive-historical-data` tiene
+cap total de 32 MiB: archivo fuente ≤4 MiB, dataset+manifest ≤16 MiB, recibo ≤1 MiB. Se conserva un
+único archivo y un único dataset sellados hasta una decisión explícita posterior a su consumidor ML;
+no se crea un artefacto por ensayo ni se borra automáticamente. Los temporales propios incompletos se
+retiran. La receta de reconciliación sigue siendo la única de `docs/development_protocol.md`.
+
 ## Limitaciones y siguiente decisión
 
 - Sólo existe 1 muestra con features PIT disponibles; 0 muestras elegibles. No se puede entrenar,
-  calibrar ni prometer una predicción.
+  calibrar ni prometer una predicción con evidencia PIT observada.
+- El dataset reconstruido amplía la muestra disponible, pero su `assumed_available_at` es una
+  hipótesis: un precio histórico revisado hoy pudo tener otra primera publicación entonces. Es
+  investigación retrospectiva condicional y nunca satisface por sustitución el gate de PIT observado.
 - El label es un retorno bruto observado, no una rentabilidad ejecutable ni una señal de compra.
 - La partición 60/20/20 es la base del holdout; no sustituye purged walk-forward dentro de
   train/validation del futuro P2–P3.
 - Un software completo no implica datos suficientes, modelo evaluado ni predictor promovido. V1-U4
   permanece `UNKNOWN`: un label no es un modelo.
-- `ML-BASELINE-VALIDATION` es el siguiente esperado sólo si existe muestra elegible suficiente. Si
-  no, el siguiente PLAN resuelve la carencia temporal demostrada usando primero evidencia histórica
-  recuperable o captura prospectiva existente, sin retrofechar ni entrenar con datos filtrados desde
-  el futuro.
+- `ML-BASELINE-VALIDATION` es el siguiente esperado sólo si existe muestra elegible suficiente y se
+  aceptan expresamente las limitaciones del modo reconstruido. Si no, el siguiente PLAN resuelve la
+  carencia con evidencia recuperable o captura prospectiva, sin retrofechar ni entrenar con datos
+  filtrados desde el futuro.
 
 ## Contrato del consumidor futuro
 
 Un consumidor externo debe verificar el manifest y el hash semántico antes de leer; respetar el
 orden de las tres features, `sample_key` y `decision_at`; mantener las features separadas de
 labels/metadatos futuros; comprobar unidades y ausencias; y no usar muestras fuera de su split ni
-del corte declarado. La conversión de Decimal-string al dtype del modelo ocurre sólo en ese futuro
-adaptador explícito, nunca en el núcleo. No se crea ahora una clase abstracta de entrenador, un fake
-predictor, un `ModelExplanationPacket` vacío ni infraestructura de plugins.
+del corte declarado.
+
+Un adaptador ML debe declarar además qué modo consume. Para el modo reconstruido debe admitir
+explícitamente `research-historical-dataset-v1` y
+`availability_basis=historical_reconstruction_assumed`, rechazar `strict_pit_verified=true` y no
+presentar la muestra como PIT observada. La conversión de Decimal-string al dtype del modelo ocurre
+sólo en ese futuro adaptador explícito, nunca en el núcleo. No se crea ahora una clase abstracta de
+entrenador, un fake predictor, un `ModelExplanationPacket` vacío ni infraestructura de plugins.
