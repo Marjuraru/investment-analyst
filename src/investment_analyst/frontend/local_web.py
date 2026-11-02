@@ -270,6 +270,12 @@ from investment_analyst.providers.macro.fred_catalog_refresh import (
     FredCatalogRefreshSummary,
 )
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
+from investment_analyst.research.ml_report_models import MlResearchReportView
+from investment_analyst.research.ml_report_service import (
+    MlReportConflictError,
+    MlReportNotFoundError,
+    MlResearchReportService,
+)
 from investment_analyst.storage import StorageError
 from investment_analyst.storage.read_dependency_signature import (
     ReadDependencyFamily,
@@ -1947,6 +1953,7 @@ class AaplLocalWebApplication:
         asset_preferences: AssetPreferencesService | None = None,
         cazatiburones_notification_store: CazatiburonesNotificationStore | None = None,
         desktop_notifications: DesktopNotificationService | None = None,
+        ml_reports: MlResearchReportService | None = None,
     ) -> None:
         self._controller = controller
         self._scheduler = scheduler
@@ -1959,6 +1966,7 @@ class AaplLocalWebApplication:
         self._manual_operations = manual_operations
         self._asset_preferences = asset_preferences
         self._desktop_notifications = desktop_notifications
+        self._ml_reports = ml_reports
 
     def set_manual_operations(self, operations: ManualOperationQueue) -> None:
         """Attach the durable queue after its dispatcher can reference this adapter."""
@@ -2417,6 +2425,27 @@ class AaplLocalWebApplication:
     def read_performance(self) -> dict[str, object]:
         """Return additive, bounded critical-read telemetry without storage access."""
         return self._controller.read_performance()
+
+    def ml_research_report(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Validate one explicit sealed-run query without provider or storage access."""
+        allowed = {"asset_id", "run_id"}
+        if set(parameters) - allowed:
+            raise ValueError("ML research report query contains unsupported parameters")
+        descriptor = self._market_asset(_one_parameter(parameters, "asset_id", required=True))
+        raw_run_id = _one_parameter(parameters, "run_id", required=True)
+        try:
+            run_id = UUID(raw_run_id)
+        except ValueError as error:
+            raise ValueError("run_id must be a canonical UUID") from error
+        if str(run_id) != raw_run_id:
+            raise ValueError("run_id must be a canonical UUID")
+        if self._ml_reports is None:
+            raise MlReportConflictError("ML research reports are not configured")
+        projection: MlResearchReportView = self._ml_reports.report(
+            asset_id=descriptor.asset_id,
+            run_id=run_id,
+        )
+        return projection.to_json_dict()
 
     def report(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate query parameters and return the versioned report contract."""
@@ -3305,6 +3334,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                     server.application.daily_market_patterns(parameters),
                 )
                 return
+            if parsed.path == "/api/v1/research/ml-report":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=2)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.ml_research_report(parameters),
+                )
+                return
             if parsed.path == "/api/v1/crypto-derivatives":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
                 parameters = {key: tuple(values) for key, values in raw.items()}
@@ -3645,6 +3682,10 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 "desktop_notification_unavailable",
                 str(error)[:500],
             )
+        elif isinstance(error, MlReportNotFoundError):
+            self._send_error(HTTPStatus.NOT_FOUND, "ml_report_not_found", str(error)[:500])
+        elif isinstance(error, MlReportConflictError):
+            self._send_error(HTTPStatus.CONFLICT, "ml_report_conflict", str(error)[:500])
         elif isinstance(error, (ValueError, SecDocumentTimelineApplicationError)):
             self._send_error(HTTPStatus.BAD_REQUEST, "invalid_request", str(error)[:500])
         elif isinstance(

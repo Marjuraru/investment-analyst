@@ -655,3 +655,401 @@ byId("daily-patterns-form").addEventListener("submit", (event) => {
   void queryDailyMarketPatterns(event);
 });
 prepareDailyPatternsRange();
+
+const ML_REPORT_SCHEMA = "ml-research-report-view-v1";
+const ML_RUN_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const ML_SCORER_LABELS = Object.freeze({
+  logistic_regression: "Regresión logística",
+  hist_gradient_boosting: "Histogram gradient boosting",
+  half_probability: "p = 0.5",
+  training_class_prior: "Prior de clase",
+});
+const ML_HOLDOUT_TEXT = Object.freeze({
+  not_evaluated: "Holdout no evaluado; no se infieren métricas, filas ni clases. Predictor no promovido.",
+  confirmed_research_edge: "Mejora retrospectiva condicional en holdout; no autoriza uso operativo ni promoción.",
+  holdout_not_confirmed: "Holdout no confirmado; el resultado no promueve un predictor operativo.",
+});
+let mlResearchRequestSequence = 0;
+let mlResearchAbortController = null;
+let mlResearchContextKey = null;
+
+function mlResearchRunId() {
+  return byId("ml-research-run-id").value.trim().toLowerCase();
+}
+
+function mlResearchRunIdValid(value) {
+  return ML_RUN_ID_PATTERN.test(value);
+}
+
+function mlResearchScorerLabel(value) {
+  return ML_SCORER_LABELS[value] || String(value);
+}
+
+function mlResearchPercent(value) {
+  const parsed = numericValue(value);
+  return parsed === null ? "—" : formatNumber(parsed, {
+    style: "percent",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function mlResearchFigure(value) {
+  const figure = createElement("span", "figure", formatNumber(value, { maximumFractionDigits: 6 }));
+  figure.title = value === null || value === undefined ? "UNKNOWN" : String(value);
+  return figure;
+}
+
+function mlResearchTable(headers, rows) {
+  const table = createElement("table", "patterns-segments-table ml-research-table");
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of headers) {
+    const cell = createElement("th", "", label);
+    cell.setAttribute("scope", "col");
+    headRow.append(cell);
+  }
+  head.append(headRow);
+  table.append(head);
+  const body = document.createElement("tbody");
+  for (const row of rows) {
+    const tableRow = document.createElement("tr");
+    for (const value of row) {
+      const cell = document.createElement("td");
+      if (typeof value === "string" || typeof value === "number") cell.textContent = String(value);
+      else if (value === null || value === undefined) cell.textContent = "—";
+      else cell.append(value);
+      tableRow.append(cell);
+    }
+    body.append(tableRow);
+  }
+  table.append(body);
+  return table;
+}
+
+function mlResearchComparison(development, model, reference) {
+  return development.pooled_comparisons.find(
+    (item) => item.model === model && item.reference === reference,
+  ) || null;
+}
+
+function renderMlResearchModels(payload) {
+  const container = byId("ml-research-models");
+  container.replaceChildren();
+  if (!payload.development) {
+    container.append(
+      renderAbsenceMark(
+        "missing",
+        "Sin evaluación de desarrollo",
+        payload.insufficiency_reason || "El artefacto no contiene métricas de desarrollo",
+      ),
+    );
+    return;
+  }
+  const rows = payload.development.pooled_scores.slice(0, 4).map((score) => {
+    const vsHalf = mlResearchComparison(payload.development, score.scorer, "half_probability");
+    const vsPrior = mlResearchComparison(payload.development, score.scorer, "training_class_prior");
+    return [
+      mlResearchScorerLabel(score.scorer),
+      mlResearchFigure(score.brier),
+      vsHalf ? mlResearchPercent(vsHalf.relative_improvement) : "—",
+      vsPrior ? mlResearchPercent(vsPrior.relative_improvement) : "—",
+      mlResearchFigure(score.rows),
+    ];
+  });
+  container.append(
+    mlResearchTable(
+      ["Modelo o referencia", "Brier", "Δ vs p = 0.5", "Δ vs prior", "Filas OOS"],
+      rows,
+    ),
+  );
+}
+
+function renderMlResearchComparisons(payload) {
+  const container = byId("ml-research-comparisons");
+  container.replaceChildren();
+  if (!payload.development) {
+    container.append(
+      renderAbsenceMark(
+        "missing",
+        "Sin comparaciones",
+        "No se calcularon intervalos ni criterios sin muestra suficiente",
+      ),
+    );
+    return;
+  }
+  const rows = payload.development.pooled_comparisons.slice(0, 4).map((item) => [
+    mlResearchScorerLabel(item.model),
+    mlResearchScorerLabel(item.reference),
+    mlResearchPercent(item.relative_improvement),
+    mlResearchFigure(item.lower_bound),
+    item.improved_at_least_five_percent ? "Sí" : "No",
+    item.lower_bound_positive ? "Sí" : "No",
+  ]);
+  container.append(
+    mlResearchTable(
+      ["Modelo", "Referencia", "Mejora relativa", "Límite inferior", "¿≥ 5 %?", "¿Límite > 0?"],
+      rows,
+    ),
+  );
+}
+
+function renderMlResearchFolds(payload) {
+  const container = byId("ml-research-folds");
+  container.replaceChildren();
+  if (!payload.development) {
+    container.append(
+      renderAbsenceMark("missing", "Sin folds", "El artefacto insuficiente no ejecutó folds"),
+    );
+    return;
+  }
+  const rows = payload.development.folds.slice(0, 3).map((fold) => {
+    const score = (scorer) => {
+      const item = fold.scores.find((candidate) => candidate.scorer === scorer);
+      return item ? mlResearchFigure(item.brier) : "—";
+    };
+    return [
+      formatInteger(fold.fold),
+      formatInteger(fold.train_rows),
+      formatInteger(fold.purged_excluded),
+      formatInteger(fold.embargo_excluded),
+      formatInteger(fold.evaluation_rows),
+      `${formatInteger(fold.evaluation_positives)} / ${formatInteger(fold.evaluation_negatives)}`,
+      score("logistic_regression"),
+      score("hist_gradient_boosting"),
+      score("half_probability"),
+      score("training_class_prior"),
+    ];
+  });
+  container.append(
+    mlResearchTable(
+      [
+        "Fold",
+        "Train",
+        "Purge",
+        "Embargo",
+        "Eval",
+        "Pos / Neg",
+        "Logística",
+        "HGB",
+        "p = 0.5",
+        "Prior",
+      ],
+      rows,
+    ),
+  );
+}
+
+function renderMlResearchCalibration(payload) {
+  const container = byId("ml-research-calibration");
+  container.replaceChildren();
+  if (!payload.development) {
+    container.append(
+      renderAbsenceMark(
+        "missing",
+        "Sin calibración",
+        "No hay bins observados sin muestra suficiente",
+      ),
+    );
+    return;
+  }
+  for (const table of payload.development.calibration.slice(0, 2)) {
+    const rows = table.bins.slice(0, 10).map((bin) => [
+      formatInteger(bin.index),
+      `${bin.lower_bound}–${bin.upper_bound}${bin.includes_upper ? " (incl.)" : ""}`,
+      formatInteger(bin.count),
+      bin.count === 0 ? "—" : mlResearchFigure(bin.mean_probability),
+      bin.count === 0 ? "—" : mlResearchFigure(bin.observed_frequency),
+    ]);
+    container.append(
+      createElement("p", "patterns-event-title", mlResearchScorerLabel(table.scorer)),
+      mlResearchTable(
+        ["Bin", "Rango", "Filas", "Probabilidad media", "Frecuencia observada"],
+        rows,
+      ),
+    );
+  }
+}
+
+function mlResearchDecision(payload) {
+  if (payload.artifact.status === "insufficient_evaluation_sample") {
+    return { label: "Muestra insuficiente", tone: "warn" };
+  }
+  if (payload.development?.decision === "no_demonstrated_edge") {
+    return { label: "No se demostró ventaja", tone: "neutral" };
+  }
+  if (payload.development?.decision === "candidate_selected") {
+    return { label: "Candidato seleccionado en desarrollo", tone: "warn" };
+  }
+  return { label: "Estado no reconocido", tone: "bad" };
+}
+
+function mlResearchHoldoutText(payload) {
+  if (!payload.holdout) {
+    return "Holdout no disponible para este artefacto; no se infieren métricas ni clases.";
+  }
+  return ML_HOLDOUT_TEXT[payload.holdout.status] || "Estado de holdout no reconocido.";
+}
+
+function mlResearchCriterionText(payload) {
+  if (payload.artifact.status === "insufficient_evaluation_sample") {
+    return "Sin muestra suficiente no hay métricas, comparaciones ni criterio evaluado; la ausencia es explícita.";
+  }
+  const minimum = mlResearchPercent(
+    payload.protocol.criteria.min_relative_brier_improvement,
+  );
+  const base =
+    `Brier: menor es mejor. El criterio exigió una mejora relativa ≥ ${minimum} frente a ambas referencias` +
+    ` y ambos límites inferiores > 0.`;
+  if (payload.development?.decision === "no_demonstrated_edge") {
+    return `${base} El criterio no se cumplió y no se promueve ningún predictor.`;
+  }
+  return `${base} El criterio de desarrollo se cumplió; el holdout se representa por separado.`;
+}
+
+function resetMlResearchReport() {
+  const key = `${selectedMarketAsset || ""}|${mlResearchRunId()}`;
+  if (key === mlResearchContextKey) return;
+  mlResearchContextKey = key;
+  mlResearchRequestSequence += 1;
+  if (mlResearchAbortController) {
+    mlResearchAbortController.abort();
+    mlResearchAbortController = null;
+  }
+  const results = byId("ml-research-results");
+  results.classList.add("hidden");
+  results.setAttribute("aria-busy", "false");
+  byId("ml-research-models").replaceChildren();
+  byId("ml-research-comparisons").replaceChildren();
+  byId("ml-research-folds").replaceChildren();
+  byId("ml-research-calibration").replaceChildren();
+  byId("ml-research-limitations").replaceChildren();
+  byId("ml-research-json").textContent = "";
+  byId("ml-research-range").textContent = "";
+  byId("ml-research-evidence").textContent = "";
+  byId("ml-research-holdout").textContent = "";
+  byId("ml-research-decision").textContent = "";
+  byId("ml-research-decision").className = "badge neutral";
+  byId("ml-research-status").textContent =
+    "Sin consultar. Pega el run_id del recibo de evaluación.";
+  byId("ml-research-submit").disabled = false;
+}
+
+function renderMlResearchReport(payload, { assetId, runId }) {
+  if (
+    payload.schema_version !== ML_REPORT_SCHEMA
+    || payload.provenance?.asset_id !== assetId
+    || payload.artifact?.run_id !== runId
+  ) {
+    throw new Error("La evaluación ML no respetó su contrato versionado o cambió de identidad.");
+  }
+  const presentation = marketAssets[assetId];
+  const assetLabel = presentation
+    ? `${presentation.symbol} · ${presentation.name}`
+    : payload.provenance.asset_id;
+  const decision = mlResearchDecision(payload);
+  byId("ml-research-range").textContent =
+    `${assetLabel} · ${payload.protocol.decision_start} a ${payload.protocol.decision_end} inclusive` +
+    ` · ${formatInteger(payload.protocol.decision_rows)} decisiones` +
+    ` · artefacto ${payload.artifact.status}` +
+    ` · creado ${formatInstant(payload.artifact.created_at)}` +
+    ` · run ${payload.artifact.run_id}`;
+  const badgeTarget = byId("ml-research-decision");
+  badgeTarget.textContent = decision.label;
+  badgeTarget.className = `badge ${decision.tone}`;
+  byId("ml-research-holdout").textContent = mlResearchHoldoutText(payload);
+  byId("ml-research-criterion").textContent = mlResearchCriterionText(payload);
+  renderMlResearchModels(payload);
+  renderMlResearchComparisons(payload);
+  renderMlResearchFolds(payload);
+  renderMlResearchCalibration(payload);
+  const limitations = byId("ml-research-limitations");
+  limitations.replaceChildren();
+  for (const limitation of payload.protocol.limitations) {
+    limitations.append(createElement("li", "", limitation));
+  }
+  limitations.append(createElement("li", "", payload.provenance.source_id_note));
+  const criteria = payload.protocol.criteria;
+  const environment = payload.artifact.environment;
+  byId("ml-research-evidence").textContent =
+    `Referencias exactas: ${criteria.references.map(mlResearchScorerLabel).join(" y ")}.` +
+    ` Quantiles unilaterales ${criteria.development_lower_quantile} (desarrollo) y` +
+    ` ${criteria.holdout_lower_quantile} (holdout); tolerancia de empate ${criteria.tie_tolerance}.` +
+    ` Artefacto: ${formatInteger(payload.artifact.artifact_bytes)} B,` +
+    ` ${formatInteger(payload.artifact.prediction_rows)} filas OOS selladas;` +
+    ` fits ${payload.development ? formatInteger(payload.development.development_fits) : "—"} de desarrollo y` +
+    ` ${payload.holdout ? formatInteger(payload.holdout.holdout_fits) : "—"} de holdout.` +
+    ` Entorno: Python ${environment.python_version}, scikit-learn ${environment.scikit_learn_version},` +
+    ` numpy ${environment.numpy_version}, scipy ${environment.scipy_version},` +
+    ` duckdb ${environment.duckdb_version}, BLAS threads ${formatInteger(environment.blas_threads)}.`;
+  byId("ml-research-json").textContent = JSON.stringify(payload, null, 2);
+  byId("ml-research-results").classList.remove("hidden");
+}
+
+async function queryMlResearchReport(event) {
+  if (event) event.preventDefault();
+  const assetId = selectedMarketAsset;
+  const runId = mlResearchRunId();
+  if (!assetId) {
+    byId("ml-research-status").textContent =
+      "Selecciona un activo del catálogo antes de consultar.";
+    return;
+  }
+  if (!mlResearchRunIdValid(runId)) {
+    byId("ml-research-status").textContent =
+      "El run_id debe ser un UUID canónico del recibo de evaluación.";
+    return;
+  }
+  const sequence = ++mlResearchRequestSequence;
+  if (mlResearchAbortController) mlResearchAbortController.abort();
+  const controller = new AbortController();
+  mlResearchAbortController = controller;
+  const results = byId("ml-research-results");
+  results.classList.add("hidden");
+  results.setAttribute("aria-busy", "true");
+  byId("ml-research-submit").disabled = true;
+  byId("ml-research-status").textContent = "Verificando el artefacto sellado…";
+  const parameters = new URLSearchParams({ asset_id: assetId, run_id: runId });
+  try {
+    const payload = await api(`/api/v1/research/ml-report?${parameters.toString()}`, {
+      signal: controller.signal,
+    });
+    if (
+      sequence !== mlResearchRequestSequence
+      || controller.signal.aborted
+      || assetId !== selectedMarketAsset
+      || runId !== mlResearchRunId()
+    ) {
+      return;
+    }
+    renderMlResearchReport(payload, { assetId, runId });
+    byId("ml-research-status").textContent =
+      "Evaluación verificada desde el artefacto sellado; no se reejecutó el entrenamiento.";
+  } catch (error) {
+    if (sequence !== mlResearchRequestSequence || controller.signal.aborted) return;
+    results.classList.add("hidden");
+    byId("ml-research-status").textContent = error.message;
+  } finally {
+    if (sequence === mlResearchRequestSequence) {
+      results.setAttribute("aria-busy", "false");
+      byId("ml-research-submit").disabled = false;
+    }
+  }
+}
+
+function initializeMlResearchReport() {
+  const requested = new URLSearchParams(window.location.search).get("ml_run_id") || "";
+  const normalized = requested.trim().toLowerCase();
+  if (mlResearchRunIdValid(normalized)) {
+    byId("ml-research-run-id").value = normalized;
+  }
+  resetMlResearchReport();
+  byId("ml-research-form").addEventListener("submit", (event) => {
+    void queryMlResearchReport(event);
+  });
+  byId("ml-research-run-id").addEventListener("input", () => {
+    resetMlResearchReport();
+  });
+}
+
+initializeMlResearchReport();

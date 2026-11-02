@@ -62,6 +62,7 @@ _ALPACA_CREDENTIALS = AlpacaCredentials(api_key="composition", secret_key="compo
 _SEC_IDENTITY = SecEdgarIdentity("investment-analyst composition@example.invalid")
 _EXPECTED_OPTIONS = (
     "--workspace",
+    "--ml-results-root",
     "--port",
     "--no-scheduler",
     "--schedule-at",
@@ -83,6 +84,7 @@ _EXPECTED_DESTINATIONS = (
     "market_end_lag_days",
     "market_start",
     "memory_ceiling_mb",
+    "ml_results_root",
     "no_schedule_intraday",
     "no_schedule_macro",
     "no_schedule_smv",
@@ -519,6 +521,15 @@ def test_public_cli_arguments_are_unchanged() -> None:
     assert tuple(sorted(vars(parser.parse_args([])))) == _EXPECTED_DESTINATIONS
     assert parser.parse_args([]).port == 8765
     assert parser.parse_args([]).memory_ceiling_mb is None
+    assert parser.parse_args([]).ml_results_root == (
+        Path.home() / ".local/share/investment-analyst/research/ml-baseline-validation"
+    )
+    assert parser.parse_args([]).ml_results_root.is_absolute()
+
+
+def test_ml_results_root_rejects_a_relative_path() -> None:
+    with pytest.raises(SystemExit):
+        _script_module()._parser().parse_args(["--ml-results-root", "relative"])
 
 
 def test_collector_uses_read_only_engine_and_a_single_writer(

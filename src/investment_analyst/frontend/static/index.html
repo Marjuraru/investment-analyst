@@ -1181,6 +1181,68 @@
               </details>
             </div>
           </section>
+          <details id="ml-research-panel" class="patterns-section ml-research-section">
+            <summary class="ml-research-summary">
+              <span>
+                <strong>Evaluación ML de investigación</strong>
+                <small>Resultado sellado y verificable; no es señal, recomendación ni promoción.</small>
+              </span>
+            </summary>
+            <div class="ml-research-body">
+              <p class="patterns-summary">
+                Investigación retrospectiva; disponibilidad histórica supuesta. Pega el
+                <code>run_id</code> del recibo de evaluación para consultar el activo
+                seleccionado. Esta vista verifica el artefacto y no reejecuta el entrenamiento
+                ni evalúa el holdout.
+              </p>
+              <form id="ml-research-form" class="patterns-controls ml-research-controls">
+                <label class="field">
+                  <span>run_id del recibo</span>
+                  <input
+                    id="ml-research-run-id"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="00000000-0000-0000-0000-000000000000"
+                    required
+                  >
+                </label>
+                <button id="ml-research-submit" class="button primary" type="submit">
+                  Consultar evaluación
+                </button>
+              </form>
+              <p id="ml-research-status" class="chart-status" role="status" aria-live="polite">
+                Sin consultar. Pega el run_id del recibo de evaluación.
+              </p>
+              <div id="ml-research-results" class="patterns-results hidden" aria-busy="false">
+                <p id="ml-research-availability" class="patterns-coverage">
+                  Investigación retrospectiva; disponibilidad histórica supuesta.
+                </p>
+                <p id="ml-research-range" class="patterns-summary"></p>
+                <p id="ml-research-decision" class="badge neutral"></p>
+                <p id="ml-research-holdout" class="patterns-summary"></p>
+                <p id="ml-research-criterion" class="patterns-coverage"></p>
+                <div class="patterns-grid">
+                  <article class="patterns-card">
+                    <h3>Modelos y referencias</h3>
+                    <div id="ml-research-models"></div>
+                  </article>
+                  <article class="patterns-card">
+                    <h3>Comparaciones pareadas</h3>
+                    <div id="ml-research-comparisons"></div>
+                  </article>
+                </div>
+                <ul id="ml-research-limitations" class="patterns-limitations"></ul>
+                <details class="json-disclosure">
+                  <summary>Detalle por fold, calibración y evidencia</summary>
+                  <div id="ml-research-folds"></div>
+                  <p id="ml-research-evidence" class="patterns-technical"></p>
+                  <div id="ml-research-calibration"></div>
+                  <pre id="ml-research-json" tabindex="0"></pre>
+                </details>
+              </div>
+            </div>
+          </details>
           </div>
 
           <div class="board" id="board-revisar" data-board="revisar" tabindex="-1" hidden>
