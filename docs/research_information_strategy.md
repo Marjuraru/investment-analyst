@@ -223,3 +223,33 @@ buscando ganador ni shadow del modelo rechazado. Un candidato honesto es una fam
 distinta —por ejemplo derivados o funding— sólo si la disponibilidad, la cobertura y el coste se
 demuestran antes de comprometer un entrenamiento. La interpretación LLM sigue siendo una capa
 posterior e independiente sobre resultados estructurados.
+
+## Evidencia histórica de funding (2026-11-02)
+
+`PREDICTIVE-FUNDING-DATA`/#399 (`ADVANCES`) prepara la evidencia de una hipótesis diferencial: la
+presión de financiación del perpetuo puede aportar información sobre el mismo retorno spot futuro de
+cinco intervalos. No se afirma causalidad económica, ventaja predictiva ni rentabilidad negociable.
+La fuente es Deribit `public/get_funding_rate_history`, reutilizando el cliente, el catálogo y las
+operaciones Decimal34 existentes; el spot Coinbase y el funding no se fusionan como una serie de
+precios.
+
+El archivo real cubre `2019-12-25T01:00Z..2025-12-25T01:00Z` para `crypto:btc-usd`: 52.536 de 52.608
+puntos horarios observados, 72 ausencias, 71 páginas y 14,67 MB. Las features son sumas causales de
+`interest_1h` de 24 h y 168 h, unidad ratio, sin `interest_8h`, anualización, composición de retorno
+ni imputación. Un cero válido es distinto de un hueco; una ventana de 168 h incompleta queda
+`missing` y no se acorta. El `funding_feature_hash` no incluye labels ni el hash del dataset base.
+
+El complemento real tiene 2.186 filas y referencia el dataset `d927c7f1…` por identidad, sin copiar
+sus features, labels, precios ni filas. La admisión es `insufficient_funding_coverage`: 1.334 de
+1.726 filas base elegibles de TRAIN+VALIDATION (77,29 %) tienen ambas features completas, por debajo
+del piso de 95 %. Los pisos de train (1.006), validation (328) y holdout (347) sí se cumplen. La
+vista offline sólo materializa TRAIN/VALIDATION; el holdout se verifica y se cuenta, pero no se
+entrega a una matriz de entrenamiento. No se entrena, no se calcula correlación, performance,
+selección de clases ni target de holdout.
+
+El resultado no es una prueba estadística ni autoriza entrenar. La carencia de cobertura es una
+propiedad observada del proveedor y del período, no un cero. El siguiente PLAN decide sobre esa
+carencia sin ampliar fuentes por inercia; si una revisión posterior alcanzara cobertura suficiente,
+deberá congelar un experimento nuevo que compare el aporte incremental del funding frente a
+referencias y control técnico sobre exactamente las mismas fechas, sin tuning ni promoción
+automática. La interpretación LLM sigue siendo una capa posterior e independiente.
