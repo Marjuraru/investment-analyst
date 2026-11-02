@@ -1967,3 +1967,172 @@ def test_finalize_happy_paths_preserve_exact_sha_and_human_policy() -> None:
     assert auto_action == f"squash --match-head-commit {FULL_SHA}"
     assert human_status == "HUMAN MERGE"
     assert human_action == "guards pass; do not mark ready or merge automatically"
+
+
+@dataclass(frozen=True, slots=True)
+class LocalDeliverySnapshot:
+    merge_verified: bool = True
+    merge_commit_oid: str = FULL_SHA
+    current_commit: str = FULL_SHA
+    unit_matches_current: bool = True
+    service_active: bool = True
+    service_enabled: bool = True
+    need_daemon_reload: bool = False
+    overview_status: int = 200
+    workspace_binding_preserved: bool = True
+    skip_flags_used: bool = False
+    local_delivery_verified: bool = True
+    cleanup_before_delivery: bool = False
+
+
+def _local_delivery_decision(snapshot: LocalDeliverySnapshot) -> str:
+    if not snapshot.merge_verified or not snapshot.merge_commit_oid:
+        return "FINALIZATION BLOCKED"
+    if snapshot.skip_flags_used or snapshot.cleanup_before_delivery:
+        return "FINALIZATION BLOCKED"
+    delivery_checks = (
+        snapshot.current_commit == snapshot.merge_commit_oid,
+        snapshot.unit_matches_current,
+        snapshot.service_active,
+        snapshot.service_enabled,
+        not snapshot.need_daemon_reload,
+        snapshot.overview_status == 200,
+        snapshot.workspace_binding_preserved,
+        snapshot.local_delivery_verified,
+    )
+    if not all(delivery_checks):
+        return "FINALIZATION BLOCKED"
+    return "COMPLETE"
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    (
+        LocalDeliverySnapshot(merge_verified=False),
+        LocalDeliverySnapshot(merge_commit_oid=""),
+        LocalDeliverySnapshot(current_commit="b" * 40),
+        LocalDeliverySnapshot(unit_matches_current=False),
+        LocalDeliverySnapshot(service_active=False),
+        LocalDeliverySnapshot(service_enabled=False),
+        LocalDeliverySnapshot(need_daemon_reload=True),
+        LocalDeliverySnapshot(overview_status=500),
+        LocalDeliverySnapshot(workspace_binding_preserved=False),
+        LocalDeliverySnapshot(skip_flags_used=True),
+        LocalDeliverySnapshot(local_delivery_verified=False),
+        LocalDeliverySnapshot(cleanup_before_delivery=True),
+    ),
+)
+def test_local_delivery_never_completes_without_verified_exact_sha(
+    snapshot: LocalDeliverySnapshot,
+) -> None:
+    assert _local_delivery_decision(snapshot) == "FINALIZATION BLOCKED"
+
+
+def test_local_delivery_completes_only_after_exact_sha_verification() -> None:
+    assert _local_delivery_decision(LocalDeliverySnapshot()) == "COMPLETE"
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryRecoverySnapshot:
+    pending_after_merge: bool = True
+    unique_merged_pr: bool = True
+    exact_link: bool = True
+    main_matches_release: bool = True
+    create_new_pr: bool = False
+    repeat_merge: bool = False
+    redraft_merged_pr: bool = False
+    reaudit_squash: bool = False
+
+
+def _delivery_recovery_decision(snapshot: DeliveryRecoverySnapshot) -> str:
+    if not snapshot.pending_after_merge:
+        return "NO RECOVERY"
+    if any(
+        (
+            snapshot.create_new_pr,
+            snapshot.repeat_merge,
+            snapshot.redraft_merged_pr,
+            snapshot.reaudit_squash,
+        )
+    ):
+        return "GUARD FAILURE"
+    if not all(
+        (
+            snapshot.unique_merged_pr,
+            snapshot.exact_link,
+            snapshot.main_matches_release,
+        )
+    ):
+        return "BLOCKED"
+    return "CONTINUE DELIVERY"
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    (
+        DeliveryRecoverySnapshot(create_new_pr=True),
+        DeliveryRecoverySnapshot(repeat_merge=True),
+        DeliveryRecoverySnapshot(redraft_merged_pr=True),
+        DeliveryRecoverySnapshot(reaudit_squash=True),
+    ),
+)
+def test_postmerge_delivery_recovery_is_not_a_new_bootstrap(
+    snapshot: DeliveryRecoverySnapshot,
+) -> None:
+    assert _delivery_recovery_decision(snapshot) == "GUARD FAILURE"
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    (
+        DeliveryRecoverySnapshot(unique_merged_pr=False),
+        DeliveryRecoverySnapshot(exact_link=False),
+        DeliveryRecoverySnapshot(main_matches_release=False),
+    ),
+)
+def test_postmerge_delivery_recovery_blocks_on_ambiguous_target(
+    snapshot: DeliveryRecoverySnapshot,
+) -> None:
+    assert _delivery_recovery_decision(snapshot) == "BLOCKED"
+
+
+def test_postmerge_delivery_recovery_continues_only_authorized_delivery() -> None:
+    assert _delivery_recovery_decision(DeliveryRecoverySnapshot()) == "CONTINUE DELIVERY"
+    stopped = _delivery_recovery_decision(DeliveryRecoverySnapshot(pending_after_merge=False))
+    assert stopped == "NO RECOVERY"
+
+
+def test_finalize_orders_local_delivery_before_cleanup_and_keeps_recovery_explicit() -> None:
+    protocol = _read("docs/development_protocol.md")
+    heading = "## FINALIZE determinista"
+    assert protocol.count(heading) == 1
+    section = protocol.split(heading, maxsplit=1)[1].split("\n## Smoke real", maxsplit=1)[0]
+    ordered = (
+        "snapshot batched de guards vivos",
+        "segundo snapshot/revalidación crítica",
+        "squash merge con --match-head-commit",
+        "mergeCommit.oid",
+        "deploy_local_release.py update --sha",
+        "status --json",
+        "El cleanup ocurre sólo después",
+        "Recuperación postmerge de entrega local",
+    )
+    positions = [section.index(token) for token in ordered]
+    assert positions == sorted(positions)
+    normalized = " ".join(section.split()).lower()
+    for clause in (
+        "`--skip-systemd` y `--skip-health-check` están prohibidos",
+        "no crean un pr nuevo",
+        "no repiten el merge",
+        "no vuelven a draft un pr fusionado ni reauditan el squash",
+        "no acepta targets merged",
+    ):
+        assert clause in normalized
+
+    agents = _read("AGENTS.md")
+    assert "local delivery verification of the exact merge SHA" in agents
+    assert "Post-merge delivery recovery is a continuation, not a new BUILD bootstrap" in agents
+    for skill in ("plan", "build", "audit", "investment-block-flow"):
+        text = _read(f".agents/skills/{skill}/SKILL.md")
+        assert "entrega local" in text
+        assert "snapshot batched" not in text

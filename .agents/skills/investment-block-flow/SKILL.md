@@ -20,5 +20,7 @@ mantiene un único marker exact-SHA y ejecuta el guard común vivo `scripts/chec
 semánticamente el diff material completo, permanece read-only para source/branch/candidato y
 mantiene su marker único. Un PASS con policy AUTO puede continuar sólo a dos guards completos
 `--live --phase finalize`, separados por ready y sin reutilizar snapshots.
+FINALIZE incluye la entrega local verificada de su merge SHA antes del cleanup; una entrega fallida
+postmerge es continuación, no bootstrap.
 Una policy HUMAN, y cualquier AUTO sin standing o legacy verificado en la base, termina en HUMAN MERGE. No
 inventar comandos, duplicar el algoritmo global ni usar el último Issue/PR como target.
