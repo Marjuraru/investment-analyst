@@ -247,9 +247,12 @@ vista offline sólo materializa TRAIN/VALIDATION; el holdout se verifica y se cu
 entrega a una matriz de entrenamiento. No se entrena, no se calcula correlación, performance,
 selección de clases ni target de holdout.
 
-El resultado no es una prueba estadística ni autoriza entrenar. La carencia de cobertura es una
-propiedad observada del proveedor y del período, no un cero. El siguiente PLAN decide sobre esa
-carencia sin ampliar fuentes por inercia; si una revisión posterior alcanzara cobertura suficiente,
-deberá congelar un experimento nuevo que compare el aporte incremental del funding frente a
-referencias y control técnico sobre exactamente las mismas fechas, sin tuning ni promoción
-automática. La interpretación LLM sigue siendo una capa posterior e independiente.
+El resultado de #399 no es una prueba estadística ni autoriza entrenar. La revisión
+`FUNDING-BOUNDARY-COVERAGE`/#403 separó las causas: 70 de las 72 ausencias coincidían con inicios de
+página de 31 días y eran un defecto de partición, no una carencia del proveedor; sólo
+`2020-08-27T06:00Z` y `07:00Z` permanecen ausentes. La nueva recepción `9d6c0972…` (52.606/52.608)
+y el bundle `fca740b8…` alcanzan `funding_data_ready` con 1.719/1.726 = 99,59 % de cobertura
+conjunta. Esa mejora habilita un experimento de funding, no un predictor ni una señal. El siguiente
+PLAN decide el experimento sin ampliar fuentes por inercia y debe congelar la comparación del aporte
+incremental frente a referencias y control técnico sobre exactamente las mismas fechas, sin tuning
+ni promoción automática. La interpretación LLM sigue siendo una capa posterior e independiente.

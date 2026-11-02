@@ -20,6 +20,7 @@ from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 from investment_analyst.providers.asset_config import DeribitAssetConfiguration
 from investment_analyst.providers.crypto.deribit import (
+    MAX_FUNDING_INTERVAL,
     DeribitClient,
     DeribitError,
     DeribitFundingPoint,
@@ -30,7 +31,6 @@ from investment_analyst.research.funding_models import (
     FUNDING_LIMITATIONS,
     MANIFEST_FILE_NAME,
     MAX_LOGICAL_PAGES,
-    MAX_PAGE_INTERVAL,
     MAX_SEALED_ARCHIVE_BYTES,
     FundingArchive,
     FundingArchiveCounts,
@@ -580,7 +580,7 @@ def acquire_funding_archive(
     while cursor < request.requested_end:
         if page_index >= MAX_LOGICAL_PAGES:
             raise FundingArchiveIntegrityError("funding acquisition exceeded the logical page cap")
-        chunk_end = min(cursor + MAX_PAGE_INTERVAL, request.requested_end)
+        chunk_end = min(cursor + MAX_FUNDING_INTERVAL, request.requested_end)
         started_at = _utc(clock(), "clock result")
         started_monotonic = monotonic()
         try:
