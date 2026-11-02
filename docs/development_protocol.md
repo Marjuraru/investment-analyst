@@ -487,7 +487,8 @@ comienza una transición mecánica explícita; no es un rol LLM ni una tercera d
 única es:
 
 `snapshot batched de guards vivos → mark ready → segundo snapshot/revalidación crítica → confirmar
-exact live head → squash merge con --match-head-commit → reconciliación/cleanup idempotentes`.
+exact live head → squash merge con --match-head-commit → verificar MERGED y obtener mergeCommit.oid
+exacto → despliegue local y verificación → cleanup idempotente → COMPLETE`.
 
 El primer snapshot es una adquisición live completa y demuestra, cuando aplique: Work Block único y
 metadata/policy coherentes; PR/base/branch/head exactos; único marker BUILD PASS y único marker
@@ -506,10 +507,53 @@ en el merge y no sustituye ningún guard.
 FINALIZE AUTO usa squash y nunca `--admin`, bypass ni otra estrategia. Los bloques con policy HUMAN
 no invocan FINALIZE: la integración humana sigue la estrategia explícita del Work Block y no puede
 inferir squash, rebase ni limpieza. Si falla tras ready, intenta volver a draft sólo cuando el head
-siga intacto y devuelve `FINALIZATION BLOCKED`. Tras merge verifica PR
-`MERGED`, cierra el Issue si fuera necesario, retira `workflow:active` con remove-label —nunca borra
-el label del repositorio—, relee el Issue y confirma cero Work Blocks activos. El cleanup es
-idempotente.
+siga intacto y devuelve `FINALIZATION BLOCKED`. Tras merge, verifica PR `MERGED` y obtiene el
+`mergeCommit.oid` exacto del PR resuelto; nunca usa el último `main` arbitrario como target ni
+infiere la entrega desde `deployment_state.json` o un HTTP 200 aislado.
+
+Desde el checkout/release verificado y el entorno existente, ejecuta
+`.venv/bin/python scripts/deploy_local_release.py update --sha <mergeCommit.oid>` y después
+`.venv/bin/python scripts/deploy_local_release.py status --json`. Resolver ejecutable y `PYTHONPATH`
+explícitamente si el checkout reutiliza una `.venv` compartida; no depender del cwd ni instalar
+dependencias nuevas. La entrega exige `current_commit` exacto, `unit_matches_current=true`, servicio
+activo con `service_enabled` preservado, `WorkingDirectory` y `ExecStart` cargados del mismo release,
+`NeedDaemonReload=no`, overview HTTP 200 y el mismo workspace UUID/binding. Si el bloque cambia
+UI/lectores, ejecuta únicamente su smoke afectado desde ese runtime: servir el código actualizado no
+equivale a haber observado el navegador.
+
+Para un servicio gestionado, `--skip-systemd` y `--skip-health-check` están prohibidos: no pueden
+enmascarar falta de acceso al bus. Usa el contexto real del usuario propietario y su bus, con UID y
+ruta reales y sin hardcodear un UID. Si el sandbox lo impide, solicita la escalación normal para la
+operación acotada; nunca alteres permisos del socket ni simules éxito. Una denegación o fallo real
+produce `FINALIZATION BLOCKED`, sin COMPLETE ni cleanup, y conserva la verificación pre-restart y el
+rollback existentes.
+
+Si el disco ya tiene el SHA pero el proceso es viejo, `update` puede retornar por idempotencia con
+`current_commit` correcto y HTTP 200 sin reiniciar; repetirlo no demuestra entrega. Si se prueba esa
+discrepancia, tras las verificaciones de seguridad existentes y sin writer activo, se permite
+`systemctl --user daemon-reload` y `systemctl --user restart investment-analyst.service` en el
+contexto correcto, y se repiten `status --json`, las propiedades cargadas y la comprobación del
+workspace. No se editan manualmente `deployment_state.json`, la unidad ni el workspace; un fallo
+conserva evidencia y la recuperación soportada, nunca COMPLETE. El motor de despliegue no se modifica
+en este bloque.
+
+El cleanup ocurre sólo después de la entrega y verificación locales, y es idempotente: cierra el
+Issue, retira `workflow:active` con remove-label —nunca borra el label del repositorio— y verifica
+cero activos. El body del PR usa una referencia neutral al Issue para evitar un cierre automático por
+keywords; el cierre es explícito después de la entrega.
+
+### Recuperación postmerge de entrega local
+
+Una entrega local fallida después del merge no reabre el candidato ni autoriza otro PR: el Issue
+permanece abierto con `workflow:active` y registra el PR, el head auditado, el merge SHA, el paso
+fallido y evidencia compacta. BUILD y AUDIT reconocen esta continuación antes de resolver sólo PRs
+abiertos: releen directamente el Issue y el único PR fusionado de su expected branch, su vínculo, los
+SHA exactos, `main` y el grant vigentes. No crean un PR nuevo, no repiten el merge, no vuelven a draft
+un PR fusionado ni reauditan el squash. Ambigüedad o un `main` adelantado a otra release bloquean sin
+degradación implícita. Sólo se continúa la entrega, verificación y cleanup ya autorizados. El guard
+actual sigue siendo obligatorio premerge y no acepta targets MERGED: no se implementa otro parser ni
+se inventa PASS para reanudar. PLAN identifica la entrega pendiente y no publica el siguiente bloque
+ni despliega por su cuenta.
 
 ## Smoke real, handoff y salidas
 
