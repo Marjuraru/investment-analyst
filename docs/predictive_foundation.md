@@ -611,6 +611,131 @@ Smoke premerge READ_ONLY sobre `run_id=fc4ea570-4ffb-55fc-ac49-17d74c328d24`, ac
   por `sys.meta_path`; ninguno quedó importado. No hubo entrenamiento, run nuevo, escrituras,
   proveedores ni lectura de otro run.
 
+## Evidencia histórica de funding (#399)
+
+`PREDICTIVE-FUNDING-DATA` prepara una evidencia diferencial para una hipótesis nueva: la presión de
+financiación del perpetuo puede aportar información sobre el mismo retorno spot futuro de cinco
+intervalos. No se afirma causalidad económica, ventaja predictiva ni rentabilidad negociable. La
+construcción es una entrega de evidencia y no entrena, no evalúa el holdout y no promueve un
+predictor; tampoco reabre el experimento de tres features técnicas cerrado como negativo.
+
+### Frontera y contratos
+
+El bloque reutiliza `DeribitClient.fetch_funding_history`, `resolve_deribit_configuration`, el
+catálogo central y las operaciones Decimal34 vigentes. No crea un provider, catálogo o indicador
+nuevo, no escribe `RawRecord`, `NormalizedObservation`, `MetricResult` ni `DiagnosticResult`, y no
+abre `ApplicationRuntime` ni la DB del workspace. El spot Coinbase y el funding Deribit no se
+fusionan como una serie de precios: son evidencia de dominios distintos referida al mismo
+subyacente por el catálogo.
+
+Los contratos aislados son `research-funding-archive-v1` (archivo de páginas),
+`research-funding-features-v1` (manifiesto semántico del complemento) y
+`research-funding-bundle-v1` (manifiesto físico exportado). `feature_set_version` es
+`deribit-funding-sums-24h-168h-reconstructed-v1`; `availability_policy` es
+`historical-funding-end-plus-1h-assumed-v1`; `strict_pit_verified=false` en todos los artefactos.
+Una revisión obtenida hoy puede diferir de lo publicado entonces: el archivo conserva
+`retrieved_at`, no una primera publicación demostrada.
+
+### Archivo de páginas
+
+El rango se deriva de la grilla del dataset reconstruido, nunca de labels. Para decisión D a las
+12:00 UTC el ancla es D 00:00 UTC; la ventana de 24 h contiene D00−23 h..D00 y la de 168 h contiene
+D00−167 h..D00. Para `2020-01-01..2025-12-25` el intervalo es
+`[2019-12-25T01:00:00Z, 2025-12-25T01:00:00Z)`, con 2.186 decisiones y 52.608 puntos horarios
+máximos. La adquisición usa páginas lógicas de hasta 31 días, secuenciales, con el pacing y el
+transporte existentes, y un máximo de 72 páginas. Un fallo de página no sella un archivo parcial.
+
+`pages.jsonl` conserva por fila `page_index`, `point_id`, `timestamp` y el `raw_payload` con los
+cinco campos exactos como texto. El manifiesto guarda el contexto común: identidad de catálogo,
+método, rango, URL y tiempos reales de cada página, hash y bytes por página, hash y bytes totales,
+conteos de puntos observados/ausentes y referencias a las condiciones del proveedor. Un duplicado
+conflictivo, un timestamp desalineado o una página incompleta fallan explícitamente; un hueco es una
+ausencia, nunca un funding cero. El archivo completo se sella atómicamente y se reutiliza sin red
+cuando la solicitud coincide.
+
+### Features y complemento
+
+Las columnas son `funding_sum_1h_24h` y `funding_sum_1h_168h`, unidad `ratio`. Cada valor es la suma
+cronológica exacta de `interest_1h` en la ventana fija, con Decimal34 y `ROUND_HALF_EVEN`; no se
+suman `interest_8h` solapados, no se anualiza, no se compone retorno, no se cambia el signo y no se
+estandariza. Un cero válido es un valor disponible; un hueco, un nulo o una desalineación es
+`missing` con motivo. La ventana de 168 h nunca se acorta ni se rellena con la de 24 h. La
+elegibilidad por feature y la elegibilidad conjunta se publican separadas.
+
+El `funding_feature_hash` cubre `sample_key`, `decision_at`, la ventana causal, `interest_1h`, la
+fuente y la política. No incluye labels, precios ni el hash del dataset base. Actualizar el label del
+dataset reconstruido crea un bundle nuevo, pero no cambia el hash de funding; cambiar un input de la
+ventana sí lo cambia. El bundle referencia el dataset `d927c7f1…` por identidad y hash y no copia sus
+features, labels, precios ni filas completas. La vista offline devuelve features base y funding por
+`sample_key`, mantiene targets y metadata separados y sólo materializa TRAIN/VALIDATION; el holdout
+se verifica y se cuenta, nunca se entrega a una matriz de entrenamiento.
+
+### Comandos exactos
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/build_funding_research_dataset.py acquire \
+  --dataset-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-historical-data/datasets/d927c7f1-794a-571c-b729-6bb68d311115 \
+  --asset-id crypto:btc-usd \
+  --output-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-funding-data/archive \
+  --json
+
+PYTHONPATH=src .venv/bin/python scripts/build_funding_research_dataset.py build \
+  --dataset-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-historical-data/datasets/d927c7f1-794a-571c-b729-6bb68d311115 \
+  --archive-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-funding-data/archive/95c542f0-07f9-57b7-9882-dc72f3d99d77 \
+  --known-at 2026-11-02T17:30:00Z \
+  --output-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-funding-data/bundle \
+  --json
+```
+
+Repetir el mismo `acquire` reutiliza el archivo sin GET; repetir el mismo `build` con `--output-dir`
+reutiliza el bundle sin reescritura. Sin `--output-dir`, `build` devuelve el resumen sin escribir.
+El destino debe ser absoluto, fuera del repositorio, workspace, runtime y ops, sin symlinks ni
+carpetas ajenas ocupadas.
+
+### Resultado real (2026-11-02)
+
+El archivo real `95c542f0-07f9-57b7-9882-dc72f3d99d77` (semántico `e7cbd0de…`, páginas
+`e499745c…`) tiene 71 páginas, 52.536 puntos observados y 72 ausencias sobre 52.608 esperados;
+`pages.jsonl` ocupa 14.629.547 B y el manifiesto 41.171 B, dentro del cap de 32 MiB. La recepción
+terminó en `2026-11-02T17:21:37.414270Z`. La adquisición tardó 127,52 s de pared (suma de tiempos de
+página 116,012 s; mínimo 1,003 s, máximo 4,558 s, media 1,634 s) y el pico RSS fue 487.060 KB. Una
+repetición con transporte prohibido reutilizó el archivo en 5,07 s sin ninguna llamada de red.
+
+El bundle real `06f96d38-4c77-5257-ba9f-faf8badd603e` (contenido `a861289b…`) contiene 2.186 filas;
+el Parquet ocupa 782.876 B y el manifiesto 2.586.791 B, dentro del cap de 8 MiB. La raíz completa
+ocupa 18.040.385 B, bajo el cap de 64 MiB. La construcción y export tardaron 11,66 s con pico RSS
+372.636 KB; una segunda ejecución reutilizó el mismo bundle en 8,94 s sin reescribir archivos. La
+relectura offline tardó 0,770 s y la vista TRAIN/VALIDATION 1,779 s con RSS 204.541.952 B y sin
+importar `sklearn`, `numpy`, `scipy` ni `threadpoolctl`. El dataset base y su archivo conservaron sus
+hashes.
+
+Cobertura observada: 24 h disponibles 2.116 y missing 70; 168 h disponibles 1.700 y missing 486;
+conjunta 1.700; `base_eligible` 2.164 y `base_eligible_joint_available` 1.681. Por split
+(requested/base_eligible/joint): train 1.311/1.300/1.006, validation 437/426/328 y holdout
+438/438/347. La admisión es `insufficient_funding_coverage`: 1.334/1.726 = 0,772885… frente al piso
+0,95. Los pisos de train ≥150, validation ≥40 y holdout ≥40 se cumplen; sólo falla la cobertura
+conjunta. No se rebaja el umbral, no se cambia el período ni el proveedor y no se rellena ningún
+hueco. La construcción correcta es una entrega válida aunque la admisión sea insuficiente.
+
+La vista TRAIN/VALIDATION devuelve 1.748 filas con features y targets separados; 438 filas de holdout
+quedan fuera y su disponibilidad sólo se cuenta. No se entrena, no se calcula correlación,
+performance, selección de clases ni target de holdout, y no se declara una señal o recomendación.
+
+### Limitaciones y siguiente decisión
+
+- El funding se reconstruye con la recepción actual; no demuestra la primera publicación histórica
+  ni satisface el gate de PIT observado.
+- La disponibilidad es un supuesto de fin de ventana más una hora, no un SLA ni una observación de
+  recepción por punto.
+- Los 72 huecos del proveedor se conservan; una ventana de 168 h que contenga uno de ellos queda
+  `missing`, aunque la de 24 h sí esté disponible. No se acorta ni se interpola.
+- El uso es personal y local; no se afirma licencia abierta ni derecho de redistribución.
+- La admisión insuficiente no es una prueba estadística ni autoriza entrenar. El siguiente PLAN
+  decide sobre la carencia demostrada; si en una revisión posterior hubiera cobertura suficiente,
+  deberá congelar un experimento nuevo que compare el aporte incremental del funding frente a
+  referencias y control técnico sobre exactamente las mismas fechas, sin tuning ni promoción
+  automática.
+
 ## Presupuesto y retención
 
 La raíz real `~/.local/share/investment-analyst/research/predictive-foundation` tiene cap de 16 MiB;

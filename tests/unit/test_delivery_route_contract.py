@@ -297,6 +297,29 @@ _BASE_ROUTE_ASSERTION_COUNTS = {
 }
 
 
+def test_route_records_funding_evidence_without_training_or_holdout_access() -> None:
+    release_plan = (ROOT / "docs/basic_functional_release_plan.md").read_text(encoding="utf-8")
+    roadmap = (ROOT / "docs/product_roadmap.md").read_text(encoding="utf-8")
+    predictive = (ROOT / "docs/predictive_foundation.md").read_text(encoding="utf-8")
+    strategy = (ROOT / "docs/research_information_strategy.md").read_text(encoding="utf-8")
+
+    for text in (release_plan, roadmap, predictive, strategy):
+        assert "PREDICTIVE-FUNDING-DATA" in text
+        assert "insufficient_funding_coverage" in text
+    assert "52.536 de 52.608" in release_plan
+    assert "52.536/52.608" in roadmap
+    assert "1.334/1.726" in release_plan
+    assert "1.334/1.726" in roadmap
+    assert "research-funding-archive-v1" in predictive
+    assert "research-funding-features-v1" in predictive
+    assert "research-funding-bundle-v1" in predictive
+    assert "0,95" in predictive
+    assert "TRAIN/VALIDATION" in release_plan
+    assert "no entrena" in predictive.lower()
+    assert "no se entrena" in (release_plan + strategy).lower()
+    assert "`PREDICTIVE-RESEARCH` | `NEXT`" in release_plan
+
+
 def test_route_pinning_assertions_track_the_new_single_next_after_equity_universe_closes() -> None:
     release_plan = (ROOT / "docs/basic_functional_release_plan.md").read_text(encoding="utf-8")
 

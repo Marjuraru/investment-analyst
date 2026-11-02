@@ -77,6 +77,13 @@ datos sin cerrarla; `PREDICTIVE-HISTORICAL-DATA` añade el archivo y dataset rec
 el holdout. La fila permanece `NEXT`. `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` conservando la deuda y
 la evidencia ya registrada, sin declararse `DONE` ni publicar Issues futuros.
 
+`PREDICTIVE-FUNDING-DATA`/#399 (`ADVANCES`) añade la evidencia histórica diferencial de funding
+Deribit para `crypto:btc-usd`: 52.536 de 52.608 puntos horarios, 71 páginas y 2.186 filas de
+complemento con sumas causales de 24 h y 168 h. La admisión queda
+`insufficient_funding_coverage` con 1.334/1.726 filas base elegibles de TRAIN+VALIDATION (77,29 %)
+frente al piso de 95 %. No se entrena, no se evalúa el holdout, no se promueve un predictor y V1-U4
+permanece `UNKNOWN`. `PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`.
+
 La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de crecimiento viven en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md).
 La implementación vigente de reglas, replay y entrega se reconcilia en
@@ -768,9 +775,14 @@ verificable → interfaz: `GET /api/v1/research/ml-report` y el disclosure técn
 «Evaluación ML de investigación» proyectan `ml-research-report-view-v1` desde el run sellado, con
 `asset_id`+`run_id` explícitos, sin reentrenar, abrir el dataset, evaluar el holdout ni promocionar un
 predictor. La autoridad técnica y operativa es
-[`predictive_foundation.md`](predictive_foundation.md). No se elige aquí un booster adicional, una
-dependencia ML operativa ni un proveedor LLM; la ejecución PIT observada sigue sin muestra elegible y
-no se promueve un predictor.
+[`predictive_foundation.md`](predictive_foundation.md). `PREDICTIVE-FUNDING-DATA`/#399 (`ADVANCES`)
+prepara una evidencia diferencial de funding Deribit sin reabrir el experimento cerrado: archivo
+acotado de 52.536/52.608 puntos, dos sumas causales de `interest_1h` y un complemento de 2.186 filas
+que referencia el dataset reconstruido por identidad. La admisión es
+`insufficient_funding_coverage` (1.334/1.726 = 77,29 %) y los pisos de train/validation/holdout se
+cumplen por separado; no se entrena, no se evalúa el holdout y no se promueve un predictor. No se
+elige aquí un booster adicional, una dependencia ML operativa ni un proveedor LLM; la ejecución PIT
+observada sigue sin muestra elegible y no se promueve un predictor.
 
 ## Fase 14 — Operación 24/7 y release
 
