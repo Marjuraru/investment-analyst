@@ -200,3 +200,26 @@ tuning, otra longitud de bloque, más indicadores ni nuevos activos para buscar 
 siguiente PLAN decide entre una hipótesis de datos/features distinta sustentada por investigación y
 el cierre de este experimento; la interpretación LLM sigue siendo una capa posterior sobre resultados
 estructurados.
+
+## Entrega local del resultado negativo (2026-11-02)
+
+`ML-RESEARCH-RESULTS-DELIVERY`/#397 (`ADVANCES`) cierra la frontera motor independiente → resultado
+verificable → interfaz con un consumidor read-only. La API local `GET
+/api/v1/research/ml-report?asset_id=<catalog_id>&run_id=<uuid>` y el disclosure «Evaluación ML de
+investigación» verifican el artefacto sellado y muestran `ml-research-report-view-v1`: identidad,
+fechas, features, folds, Brier y comparaciones contra ambas referencias, intervalos, calibración,
+limitaciones y estado del holdout. No reejecutan el experimento, no abren el dataset, no evalúan el
+holdout, no entrenan y no convierten el resultado en señal o recomendación.
+
+El run real `fc4ea570-4ffb-55fc-ac49-17d74c328d24` se mantiene como evidencia negativa verificable:
+`status=completed`, `decision=no_demonstrated_edge`, `holdout=not_evaluated`, 0 accesos y 2.532 filas
+OOS selladas. La consulta conserva el estado, los hashes y el holdout intactos; el asset ajeno se
+rechaza con `409` y el lector funciona sin dependencias ML. La hipótesis de tres features técnicas y
+horizonte de cinco intervalos queda cerrada como resultado negativo; no se declara ML imposible ni se
+reabre el mismo experimento. No se repiten sus parámetros ni se ajusta el criterio.
+
+La próxima hipótesis pertenece a PLAN y debe ser diferencial, no otro tuning de RSI/MACD, otro ticker
+buscando ganador ni shadow del modelo rechazado. Un candidato honesto es una familia de datos/features
+distinta —por ejemplo derivados o funding— sólo si la disponibilidad, la cobertura y el coste se
+demuestran antes de comprometer un entrenamiento. La interpretación LLM sigue siendo una capa
+posterior e independiente sobre resultados estructurados.

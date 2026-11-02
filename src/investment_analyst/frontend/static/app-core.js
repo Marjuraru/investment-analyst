@@ -572,6 +572,10 @@ const ERROR_MESSAGES = Object.freeze({
   market_intraday_refresh_failed:
     "No fue posible actualizar las velas intradía de BTC-USD. Los datos diarios ya guardados no se pierden.",
   operational_error: "La operación local no está disponible. Revisa el estado del espacio de datos.",
+  ml_report_not_found:
+    "No se encontró un run sellado con ese identificador en la raíz de investigación configurada.",
+  ml_report_conflict:
+    "El artefacto ML no es compatible, está incompleto o cambió durante la lectura.",
   unexpected_error: "La interfaz local encontró un error inesperado.",
 });
 
@@ -825,6 +829,7 @@ async function loadMarketAssets() {
     activeAssetSubtabId = "mercado";
     applySelectedMarketAsset();
     applyChartSettings();
+    if (typeof resetMlResearchReport === "function") resetMlResearchReport();
 
     // The former asset-specific fan-out (`presentation.hasFundamentals`,
     // `queryReport()`, and its companion queries) is intentionally centralized

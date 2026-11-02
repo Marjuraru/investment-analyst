@@ -1,7 +1,8 @@
 # Fundación predictiva — experimento diario cripto, dataset PIT y reconstrucción histórica
 
-> Autoridad técnica y operativa única de los artefactos abiertos por `PREDICTIVE-FOUNDATION`/#391 y
-> `PREDICTIVE-HISTORICAL-DATA`/#393 (`PREDICTIVE-RESEARCH`, `ADVANCES`, sin cierre). Estrategia y
+> Autoridad técnica y operativa única de los artefactos abiertos por `PREDICTIVE-FOUNDATION`/#391,
+> `PREDICTIVE-HISTORICAL-DATA`/#393, `ML-BASELINE-VALIDATION`/#395 y
+> `ML-RESEARCH-RESULTS-DELIVERY`/#397 (`PREDICTIVE-RESEARCH`, `ADVANCES`, sin cierre). Estrategia y
 > ruta viven en [`product_roadmap.md`](product_roadmap.md),
 > [`basic_functional_release_plan.md`](basic_functional_release_plan.md) y
 > [`research_information_strategy.md`](research_information_strategy.md). Este documento no autoriza
@@ -532,6 +533,83 @@ Un resultado negativo es una entrega válida del bloque: no demuestra una ventaj
 técnico y no promueve ningún predictor. La decisión siguiente pertenece a PLAN: o bien una hipótesis
 de datos/features distinta sustentada por investigación, o el cierre de este experimento; no se
 encadena tuning, más indicadores ni nuevos activos para buscar un ganador.
+
+## Consulta local del resultado ML (#397)
+
+`ML-RESEARCH-RESULTS-DELIVERY` integra la consulta verificable de un run sellado en la API y la
+interfaz técnica local. La vista es un consumidor read-only de `ml-baseline-manifest-v1`,
+`ml-baseline-protocol-v1` y `ml-baseline-evaluation-v1`: verifica el artefacto, comprueba que el
+`asset_id` solicitado coincide con el protocolo y proyecta el resultado con el contrato aislado
+`ml-research-report-view-v1`. No reejecuta la investigación, no entrena, no adquiere datos, no abre
+el dataset, no consulta el holdout y no promueve un predictor.
+
+### Configuración y comandos
+
+La raíz se configura una sola vez del lado servidor. El default es
+`~/.local/share/investment-analyst/research/ml-baseline-validation`; debe ser absoluta y la raíz no
+se crea en startup, GET ni consulta.
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/serve_investment_analyst.py \
+  --ml-results-root /home/marjuraru/.local/share/investment-analyst/research/ml-baseline-validation
+```
+
+La consulta HTTP exacta, con un único `asset_id` y un único `run_id` canónico, es:
+
+```text
+GET http://127.0.0.1:8765/api/v1/research/ml-report?asset_id=crypto:btc-usd&run_id=fc4ea570-4ffb-55fc-ac49-17d74c328d24
+```
+
+El identificador se toma del recibo de evaluación. En la interfaz técnica, el disclosure
+«Evaluación ML de investigación» usa el activo seleccionado y sólo carga al pulsar «Consultar
+evaluación»; `?ml_run_id=<uuid>` puede prellenar el campo, sin ejecutar la consulta ni cambiar de
+activo. Enlace real para el run sellado y BTC:
+
+```text
+http://127.0.0.1:8765/?ml_run_id=fc4ea570-4ffb-55fc-ac49-17d74c328d24
+```
+
+### Contrato, errores y límites
+
+- `400` para parámetros ausentes, duplicados, desconocidos, UUID no canónico o activo fuera del
+  catálogo; `404` para raíz o run inexistente; `409` para artefacto incompatible/corrupto, `asset_id`
+  distinto o servicio no configurado. No hay fallback a otro run.
+- La resolución es exactamente `<root>/<run_id>`, sin búsqueda recursiva ni selección por `mtime`.
+  Se rechazan symlinks, componentes que escapan de la raíz, entradas inesperadas, descriptores
+  sustituidos por directorios y crecimiento durante la lectura.
+- Caps antes de leer: manifest y protocolo ≤64 KiB, reporte y selección ≤1 MiB, predicciones ≤8 MiB
+  y conjunto ≤8 MiB incluyendo el manifest. El lector público `read_ml_baseline_artifact` sigue
+  siendo la verificación completa; el servicio añade la comprobación de protocolo, asset y run.
+- La caché conserva sólo la proyección y las firmas SHA-256 de los archivos declarados, con máximo
+  8 entradas y 2 MiB. Un cambio de contenido invalida aunque se restaure el `mtime`; una reapertura
+  válida no repite DuckDB, fitting ni un nuevo readback Parquet. Las peticiones idénticas
+  concurrentes se coalescen.
+- La proyección no incluye predicciones por fila, retornos, labels, matrices ni rutas absolutas. El
+  protocolo sellado trae `asset_id`, `dataset_id` y hashes, pero no `source_id`, venue ni fecha de
+  publicación: la vista declara esa ausencia y no la infiere del ticker.
+- `strict_pit_verified=false` y `availability_basis=historical_reconstruction_assumed` se muestran
+  de forma visible. Brier, comparaciones, intervalos, folds, calibración, limitaciones y coste
+  observado son los del artefacto; un holdout `not_evaluated` no produce métricas, filas ni clases.
+- Un `confirmed_research_edge` de fixture se presenta como mejora retrospectiva condicional, nunca
+  como autorización de uso. La interfaz no incluye botón de evaluación, ranking, semáforo ni
+  recomendación.
+
+### Resultado real (2026-11-02)
+
+Smoke premerge READ_ONLY sobre `run_id=fc4ea570-4ffb-55fc-ac49-17d74c328d24`, activo
+`crypto:btc-usd`, servidor aislado en puerto libre y sin segundo writer del workspace:
+
+- Artefacto de 45.176 B y 4 archivos; reporte `b0be6b59…`; `status=completed`,
+  `decision=no_demonstrated_edge`, `holdout=not_evaluated`, 0 accesos al holdout, 2.532 filas OOS
+  selladas y predictor no promovido.
+- Primera apertura 15,32 ms; reapertura 0,36 ms; primera respuesta HTTP 19,05 ms. Una única
+  verificación completa, 7 escaneos de firma, 316.232 B de firma (7 × 45.176 B, sólo el run
+  solicitado), caché de 1 entrada / 17.932 B y pico RSS 132.808.704 B.
+- El asset negativo `equity:us:aapl` devolvió `409 ml_report_conflict` sin filtrar rutas. El
+  artefacto sellado y el dataset `d927c7f1…` conservaron tamaño, `mtime` y SHA-256 antes/después.
+- El lector funcionó en un intérprete con `sklearn`, `numpy`, `scipy` y `threadpoolctl` bloqueados
+  por `sys.meta_path`; ninguno quedó importado. No hubo entrenamiento, run nuevo, escrituras,
+  proveedores ni lectura de otro run.
 
 ## Presupuesto y retención
 

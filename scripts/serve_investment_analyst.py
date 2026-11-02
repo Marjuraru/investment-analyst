@@ -85,6 +85,7 @@ from investment_analyst.frontend.local_web import (
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
 from investment_analyst.providers.macro.fred_alfred import FredApiKey
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
+from investment_analyst.research.ml_report_service import MlResearchReportService
 from investment_analyst.storage import StorageError, StoragePaths
 from investment_analyst.workspace.service import WorkspaceError
 
@@ -100,6 +101,9 @@ _DESKTOP_NOTIFICATIONS_STATE_DIR = "desktop_notifications"
 _SERVICE_LOCK_FILE = "aapl_local_service.lock"
 _SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS = 60.0
 _BYTES_PER_MEGABYTE = 1024 * 1024
+_DEFAULT_ML_RESULTS_ROOT = (
+    Path.home() / ".local/share/investment-analyst/research/ml-baseline-validation"
+)
 
 
 class _DerivativesLocalController(AaplLocalController):
@@ -159,6 +163,13 @@ def _port(value: str) -> int:
     return parsed
 
 
+def _absolute_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("paths must be absolute")
+    return path
+
+
 def _lag(value: str) -> int:
     try:
         parsed = int(value)
@@ -184,6 +195,11 @@ def _positive_megabytes(value: str) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path)
+    parser.add_argument(
+        "--ml-results-root",
+        type=_absolute_path,
+        default=_DEFAULT_ML_RESULTS_ROOT,
+    )
     parser.add_argument("--port", type=_port, default=8765)
     parser.add_argument("--no-scheduler", action="store_true")
     parser.add_argument("--schedule-at", type=_time_value, default=time(hour=7))
@@ -408,6 +424,7 @@ def _serve_after_lock(
         job_factory=jobs_for_preferences if scheduler is not None else None,
     )
 
+    ml_reports = MlResearchReportService(arguments.ml_results_root)
     web_application = AaplLocalWebApplication(
         controller,
         scheduler,
@@ -419,6 +436,7 @@ def _serve_after_lock(
         cazatiburones_notification_store=cazatiburones_notification_store,
         asset_preferences=preference_service,
         desktop_notifications=desktop_notification_service,
+        ml_reports=ml_reports,
     )
     manual_operations = ManualOperationQueue(
         ManualOperationStateStore(state_root / _MANUAL_OPERATION_STATE_FILE),

@@ -1,6 +1,6 @@
 # Hoja de ruta estratégica del producto
 
-> Estado vigente 2026-10-31: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
+> Estado vigente 2026-11-02: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
 > `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` conservando su deuda y evidencia, sin declararse `DONE`.
 > La readiness operativa v2 se registra en
 > [`v2_operational_readiness.md`](v2_operational_readiness.md): avanza prerrequisitos de interfaz,
@@ -262,8 +262,8 @@ código en `main` con evidencia; no acredita `MET`, cobertura completa ni capaci
 | Evidencia PIT, runtime, catálogo, `available_at` y lineage | Sí: fuentes oficiales, almacenamiento append-only y lectura acotada. | Nuevas fuentes sólo si la pregunta demuestra la carencia y hay licencia/PIT/coste verificados. | Una fuente ausente no se sustituye ni se retrofecha. |
 | Métricas deterministas, screening y reconstrucción descriptiva de ciclos/patrones | Sí: RSI/MACD diarios persistidos, siete plantillas `SILENT` y estados/tramos/cruces reconstructivos al corte. | Resultados posteriores por detección/horizonte, sólo cuando exista el módulo autorizado. | La reconstrucción es descriptiva: no es señal, no se notificó en sus fechas históricas y no demuestra anticipación. |
 | `FeatureSetSpec`/`FeatureSetResult`/`extract_features` | Sí: proyección por dominio de métricas persistidas. | Selección histórica explícita, label y `label_available_at`. | No es matriz de entrenamiento ni dataset predictivo; preserva series y revisiones. |
-| Label/target y dataset PIT | Sí, parcial: constructor PIT read-only (#391) y constructor reconstruido con archivo Coinbase (#393). La muestra PIT observada sigue siendo insuficiente. | `ML-BASELINE-VALIDATION` P2–P4: baseline ingenuo + estadístico/lineal y, como máximo, un booster candidato. | Un snapshot PIT reproducible y maduro/no maduro por muestra; sin tuning sobre holdout. El dataset reconstruido es investigación retrospectiva condicional y no sustituye el gate PIT. |
-| Motor ML y validación fuera de muestra | No. | `ML-BASELINE-VALIDATION` P2–P4: baseline ingenuo + estadístico/lineal y, como máximo, un booster candidato. | Purged walk-forward/embargo, calibración cuando aplique, incertidumbre y explicación; ni usar ML ni completar infraestructura garantiza ventaja. |
+| Label/target y dataset PIT | Sí, parcial: constructor PIT read-only (#391), constructor reconstruido con archivo Coinbase (#393) y evaluación temporal aislada sobre esa muestra (#395). La muestra PIT observada sigue siendo insuficiente. | `PREDICTION-SHADOW-DELIVERY`: shadow, drift y promoción. Cualquier hipótesis nueva de datos/features requiere PLAN. | Un resultado ML no sustituye el gate PIT observado ni autoriza promoción. El dataset reconstruido es investigación retrospectiva condicional y conserva sus hashes y ausencias. |
+| Motor ML y validación fuera de muestra | Sí, evaluación aislada: `ml-baseline-evaluation-v1` con tres folds walk-forward, embargo de cinco días, bootstrap pareado y holdout cerrado. `ML-RESEARCH-RESULTS-DELIVERY`/#397 añade la consulta local read-only `ml-research-report-view-v1` sobre el run sellado. | `PREDICTION-SHADOW-DELIVERY`: shadow, drift, latencia/memoria, promoción y rollback. Cualquier hipótesis nueva requiere PLAN. | Ningún predictor fue promovido: la evaluación real fue `no_demonstrated_edge` con 0 accesos al holdout. La consulta verifica y presenta el artefacto; no reejecuta la investigación ni certifica ventaja. |
 | Inferencia, shadow y promoción reversible | No. | `PREDICTION-SHADOW-DELIVERY` P5–P6: contrato versionado, drift, latencia/memoria, umbral de promoción y rollback. | Inferencia separada del polling; sin recomendación ni ejecución implícita. |
 | `ModelExplanationPacket` e interpretación LLM | No. | `LLM-INTERPRETATION`: un adaptador opcional e intercambiable sobre un paquete ya calculado. | No calcula la predicción, no cambia evidencia, no decide operaciones y puede desconectarse sin afectar datos ni interfaz numérica. |
 | V1-U4 predicción | `UNKNOWN`. | Depende de la cadena anterior. | No hay modelo validado ni porcentaje de avance; no se declara predictor existente por documentación. |
@@ -762,7 +762,12 @@ workspace operativo; el gate de PIT observado no cambia. `ML-BASELINE-VALIDATION
 ejecutó el protocolo preregistrado con tres folds walk-forward, bootstrap pareado y holdout cerrado:
 ningún candidato alcanzó el 5 % de mejora de Brier frente a ambas referencias (`no_demonstrated_edge`)
 y el holdout no se consultó. La muestra quedó evaluada, no promovida: un resultado negativo no es una
-señal, no cambia V1-U4 y no autoriza tuning ni nuevos activos. La autoridad técnica y operativa es
+señal, no cambia V1-U4 y no autoriza tuning ni nuevos activos. `ML-RESEARCH-RESULTS-DELIVERY`/#397
+(`ADVANCES`) integra el consumidor local que cierra la frontera motor independiente → resultado
+verificable → interfaz: `GET /api/v1/research/ml-report` y el disclosure técnico
+«Evaluación ML de investigación» proyectan `ml-research-report-view-v1` desde el run sellado, con
+`asset_id`+`run_id` explícitos, sin reentrenar, abrir el dataset, evaluar el holdout ni promocionar un
+predictor. La autoridad técnica y operativa es
 [`predictive_foundation.md`](predictive_foundation.md). No se elige aquí un booster adicional, una
 dependencia ML operativa ni un proveedor LLM; la ejecución PIT observada sigue sin muestra elegible y
 no se promueve un predictor.
