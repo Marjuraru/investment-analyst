@@ -127,17 +127,19 @@ reales; el bloque puede completar el constructor/export y demostrar la limitaci�
 dataset listo ni pasar a entrenar. No se usan scratch ni sintéticos como evidencia de readiness
 real.
 
-## Evaluación futura (no ejecutada aquí)
+## Evaluación preregistrada
 
-La métrica primaria predeclarada para un futuro modelo es Brier fuera de muestra frente a `p=0.5` y
-al prior de clase estimado sólo en `train` de cada fold; log-loss, calibración y detalle por
-fold/fecha son secundarios. La regla inicial de avance futura es una mejora relativa de Brier
-`>= 5 %` frente a ambos baselines en validación temporal agregada, superioridad con intervalo
-pareado que respete la dependencia de labels y confirmación en holdout intacto. El protocolo
-numérico de incertidumbre y el embargo de folds se definen antes de entrenar en el siguiente bloque.
-No se optimiza el criterio sobre holdout ni se promete esa mejora. Shadow, drift, costes reales y
-rollback son puertas separadas. Un LLM posterior recibe un paquete ya calculado y nunca participa en
-label ni feature. Ningún paquete ML se instala en este bloque.
+La métrica primaria es Brier fuera de muestra frente a `p=0.5` y al prior de clase estimado sólo en
+`train` de cada fold; log-loss, calibración y detalle por fold son secundarios. La regla de avance es
+una mejora relativa de Brier `>= 5 %` frente a ambos baselines en validación temporal agregada,
+superioridad con intervalo pareado que respete la dependencia de labels y confirmación en holdout
+intacto. `ML-BASELINE-VALIDATION` (#395) fijó y ejecutó el protocolo numérico, el embargo de folds y
+la disciplina de holdout antes de entrenar; ver
+[Evaluación del baseline ML](#evaluación-del-baseline-ml-395). No se optimiza el criterio sobre
+holdout ni se promete esa mejora. Shadow, drift, costes reales y rollback son puertas separadas. Un
+LLM posterior recibe un paquete ya calculado y nunca participa en label ni feature. #391 no instaló
+paquetes ML; #395 declara las dependencias de entrenamiento sólo en el extra `dev`, fuera del release
+core.
 
 ## Artefactos, esquema y encoding
 
@@ -354,14 +356,14 @@ PYTHONPATH=src .venv/bin/python scripts/build_historical_research_dataset.py acq
 PYTHONPATH=src .venv/bin/python scripts/build_historical_research_dataset.py build \
   --archive-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-historical-data/<archive_id> \
   --start-date 2020-01-01 --end-date 2025-12-25 \
-  --known-at 2026-11-01T02:00:00Z \
+  --known-at 2026-11-01T02:37:32.364526Z \
   --json
 
 # Export aislado, fuera del workspace, runtime, release y repositorio.
 PYTHONPATH=src .venv/bin/python scripts/build_historical_research_dataset.py build \
   --archive-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-historical-data/<archive_id> \
   --start-date 2020-01-01 --end-date 2025-12-25 \
-  --known-at 2026-11-01T02:00:00Z \
+  --known-at 2026-11-01T02:37:32.364526Z \
   --output-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-historical-data/datasets \
   --json
 ```
@@ -447,6 +449,90 @@ El workspace operativo no se abrió. Su metadata antes/después es idéntica: `i
 870.825 archivos en ambas lecturas; no apareció WAL. El delta atribuible al bloque es 0; la ventana
 no registró actividad concurrente del scheduler.
 
+## Evaluación del baseline ML (#395)
+
+`ML-BASELINE-VALIDATION` añade un estudio aislado y opt-in sobre el dataset reconstruido sellado. No
+abre el workspace, no adquiere datos, no modifica el dataset, sus features, labels, splits ni el gate
+PIT, y no produce señal, diagnóstico, recomendación ni predicción operativa.
+
+### Protocolo, folds y decisión
+
+`ml-baseline-protocol-v1` con `protocol_id=crypto-historical-5d-baselines-v1`; `protocol.json` se
+sella antes del primer fit. Entrada exclusiva: las tres columnas de
+`crypto-market-reconstructed-3-v1`; target `return_5d > 0`; `dtype=float64`; un único hilo
+BLAS/OpenMP; máximo 6 fits de desarrollo y 1 refit de holdout.
+
+Tres folds walk-forward expansivos con índices sobre todas las fechas solicitadas antes de filtrar:
+`a=⌊0.5N⌋`, `b=train_end` original, `c=b+⌊(holdout_start−b)/2⌋`, `d=holdout_start` original;
+validaciones `[a,b)`, `[b,c)`, `[c,d)`. Cada etiqueta de entrenamiento exige además
+`exit_bar_end < medianoche_UTC(inicio_validación) − 5d`; se conservan el purge y la elegibilidad
+originales. Dos candidatos fijos —regresión logística con `StandardScaler` ajustado sólo en train e
+histogram gradient boosting— y dos referencias: `p=0.5` y el prior de clase del train de cada fold.
+
+`Brier` decide; log-loss con clip `1e-15` y calibración de 10 bins son secundarios. La incertidumbre
+usa un bootstrap pareado de bloques móviles de 20 decisiones consecutivas, 2.000 réplicas y
+`PCG64(1729)`, dentro de cada segmento diario contiguo de cada fold. En desarrollo se exige mejora
+relativa `>=5 %` frente a **ambas** referencias y ambos límites inferiores unilaterales (quantile
+`0.0125`, Bonferroni `0.05/4`) `> 0`; el holdout usa quantile `0.025`. Un candidato admisible se
+sella en `selection.json` antes de abrir el holdout.
+
+### Artefacto y comandos
+
+`<output-dir>/<run_id>/` contiene `protocol.json`, `selection.json` cuando procede,
+`predictions.parquet` (sólo OOS; holdout sólo si se abrió), `report.json` y `manifest.json` con
+hashes. El `run_id` liga dataset, protocolo, código material ML y versiones efectivas; no depende de
+paths ni del reloj de ejecución. Un artefacto sellado se reutiliza sin fitting ni rewrite; protocolo,
+selección o predicciones divergentes fallan cerrado.
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/evaluate_ml_baselines.py \
+  --dataset-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-historical-data/datasets/d927c7f1-794a-571c-b729-6bb68d311115 \
+  --output-dir /home/marjuraru/.local/share/investment-analyst/research/ml-baseline-validation \
+  --json
+```
+
+La lectura del artefacto sellado no requiere dependencias ML:
+
+```bash
+PYTHONPATH=src .venv/bin/python - <<'PY'
+from pathlib import Path
+from investment_analyst.research.ml_export import read_ml_baseline_artifact
+manifest, report = read_ml_baseline_artifact(Path("<artifact_dir>"))
+print(manifest.run_id, report.status, report.development.decision)
+PY
+```
+
+### Resultado real (2026-11-01)
+
+`run_id=fc4ea570-4ffb-55fc-ac49-17d74c328d24`, `protocol_sha256=e7256118…`, 2.186 decisiones,
+`status=completed`, `decision=no_demonstrated_edge`, `holdout_status=not_evaluated`, 6 fits de
+desarrollo, 0 de holdout y 0 accesos al holdout. 3,68 s de pared, pico RSS 256.180.224 B, artefacto
+45.176 B. El holdout nunca se consultó.
+
+| Fold | train | purge | embargo | eval | logística | HGB | `p=0.5` | prior |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1.082 | 0 | 11 | 207 | 0,251195 | 0,242597 | 0,250000 | 0,250418 |
+| 2 | 1.300 | 11 | 0 | 218 | 0,240791 | 0,260389 | 0,250000 | 0,243467 |
+| 3 | 1.507 | 11 | 11 | 208 | 0,256396 | 0,251660 | 0,250000 | 0,251947 |
+| Pooled | — | — | — | 633 | 0,249321 | 0,251702 | 0,250000 | 0,248527 |
+
+Pooled OOS: 343 positivas / 290 negativas. Mejora relativa de la logística `+0,27 %` frente a
+`p=0.5` y `−0,32 %` frente al prior, con límites inferiores `−0,006855` y `−0,003212`; HGB `−0,68 %`
+y `−1,28 %`, con `−0,016330` y `−0,016935`. Ningún candidato alcanza el 5 % frente a ambas
+referencias y el prior de clase es la mejor referencia. No se ajustó ningún parámetro, no se probó
+otra longitud de bloque ni otro umbral, y no se abrió el holdout para buscar un ganador.
+
+Reutilización real: una segunda ejecución devolvió `status=reused` en 2,01 s con los mismos hashes de
+`protocol.json`, `predictions.parquet`, `report.json` y `manifest.json`; no hubo fitting, red ni
+rewrite. El dataset `d927c7f1…` conservó exactamente sus hashes antes y después (`manifest.json` y
+`rows.parquet` verificados). El lector core releyó el artefacto sin `sklearn`, `numpy`, `scipy` ni
+`threadpoolctl`.
+
+Un resultado negativo es una entrega válida del bloque: no demuestra una ventaja del baseline
+técnico y no promueve ningún predictor. La decisión siguiente pertenece a PLAN: o bien una hipótesis
+de datos/features distinta sustentada por investigación, o el cierre de este experimento; no se
+encadena tuning, más indicadores ni nuevos activos para buscar un ganador.
+
 ## Presupuesto y retención
 
 La raíz real `~/.local/share/investment-analyst/research/predictive-foundation` tiene cap de 16 MiB;
@@ -474,10 +560,10 @@ retiran. La receta de reconciliación sigue siendo la única de `docs/developmen
   train/validation del futuro P2–P3.
 - Un software completo no implica datos suficientes, modelo evaluado ni predictor promovido. V1-U4
   permanece `UNKNOWN`: un label no es un modelo.
-- `ML-BASELINE-VALIDATION` es el siguiente esperado sólo si existe muestra elegible suficiente y se
-  aceptan expresamente las limitaciones del modo reconstruido. Si no, el siguiente PLAN resuelve la
-  carencia con evidencia recuperable o captura prospectiva, sin retrofechar ni entrenar con datos
-  filtrados desde el futuro.
+- `ML-BASELINE-VALIDATION` ejecutó la evaluación sobre la muestra reconstruida con muestra suficiente
+  y protocolo preregistrado: no demostró ventaja y no abrió el holdout. El resultado no satisface el
+  gate PIT observado ni autoriza promoción; el siguiente PLAN decide una hipótesis distinta o el
+  cierre del experimento, sin tuning ni nuevos activos.
 
 ## Contrato del consumidor futuro
 

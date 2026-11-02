@@ -72,8 +72,10 @@ selección PIT trazable por perfil, moneda y frecuencia —con base ADR cuando a
 usadas por las detecciones elegidas sean evaluables o declaren ausencia legítima. No exige 11/11
 universal ni trimestral IFRS inventado, y distingue carencia de producto de carencia de fuente.
 `PREDICTIVE-RESEARCH` es el único `NEXT`: `PREDICTIVE-FOUNDATION` abre su fundación contractual y de
-datos sin cerrarla. `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` conservando la deuda y la evidencia ya
-registrada, sin declararse `DONE` ni publicar Issues futuros.
+datos sin cerrarla; `PREDICTIVE-HISTORICAL-DATA` añade el archivo y dataset reconstruidos, y
+`ML-BASELINE-VALIDATION` evaluó el primer baseline sobre esa muestra sin demostrar ventaja y sin abrir
+el holdout. La fila permanece `NEXT`. `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` conservando la deuda y
+la evidencia ya registrada, sin declararse `DONE` ni publicar Issues futuros.
 
 La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de crecimiento viven en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md).
@@ -756,10 +758,14 @@ del corpus de noticias ni de un LLM; la interpretación LLM es una capa posterio
 `label_available_at`, dataset/export PIT y regla de rechazo quedaron preregistrados antes de mirar
 resultados. `PREDICTIVE-HISTORICAL-DATA`/#393 (`ADVANCES`) añade un archivo histórico oficial
 acotado y un dataset reconstruido con supuesto explícito de disponibilidad, sin entrenar ni abrir el
-workspace operativo; el gate de PIT observado no cambia. La autoridad técnica y operativa es
-[`predictive_foundation.md`](predictive_foundation.md). No se elige aquí un booster, una dependencia
-ML ni un proveedor LLM; la ejecución real PIT no alcanzó muestra elegible y no se entrena ni se
-promueve un predictor.
+workspace operativo; el gate de PIT observado no cambia. `ML-BASELINE-VALIDATION`/#395 (`ADVANCES`)
+ejecutó el protocolo preregistrado con tres folds walk-forward, bootstrap pareado y holdout cerrado:
+ningún candidato alcanzó el 5 % de mejora de Brier frente a ambas referencias (`no_demonstrated_edge`)
+y el holdout no se consultó. La muestra quedó evaluada, no promovida: un resultado negativo no es una
+señal, no cambia V1-U4 y no autoriza tuning ni nuevos activos. La autoridad técnica y operativa es
+[`predictive_foundation.md`](predictive_foundation.md). No se elige aquí un booster adicional, una
+dependencia ML operativa ni un proveedor LLM; la ejecución PIT observada sigue sin muestra elegible y
+no se promueve un predictor.
 
 ## Fase 14 — Operación 24/7 y release
 
