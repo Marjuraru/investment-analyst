@@ -1,7 +1,7 @@
 # Cobertura de universo
 
 `scripts/query_universe_coverage.py` expone una matriz local, read-only y point-in-time del
-catálogo completo: 37 identidades configuradas. Requiere un workspace explícito y nunca inicializa,
+catálogo completo: 40 identidades configuradas. Requiere un workspace explícito y nunca inicializa,
 refresca, modifica archivos, escribe almacenamiento ni contacta proveedores.
 
 La respuesta `universe-coverage-v1` identifica el `catalog_version` y un SHA-256 del documento
@@ -22,6 +22,13 @@ SIP consolidado. Las altcoins usan únicamente velas diarias Coinbase y el volum
 límite de inicio 2025-01-01 es una restricción conservadora de solicitud, no la primera cotización.
 Las acciones sin base documental de unidades de acción quedan `not_evaluable` en valoración con
 `share_basis_unavailable`; no se heredan ratios a ETF o cripto.
+
+Las tres altas de `US-EQUITY-ONBOARDING-3` (`MOG.A`, `GOOGL` y `NKE`) declaran mercado IEX/all, SEC
+US-GAAP anual y trimestral, valoración con base `reported_common_share` factor `1` y correspondencia
+CUSIP explícita. Moog y Nike no publican `us-gaap:CommonStockSharesOutstanding`; Alphabet sí. Las
+tres publican acciones diluidas ponderadas, EPS diluido y patrimonio. La matriz debe exponer esas
+carencias concretas como evidencia ausente o métrica `not_evaluable` según corresponda, nunca como
+cero, y no promete la misma disponibilidad entre las tres.
 
 La frecuencia fundamental es una dimensión declarada por el perfil SEC del emisor, no una elección
 libre del consumidor. `annual` está disponible para los perfiles US-GAAP e IFRS; `quarterly` sólo
@@ -52,7 +59,7 @@ completo, igual que el script. El corte `known_at`, el rango público inclusivo 
 completamente transcurrido para `market_end` se conservan sin reinterpretarse en HTTP. La respuesta
 se cachea en memoria bajo la misma cota compartida `_MAX_READ_CACHE_ENTRIES` que el resto de lecturas
 locales, y esa caché se vacía por completo tras cualquier ejecución operativa completada; una matriz
-abarca las 37 identidades, así que no existe invalidación parcial por activo. El endpoint no alcanza
+abarca las 40 identidades, así que no existe invalidación parcial por activo. El endpoint no alcanza
 ningún camino de escritura: no normaliza, materializa, calcula ni reconcilia evidencia.
 
 El smoke de entrega es deliberadamente distinto de la consulta: crea sólo un workspace scratch nuevo,

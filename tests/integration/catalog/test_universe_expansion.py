@@ -20,5 +20,5 @@ def test_catalog_contains_exact_new_assets_with_expected_daily_routes() -> None:
         "crypto:link-usd",
     }
     assert added <= {asset.asset_id for asset in catalog.list_assets()}
-    assert len(catalog.list_assets()) == 37
-    assert len(catalog.list_assets(capability="market.daily_bars")) == 31
+    assert len(catalog.list_assets()) == 40
+    assert len(catalog.list_assets(capability="market.daily_bars")) == 34

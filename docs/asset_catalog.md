@@ -20,6 +20,22 @@ GBTC, GLD e IBIT. También contiene seis identidades de cotización BVL verifica
 observaciones de mercado, parámetros de algoritmos, recomendaciones ni valores que cambien con el
 tiempo.
 
+La ampliación de `US-EQUITY-ONBOARDING-3` incorpora tres identidades corporativas adicionales:
+Moog clase A (`equity:us:mog.a`, NYSE, CIK `0000067887`, CUSIP `615394202`), Alphabet clase A
+(`equity:us:googl`, NASDAQ, CIK `0001652044`, CUSIP `02079K305`) y Nike clase B (`equity:us:nke`,
+NYSE, CIK `0000320187`, CUSIP `654106103`). Las tres declaran Alpaca IEX/all, SEC Submissions y
+Company Facts con taxonomía `us-gaap`, `provider_symbols.alpaca_iex`/`sec_cik`, base
+`reported_common_share` factor `1` y aliases explícitos de nombre, clase y símbolo. `MOG.A`
+conserva el punto en el símbolo Alpaca y declara `MOG-A` exclusivamente en su binding SEC; no se
+normalizan puntos y guiones globalmente. `GOOG` y `MOG.B` no existen como aliases: `GOOGL` y
+`MOG.A` son clases explícitas y no absorben otras clases. Procedencia:
+[Moog](https://www.moog.com/investors.html),
+[Alphabet 13G](https://abc.xyz/assets/73/ca/1218cac50a71c5f3a6bb492e720c/8c99a92641121e8400d9439aab9f849e.pdf),
+[Moog A en SEC](https://www.sec.gov/Archives/edgar/data/1666231/000117266126002236/xslForm13F_X02/infotable.xml)
+y [Nike B en SEC](https://www.sec.gov/Archives/edgar/data/2029917/000117266126002100/xslForm13F_X02/infotable.xml).
+El catálogo pasa a 40 activos, 29 equities, 34 rutas daily y 21 bases de unidad declaradas; las 37
+entradas previas conservan sus valores e identidades.
+
 ## Modelo
 
 `CatalogAsset` amplía el contrato `Asset` del núcleo con alias y vinculaciones de proveedor
@@ -46,9 +62,9 @@ ordenada por `(valid_from, available_at, revision)` de revisiones estrictas
 `available_at` UTC, CIK, accession, `source_url`, `source_sha256` y un `revision` determinista que
 es el SHA-256 canónico de los campos semánticos.
 
-Las dos representaciones no coexisten en un mismo activo. Las dieciocho acciones ordinarias legacy
-conservan su cuarteto y su camino; `equity:us:tsm` y `equity:us:bvn` usan revisiones con factor
-`0.2` y `1`. El servicio calcula una vez por catálogo un `semantic_digest` que incluye las
+Las dos representaciones no coexisten en un mismo activo. Las veintiuna acciones ordinarias con base
+estática conservan su cuarteto y su camino; `equity:us:tsm` y `equity:us:bvn` usan revisiones con
+factor `0.2` y `1`. El servicio calcula una vez por catálogo un `semantic_digest` que incluye las
 revisiones; las firmas de lectura lo ligan a `code_version`, de modo que una caché no puede
 reutilizar resultados de otra declaración del catálogo. El catálogo no aloja credenciales ni datos
 de mercado, sólo referencias oficiales y hashes de bytes.
@@ -77,7 +93,9 @@ corresponder a varias clases o cotizaciones. Los identificadores de cotización 
 una resolución inversa no única falla explícitamente en vez de elegir un activo.
 
 `equity:us:aapl` declara `sec/cusip = 037833100` para validar declaraciones de correspondencia;
-esa declaración no altera ni reescribe las posiciones 13F persistidas.
+esa declaración no altera ni reescribe las posiciones 13F persistidas. `equity:us:mog.a`,
+`equity:us:googl` y `equity:us:nke` declaran `615394202`, `02079K305` y `654106103` con el mismo
+contrato de correspondencia explícita.
 `equity:pe:bvl:bvn` y `equity:pe:bvl:scco` son distintos de `equity:us:bvn` y
 `equity:us:scco`; la resolución exacta por proveedor y namespace no es ambigua. Los aliases
 humanos de las cotizaciones peruanas incluyen el mercado para no cambiar el significado histórico
@@ -118,6 +136,12 @@ El perfil IFRS anual habilita Barrick (`B`, CIK `0000756894`), BVN ADR (CIK `000
 `fundamental_frequencies=["annual"]`, y el backend rechaza una frecuencia trimestral antes de leer
 o escribir. Las identidades BVL continúan separadas: sus fundamentales SMV necesitan otro adaptador
 de documentos, moneda y disponibilidad y no se envían al conector SEC.
+
+Moog, Alphabet y Nike son emisores US-GAAP con frecuencias anual y trimestral. El probe previo a la
+adopción observó que Moog y Nike no exponen `us-gaap:CommonStockSharesOutstanding` y Alphabet sí,
+mientras las tres publican acciones diluidas ponderadas, EPS diluido y patrimonio. Estas ausencias
+se documentan y no se sustituyen por conceptos de otra clase, dimensión o emisor; la misma capacidad
+no implica la misma disponibilidad de fuente.
 
 ## Consultas
 

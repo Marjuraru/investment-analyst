@@ -115,7 +115,7 @@ def test_sec_13f_dataset_pipeline_idempotence_pit_and_invariants() -> None:
             location=location,
         )
         assert result1.created is True
-        assert result1.coverage_complete is True
+        assert result1.coverage_complete is False
         assert result1.candidate_manager_count == 3
         assert result1.selected_manager_count == 3
         assert result1.available_at == result1.retrieved_at
@@ -179,4 +179,10 @@ def test_sec_13f_dataset_pipeline_idempotence_pit_and_invariants() -> None:
             location=location,
         )
         assert query_res.snapshot.snapshot_id == result1.snapshot_id
+        assert query_res.snapshot.covered_cusips == ("037833100",)
+        assert set(query_res.snapshot.missing_cusips) == {
+            "615394202",
+            "02079K305",
+            "654106103",
+        }
         assert len(query_res.filtered_candidates) == 3

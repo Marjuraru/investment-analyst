@@ -65,7 +65,7 @@ def test_default_query_keeps_bvl_identities_when_market_is_not_configured(tmp_pa
         request,
     )
 
-    assert len(result.assets) == 37
+    assert len(result.assets) == 40
     bvl = next(item for item in result.assets if item.asset_id == "equity:pe:bvl:bvn")
     assert bvl.market.capability is CoverageCapability.NOT_CONFIGURED
     assert bvl.bvl_registry.capability is CoverageCapability.SUPPORTED
@@ -411,5 +411,5 @@ def test_v2_coverage_reuses_at_most_four_read_only_connections(
         ),
     )
 
-    assert len(result.assets) == 37
+    assert len(result.assets) == 40
     assert len(opens) <= 4

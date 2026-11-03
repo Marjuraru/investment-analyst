@@ -96,6 +96,9 @@ def test_resolve_catalog_sec_cusip_mappings() -> None:
     # Apple AAPL is in the catalog
     assert "037833100" in mappings
     assert mappings["037833100"] == "equity:us:aapl"
+    assert mappings["615394202"] == "equity:us:mog.a"
+    assert mappings["02079K305"] == "equity:us:googl"
+    assert mappings["654106103"] == "equity:us:nke"
 
 
 def test_application_refresh_and_query_lifecycle() -> None:
@@ -124,9 +127,9 @@ def test_application_refresh_and_query_lifecycle() -> None:
         assert result.candidate_manager_count == 3
         assert result.selected_manager_count == 3
         assert result.matched_asset_count == 1
-        assert result.eligible_asset_count >= 1
+        assert result.eligible_asset_count == 4
         assert result.unselected_manager_count == 0
-        assert result.coverage_complete is True
+        assert result.coverage_complete is False
 
         # 2. Rerun is idempotent
         rerun_result = app.refresh(
@@ -137,7 +140,7 @@ def test_application_refresh_and_query_lifecycle() -> None:
         assert rerun_result.created is False
         assert rerun_result.revision_id == result.revision_id
         assert rerun_result.snapshot_id == result.snapshot_id
-        assert rerun_result.coverage_complete is True
+        assert rerun_result.coverage_complete is False
 
         # 3. Read-only query
         query_result = app.query(
@@ -148,6 +151,12 @@ def test_application_refresh_and_query_lifecycle() -> None:
             location=location,
         )
         assert query_result.snapshot.snapshot_id == result.snapshot_id
+        assert query_result.snapshot.covered_cusips == ("037833100",)
+        assert set(query_result.snapshot.missing_cusips) == {
+            "02079K305",
+            "615394202",
+            "654106103",
+        }
         assert len(query_result.filtered_candidates) == 3
 
         # 4. Filter by CIK

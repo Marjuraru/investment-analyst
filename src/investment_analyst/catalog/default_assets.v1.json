@@ -1015,6 +1015,76 @@
     },
     {
       "aliases": [
+        "GOOGL",
+        "Alphabet",
+        "Alphabet Inc.",
+        "Alphabet Inc. Class A"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:googl",
+      "exchange": "NASDAQ",
+      "is_active": true,
+      "name": "Alphabet Inc. Class A",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "GOOGL",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0001652044",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "02079K305",
+          "namespace": "cusip",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "GOOGL",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "GOOGL",
+        "sec_cik": "0001652044"
+      },
+      "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
+      "symbol": "GOOGL"
+    },
+    {
+      "aliases": [
         "HYMC",
         "Hycroft Mining"
       ],
@@ -1189,6 +1259,76 @@
       "security_unit_factor": "1",
       "security_unit_market_adjustment": "all",
       "symbol": "JNJ"
+    },
+    {
+      "aliases": [
+        "MOG.A",
+        "Moog",
+        "Moog Inc.",
+        "Moog Inc. Class A"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:mog.a",
+      "exchange": "NYSE",
+      "is_active": true,
+      "name": "Moog Inc. Class A",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "MOG.A",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0000067887",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "615394202",
+          "namespace": "cusip",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "MOG-A",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "MOG.A",
+        "sec_cik": "0000067887"
+      },
+      "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
+      "symbol": "MOG.A"
     },
     {
       "aliases": [
@@ -1487,6 +1627,76 @@
       "security_unit_factor": "1",
       "security_unit_market_adjustment": "all",
       "symbol": "NEM"
+    },
+    {
+      "aliases": [
+        "NKE",
+        "Nike",
+        "NIKE, Inc.",
+        "NIKE, Inc. Class B"
+      ],
+      "asset_class": "equity",
+      "asset_id": "equity:us:nke",
+      "exchange": "NYSE",
+      "is_active": true,
+      "name": "NIKE, Inc. Class B",
+      "provider_bindings": [
+        {
+          "capabilities": [
+            "market.daily_bars"
+          ],
+          "identifier": "NKE",
+          "namespace": "symbol",
+          "provider": "alpaca"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "0000320187",
+          "namespace": "cik",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "654106103",
+          "namespace": "cusip",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "us-gaap",
+          "is_unique": false,
+          "namespace": "taxonomy",
+          "provider": "sec"
+        },
+        {
+          "capabilities": [
+            "fundamentals.company_facts",
+            "fundamentals.submissions"
+          ],
+          "identifier": "NKE",
+          "namespace": "ticker",
+          "provider": "sec"
+        }
+      ],
+      "provider_symbols": {
+        "alpaca_iex": "NKE",
+        "sec_cik": "0000320187"
+      },
+      "quote_currency": "USD",
+      "security_unit_basis": "reported_common_share",
+      "security_unit_basis_version": "security-unit-basis-v1",
+      "security_unit_factor": "1",
+      "security_unit_market_adjustment": "all",
+      "symbol": "NKE"
     },
     {
       "aliases": [

@@ -98,6 +98,16 @@ termina y se conserva, pero no se programa otra vez. Reactivar el activo reconst
 Con scheduler habilitado debe quedar al menos un activo disponible programado. Con
 `--no-scheduler`, una selección vacía es válida y queda lista para una decisión posterior.
 
+## Coste operativo de una adopción corporativa
+
+Un activo corporativo con fundamentales y actividad declarada produce cuatro jobs sobre la cadencia
+vigente: mercado diario, fundamentales, documentos primarios y actividad declarada. Las tres altas de
+`US-EQUITY-ONBOARDING-3` añaden doce jobs y reutilizan los dos jobs institucionales compartidos, que
+no se duplican ni crean procesos nuevos. La adopción post-merge actualiza sólo las tres entradas
+nuevas mediante lectura, fusión y actualización optimista; conserva las demás entradas, favoritos,
+canales y revisión vigente. Un activo habilitado no implica que su siguiente ciclo ya se haya
+ejecutado.
+
 ## Interfaz, backup y seguridad
 
 El panel «Watchlist y automatización» usa controles nativos de formulario, etiquetas accesibles,

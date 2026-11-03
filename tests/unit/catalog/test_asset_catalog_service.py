@@ -43,14 +43,17 @@ _DEFAULT_ASSET_IDS = [
     "equity:us:cat",
     "equity:us:cde",
     "equity:us:cvx",
+    "equity:us:googl",
     "equity:us:hymc",
     "equity:us:intc",
     "equity:us:jnj",
+    "equity:us:mog.a",
     "equity:us:msft",
     "equity:us:mstr",
     "equity:us:mu",
     "equity:us:mux",
     "equity:us:nem",
+    "equity:us:nke",
     "equity:us:nvda",
     "equity:us:pltr",
     "equity:us:scco",
@@ -383,7 +386,7 @@ def test_default_catalog_security_unit_basis_for_equities() -> None:
         for asset in service.list_assets(asset_type=AssetClass.EQUITY)
         if asset.security_unit_basis is not None
     ]
-    assert len(with_basis) == 18
+    assert len(with_basis) == 21
     for asset_id in with_basis:
         asset = service.get(asset_id)
         assert asset.security_unit_basis == "reported_common_share"
