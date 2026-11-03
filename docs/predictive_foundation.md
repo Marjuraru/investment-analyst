@@ -761,6 +761,124 @@ se entrena, no se evalúa el holdout y no se promueve un predictor.
   aporte incremental del funding frente a referencias y control técnico sobre exactamente las mismas
   fechas, sin tuning ni promoción automática.
 
+## Validación incremental de funding (#405)
+
+`ML-FUNDING-VALIDATION` ejecuta el experimento que #403 habilitó, sin reabrir #395 y sin abrir el
+holdout. La hipótesis única es que las sumas causales `funding_sum_1h_24h` y `funding_sum_1h_168h`
+aportan información incremental para `P(return_5d > 0)` de BTC spot frente al mismo control técnico
+de tres features, sobre exactamente las mismas decisiones. Es investigación retrospectiva
+reconstruida (`strict_pit_verified=false`); no es señal, recomendación, rentabilidad ni promoción.
+
+### Frontera y contratos
+
+Los contratos aislados son `ml-funding-protocol-v1`, `ml-funding-evaluation-v1` y
+`ml-funding-manifest-v1`, con `protocol_id=crypto-historical-5d-funding-increment-v1`. Se reutilizan
+el lector de funding, `development_fold_boundaries` y `MlLogisticParameters`; el adaptador ML declara
+un ancho `Literal[3,5]` con default 3 aplicado sólo a logística, y el histograma conserva y exige 3.
+No se adapta el report/service/UI v1 ni se afirma que entienden este artefacto. No hay dependencias
+nuevas ni un framework genérico de evaluaciones.
+
+`run_id = uuid5(namespace ml-funding-validation-v1, protocol_sha256, dataset_id,
+dataset_content_sha256, bundle_id, bundle_content_sha256, code_material_sha256, environment)`. El
+hash de código cubre, en orden literal, `ml_funding_models.py`, `ml_funding_evaluation.py`,
+`ml_funding_export.py`, `ml_adapter.py`, `ml_models.py`, `funding_export.py`, `funding_models.py`,
+`historical_export.py` y `historical_models.py`; no incluye paths absolutos ni reloj.
+
+### Protocolo congelado
+
+La entrada exclusiva es el dataset `d927c7f1…` (contenido `16b89545…`) y el bundle `fca740b8…`
+(contenido `2c626662…`). Una sola máscara `eligibility_joint` se aplica a ambos brazos, en train y en
+evaluación; no hay imputación, cambio de período, selección de régimen ni reetiquetado.
+`technical_logistic` usa las tres features técnicas; `funding_logistic` usa las mismas tres en el
+mismo orden más las dos sumas de funding. Un único algoritmo: `StandardScaler` ajustado sólo en train
+y `LogisticRegression` con los parámetros vigentes (C=1, l1_ratio=0, lbfgs, intercepto, max_iter=1000,
+tol=1e-8, sin class_weight, semilla 1729, penalty omitido). Las referencias simples son
+`half_probability` y el prior positivo del mismo train elegible de cada fold.
+
+Tres folds expansivos se calculan con `development_fold_boundaries(2186)` antes de filtrar:
+`[1093,1311)`, `[1311,1529)` y `[1529,1748)`; se preservan el purge original y el embargo
+`exit_bar_end < inicio_validación - 5d`. Los pisos son train ≥300, cada clase ≥20, evaluación ≥100 y
+cada segmento diario contiguo ≥20. El protocolo sella los conteos esperados antes del primer fit; un
+piso, convergencia o contrato fallido se registra como no evaluable/error, nunca como evidencia
+negativa estadística ni éxito. El máximo es 6 fits de desarrollo (2 brazos × 3 folds), con cero
+refits y cero fits de holdout, y BLAS/OpenMP fijados a 1 hilo.
+
+El Brier medio decide; log-loss con clip 1e-15 y calibración de 10 bins son descriptivos y no cambian
+el ganador. `delta = loss_referencia - loss_funding`; positivo significa mejora. La incertidumbre es un
+bootstrap pareado de bloques móviles de 20 decisiones, 2000 réplicas, PCG64(1729), dentro de los
+segmentos diarios contiguos de cada fold, sin cruzar huecos ni folds, con los mismos draws para todos
+los scorers y truncamiento del último bloque. Los límites inferiores unilaterales usan quantile 0,0125
+en las tres comparaciones.
+
+`incremental_evidence_observed` exige mejora relativa de Brier ≥5 % frente a AMBAS referencias
+simples, delta de Brier frente al control técnico > 0 y los TRES límites inferiores > 0. En cualquier
+otro caso la decisión es `no_demonstrated_increment`. Es evidencia de desarrollo del experimento
+declarado, no significancia global ni licencia para abrir el holdout, que permanece cerrado con
+`not_evaluated`, 0 accesos y 0 fits.
+
+### Comandos exactos
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/evaluate_ml_funding.py evaluate \
+  --dataset-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-historical-data/datasets/d927c7f1-794a-571c-b729-6bb68d311115 \
+  --funding-bundle-dir /home/marjuraru/.local/share/investment-analyst/research/funding-boundary-coverage/bundle/fca740b8-8f38-5703-8006-e6a467bfb3ba \
+  --output-dir /home/marjuraru/.local/share/investment-analyst/research/ml-funding-validation \
+  --json
+
+PYTHONPATH=src .venv/bin/python scripts/evaluate_ml_funding.py read \
+  --artifact-dir /home/marjuraru/.local/share/investment-analyst/research/ml-funding-validation/8dbc6330-1ff2-51bc-b701-a65611afa495 \
+  --json
+```
+
+No existen flags de parámetros, modelo ni holdout. `read` y `--help` funcionan sin `sklearn`,
+`numpy`, `scipy` ni `threadpoolctl`. El destino debe ser absoluto, fuera del repositorio, workspace,
+runtime y ops, sin symlinks ni destinos ajenos ocupados.
+
+### Resultado real (2026-11-03)
+
+El run `8dbc6330-1ff2-51bc-b701-a65611afa495` (protocolo `653d026d…`, reporte `8154507e…`,
+manifiesto `7540484f…`) terminó `completed` con decisión `no_demonstrated_increment`. Se ejecutaron
+6 fits de desarrollo y se sellaron 2.532 predicciones OOS (633 decisiones × 4 scorers) en 56.159 B
+(protocolo 3.917 B, predicciones 25.242 B, reporte 25.134 B, manifiesto 1.866 B). La ejecución tardó
+4,01 s de pared (lectura 1,865 s, fits 0,151 s, evaluación 0,118 s) con RSS pico 228.745.216 B. No se
+abrió el workspace ni se contactó ningún proveedor.
+
+| Scorer | Brier pooled | Log-loss pooled |
+| --- | --- | --- |
+| `technical_logistic` | 0,24940344102885015 | 0,6919493484712885 |
+| `funding_logistic` | 0,25094407714874845 | 0,6949937569660629 |
+| `half_probability` | 0,25 | 0,6931471805599453 |
+| `training_class_prior` | 0,24853491584603996 | 0,6902173542074427 |
+
+Las tres comparaciones son negativas y ningún criterio se satisface: frente al control técnico el
+delta de Brier es `-0,0015406361198983` (relativo `-0,006177284938583043`, límite inferior
+`-0,004162300338326084`); frente a `p=0.5`, `-0,00094407714874845` (relativo
+`-0,0037763085949938`, límite inferior `-0,011044765473245052`); y frente al prior,
+`-0,00240916130270849` (relativo `-0,009693452103127814`, límite inferior
+`-0,0070160962765873835`). El brazo de funding tampoco gana en ningún fold individual: sus Brier son
+0,2541754343637745, 0,24079893111137493 y 0,25836114874796506 frente a 0,25166587200749874,
+0,2403083784710963 y 0,25668421230293714 del control técnico.
+
+La contabilidad de folds reproduce el protocolo: 1.075/1.293/1.500 filas de train y 207/218/208
+decisiones de evaluación, un segmento diario contiguo por fold. Se excluyeron 7 filas de train por
+funding incompleto en cada fold, 11 por embargo en los folds 1 y 3, y 11 por purge previo en los
+folds 2 y 3. Una segunda ejecución idéntica, con `fit_and_predict` prohibido, reutilizó el mismo run
+sin fits, sin red y sin reescribir los cuatro archivos; el dataset y el bundle conservaron sus
+hashes (`eaf3d5f8…` y `c8369212…`). El lector funcionó con las dependencias ML bloqueadas por
+`sys.meta_path`.
+
+### Limitaciones y siguiente decisión
+
+- La disponibilidad reconstruida es un supuesto; el resultado no satisface el gate de PIT observado.
+- Ambos brazos usan el train reducido por la misma máscara conjunta; las métricas de #395 no son un
+  control válido para esta comparación. El delta correcto es el reportado aquí.
+- Los labels se solapan cinco intervalos y el bootstrap de bloques sólo modela dependencia local.
+- No se calculan PnL, costes ni rentabilidad porque no se define una estrategia ni ejecución.
+- El holdout no se abrió y este bloque no lo autoriza. El siguiente PLAN valora el resultado: si es
+  negativo, detiene esta hipótesis sin tuning y decide si existe otra justificación investigativa; no
+  hay entrenamiento automático posterior ni promoción de predictor. Un resultado longitudinal no
+  demuestra por sí mismo una ventaja operativa ni cambia V1-U4.
+
 ## Presupuesto y retención
 
 La raíz real `~/.local/share/investment-analyst/research/predictive-foundation` tiene cap de 16 MiB;
@@ -775,6 +893,12 @@ cap total de 32 MiB: archivo fuente ≤4 MiB, dataset+manifest ≤16 MiB, recibo
 único archivo y un único dataset sellados hasta una decisión explícita posterior a su consumidor ML;
 no se crea un artefacto por ensayo ni se borra automáticamente. Los temporales propios incompletos se
 retiran. La receta de reconciliación sigue siendo la única de `docs/development_protocol.md`.
+
+La raíz `~/.local/share/investment-analyst/research/ml-funding-validation` conserva el run final de
+56.159 B: protocolo, predicciones, reporte y manifiesto, con cap de 16 MiB por raíz y 8 MiB por
+archivo. Los runs de candidatos anteriores permanecen sin reescribir y la raíz completa mide
+168.622 B. No hay pesos, pickles ni copias de inputs. El artefacto se conserva hasta una decisión
+explícita de descarte y ausencia de consumidor; los resultados negativos no se borran.
 
 ## Limitaciones y siguiente decisión
 

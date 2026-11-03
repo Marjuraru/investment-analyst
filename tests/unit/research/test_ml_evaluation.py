@@ -643,3 +643,60 @@ def test_adapter_rejects_invalid_training_inputs_before_fitting() -> None:
             evaluation_features=[(0.1, 0.2, 0.3)],
             **options,
         )
+
+
+def test_adapter_declares_the_five_feature_logistic_width_and_keeps_histogram_at_three() -> None:
+    from investment_analyst.research.ml_adapter import MlAdapterError, fit_and_predict
+    from investment_analyst.research.ml_models import (
+        MlHistogramParameters,
+        MlLogisticParameters,
+    )
+
+    options = dict(logistic=MlLogisticParameters(), histogram=MlHistogramParameters())
+    features = [
+        (
+            0.01 * (index % 5),
+            0.4 + 0.01 * (index % 3),
+            0.1,
+            0.000001 * (index % 4),
+            0.000008 * (index % 2),
+        )
+        for index in range(60)
+    ]
+    labels = [index % 2 for index in range(60)]
+    outcome = fit_and_predict(
+        model=MlModelFamily.LOGISTIC_REGRESSION,
+        train_features=features,
+        train_labels=labels,
+        evaluation_features=features[:4],
+        feature_width=5,
+        **options,
+    )
+    assert len(outcome.probabilities) == 4
+    assert all(0.0 <= probability <= 1.0 for probability in outcome.probabilities)
+    three = fit_and_predict(
+        model=MlModelFamily.LOGISTIC_REGRESSION,
+        train_features=[row[:3] for row in features],
+        train_labels=labels,
+        evaluation_features=[row[:3] for row in features[:4]],
+        **options,
+    )
+    assert len(three.probabilities) == 4
+    with pytest.raises(MlAdapterError, match="three-feature"):
+        fit_and_predict(
+            model=MlModelFamily.HIST_GRADIENT_BOOSTING,
+            train_features=features,
+            train_labels=labels,
+            evaluation_features=features[:4],
+            feature_width=5,
+            **options,
+        )
+    with pytest.raises(MlAdapterError):
+        fit_and_predict(
+            model=MlModelFamily.LOGISTIC_REGRESSION,
+            train_features=[row[:3] for row in features],
+            train_labels=labels,
+            evaluation_features=[row[:3] for row in features[:4]],
+            feature_width=5,
+            **options,
+        )
