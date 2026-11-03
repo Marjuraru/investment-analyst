@@ -338,3 +338,31 @@ def test_no_unrelated_assertion_in_the_two_route_pinning_test_files_is_removed_w
         text = (ROOT / path).read_text(encoding="utf-8")
         count = sum(1 for line in text.splitlines() if line.strip().startswith("assert "))
         assert count >= base_count, path
+
+
+def test_route_records_the_negative_funding_increment_without_promotion_or_holdout() -> None:
+    release_plan = (ROOT / "docs/basic_functional_release_plan.md").read_text(encoding="utf-8")
+    roadmap = (ROOT / "docs/product_roadmap.md").read_text(encoding="utf-8")
+    predictive = (ROOT / "docs/predictive_foundation.md").read_text(encoding="utf-8")
+    strategy = (ROOT / "docs/research_information_strategy.md").read_text(encoding="utf-8")
+
+    for text in (release_plan, roadmap, predictive, strategy):
+        assert "ML-FUNDING-VALIDATION" in text
+        assert "no_demonstrated_increment" in text
+    assert "633" in release_plan and "633" in roadmap
+    assert "0,250944" in predictive and "0,249403" in predictive
+    assert "0,250944" in release_plan and "0,249403" in release_plan
+    assert "0,250944" in roadmap and "0,249403" in roadmap
+    assert "0,250944" in strategy and "0,249403" in strategy
+    assert "syncroniza" not in predictive
+    assert "crypto-historical-5d-funding-increment-v1" in predictive
+    assert "ml-funding-protocol-v1" in predictive
+    assert "ml-funding-evaluation-v1" in predictive
+    assert "ml-funding-manifest-v1" in predictive
+    assert "0 accesos" in predictive and "0 accesos" in strategy
+    assert "exploración" not in predictive
+    items = _route_items(release_plan)
+    _validate(items)
+    assert _route_status(items, "PREDICTIVE-RESEARCH") == "NEXT"
+    assert _route_status(items, "FUNDAMENTALS-COVERAGE") == "PLANNED"
+    assert "route_transition:PREDICTIVE-RESEARCH:ADVANCES" in release_plan

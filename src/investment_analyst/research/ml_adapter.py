@@ -10,7 +10,7 @@ import platform
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     import numpy as np
@@ -112,14 +112,17 @@ def _logistic(
     train_labels: Sequence[int],
     evaluation_features: Sequence[Sequence[float]],
     parameters: MlLogisticParameters,
+    feature_width: Literal[3, 5],
 ) -> MlFitOutcome:
     from sklearn.exceptions import ConvergenceWarning
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler
 
-    train = _matrix(train_features, expected_width=3, label="training features")
-    evaluation = _matrix(evaluation_features, expected_width=3, label="evaluation features")
+    train = _matrix(train_features, expected_width=feature_width, label="training features")
+    evaluation = _matrix(
+        evaluation_features, expected_width=feature_width, label="evaluation features"
+    )
     labels = _labels(train_labels, expected_rows=train.shape[0])
     pipeline = Pipeline(
         steps=[
@@ -165,9 +168,12 @@ def _histogram(
     train_labels: Sequence[int],
     evaluation_features: Sequence[Sequence[float]],
     parameters: MlHistogramParameters,
+    feature_width: Literal[3, 5],
 ) -> MlFitOutcome:
     from sklearn.ensemble import HistGradientBoostingClassifier
 
+    if feature_width != 3:
+        raise MlAdapterError("histogram gradient boosting keeps the three-feature contract")
     train = _matrix(train_features, expected_width=3, label="training features")
     evaluation = _matrix(evaluation_features, expected_width=3, label="evaluation features")
     labels = _labels(train_labels, expected_rows=train.shape[0])
@@ -203,6 +209,7 @@ def fit_and_predict(
     evaluation_features: Sequence[Sequence[float]],
     logistic: MlLogisticParameters,
     histogram: MlHistogramParameters,
+    feature_width: Literal[3, 5] = 3,
 ) -> MlFitOutcome:
     """Fit one preregistered model with BLAS and OpenMP pinned to one thread."""
     _, _, _, threadpoolctl, _ = _require_dependencies()
@@ -220,6 +227,7 @@ def fit_and_predict(
             train_labels=train_labels,
             evaluation_features=evaluation_features,
             parameters=parameters,
+            feature_width=feature_width,
         )
 
 

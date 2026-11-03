@@ -1,6 +1,6 @@
 # Hoja de ruta estratégica del producto
 
-> Estado vigente 2026-11-02: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
+> Estado vigente 2026-11-03: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
 > `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` conservando su deuda y evidencia, sin declararse `DONE`.
 > La readiness operativa v2 se registra en
 > [`v2_operational_readiness.md`](v2_operational_readiness.md): avanza prerrequisitos de interfaz,
@@ -89,6 +89,15 @@ ausencias de #399, conserva las dos internas y publica la recepción `9d6c0972�
 puntos. El bundle `fca740b8…` pasa a `funding_data_ready` con 1.719/1.726 = 99,59 % de cobertura
 conjunta; no se entrena, no se evalúa el holdout y no se promueve un predictor.
 `PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`.
+
+`ML-FUNDING-VALIDATION`/#405 (`ADVANCES`) ejecutó el experimento preregistrado de aporte incremental:
+mismo modelo logístico con y sin las sumas causales de funding sobre las mismas 633 decisiones de
+desarrollo, tres folds walk-forward, 6 fits y holdout cerrado. El resultado es
+`no_demonstrated_increment`: el Brier del brazo de funding (0,250944…) no mejora al control técnico
+(0,249403…), a `p=0.5` (0,25) ni al prior de clase (0,248535…), y los tres límites inferiores son
+negativos. No se ajustan parámetros, no se prueba otro ticker ni otra ventana, no se abre el holdout y
+no se promueve un predictor; V1-U4 permanece `UNKNOWN`. `PREDICTIVE-RESEARCH` sigue siendo el único
+`NEXT` y el siguiente PLAN decide si esta hipótesis se detiene.
 
 La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de crecimiento viven en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md).
@@ -786,9 +795,15 @@ prepara una evidencia diferencial de funding Deribit sin reabrir el experimento 
 acotado de 52.536/52.608 puntos, dos sumas causales de `interest_1h` y un complemento de 2.186 filas
 que referencia el dataset reconstruido por identidad. La admisión es
 `insufficient_funding_coverage` (1.334/1.726 = 77,29 %) y los pisos de train/validation/holdout se
-cumplen por separado; no se entrena, no se evalúa el holdout y no se promueve un predictor. No se
-elige aquí un booster adicional, una dependencia ML operativa ni un proveedor LLM; la ejecución PIT
-observada sigue sin muestra elegible y no se promueve un predictor.
+cumplen por separado; no se entrena, no se evalúa el holdout y no se promueve un predictor.
+`FUNDING-BOUNDARY-COVERAGE`/#403 corrigió la partición y alcanzó 52.606/52.608 puntos y
+`funding_data_ready` con 1.719/1.726 = 99,59 %. `ML-FUNDING-VALIDATION`/#405 ejecutó después el
+experimento congelado sobre 633 decisiones: el brazo de funding obtuvo Brier 0,250944… frente a
+0,249403… del control técnico, 0,25 de `p=0.5` y 0,248535… del prior, con los tres límites inferiores
+negativos, y la decisión es `no_demonstrated_increment`. El holdout permaneció cerrado, no se ajustó
+ningún parámetro y no se promueve un predictor. No se elige aquí un booster adicional, una dependencia
+ML operativa ni un proveedor LLM; la ejecución PIT observada sigue sin muestra elegible y no se
+promueve un predictor.
 
 ## Fase 14 — Operación 24/7 y release
 

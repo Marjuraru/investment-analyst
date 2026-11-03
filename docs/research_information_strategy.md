@@ -224,6 +224,29 @@ distinta —por ejemplo derivados o funding— sólo si la disponibilidad, la co
 demuestran antes de comprometer un entrenamiento. La interpretación LLM sigue siendo una capa
 posterior e independiente sobre resultados estructurados.
 
+## Resultado del aporte incremental de funding (2026-11-03)
+
+`ML-FUNDING-VALIDATION`/#405 ejecutó el experimento que #403 habilitó y #399 había dejado preparado.
+El protocolo se congeló antes del primer fit: mismo control técnico de tres features y el mismo modelo
+logístico con dos sumas causales de funding, sobre idénticas 633 decisiones de desarrollo, tres folds
+walk-forward, embargo y purge originales, 6 fits y criterio preregistrado (≥5 % de mejora relativa de
+Brier frente a ambas referencias simples, delta positivo frente al control técnico y tres límites
+inferiores positivos).
+
+El resultado real es `no_demonstrated_increment`. El Brier del brazo de funding (0,250944…) es peor
+que el del control técnico (0,249403…), que `p=0.5` (0,25) y que el prior de clase (0,248535…). Los
+tres deltas son negativos y ningún límite inferior es positivo; tampoco gana en ningún fold
+individual. El holdout no se abrió (0 accesos, 0 fits) y la segunda ejecución reutilizó el mismo run
+sin reentrenar.
+
+La lectura es directa: con este dataset, estas dos features de funding y este horizonte, no hay
+evidencia incremental de desarrollo frente al control técnico ni a las referencias ingenuas. No se
+ajustan parámetros, no se prueban otras ventanas de funding, otro ticker ni otro umbral para buscar un
+ganador. El resultado no es una señal, recomendación ni predictor promovido, y no autoriza abrir el
+holdout. El siguiente PLAN decide si esta hipótesis se detiene y si existe otra justificación
+investigativa; la interpretación LLM sigue siendo una capa posterior e independiente sobre resultados
+estructurados.
+
 ## Evidencia histórica de funding (2026-11-02)
 
 `PREDICTIVE-FUNDING-DATA`/#399 (`ADVANCES`) prepara la evidencia de una hipótesis diferencial: la
