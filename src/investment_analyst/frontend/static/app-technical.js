@@ -661,6 +661,8 @@ const ML_RUN_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
 const ML_SCORER_LABELS = Object.freeze({
   logistic_regression: "Regresión logística",
   hist_gradient_boosting: "Histogram gradient boosting",
+  technical_logistic: "Logística técnica (control)",
+  funding_logistic: "Logística con funding",
   half_probability: "p = 0.5",
   training_class_prior: "Prior de clase",
 });
@@ -965,7 +967,7 @@ function renderMlResearchReport(payload, { assetId, runId }) {
   renderMlResearchCalibration(payload);
   const limitations = byId("ml-research-limitations");
   limitations.replaceChildren();
-  for (const limitation of payload.protocol.limitations) {
+  for (const limitation of payload.protocol.limitations || []) {
     limitations.append(createElement("li", "", limitation));
   }
   limitations.append(createElement("li", "", payload.provenance.source_id_note));
@@ -1053,3 +1055,957 @@ function initializeMlResearchReport() {
 }
 
 initializeMlResearchReport();
+
+const EXPERIMENT_LIST_SCHEMA = "research-experiment-list-v1";
+const EXPERIMENT_VIEW_SCHEMA = "research-experiment-report-view-v1";
+const EXPERIMENT_PAGE_LIMIT = 20;
+const EXPERIMENT_SELECTION_LIMIT = 2;
+const EXPERIMENT_EXPORT_LIMIT_BYTES = 1024 * 1024;
+const EXPERIMENT_FAMILY_LABELS = Object.freeze({
+  baseline: "Baseline técnico",
+  funding: "Incremento de funding",
+});
+const EXPERIMENT_STATUS_LABELS = Object.freeze({
+  completed: "Completado",
+  insufficient_evaluation_sample: "Muestra insuficiente",
+  insufficient_sample: "Muestra insuficiente",
+  error: "Error de evaluación registrado",
+});
+const EXPERIMENT_WARNING_LABELS = Object.freeze({
+  incomplete_artifact: "Artefacto incompleto",
+  incompatible_artifact: "Artefacto incompatible",
+  unsupported_entry: "Entrada no reconocida",
+});
+const EXPERIMENT_COMPARISON_NOTE = Object.freeze({
+  mixed:
+    "No es una comparación pareada: el baseline no usa la máscara de funding y el"
+    + " estudio de funding entrena con las filas de funding disponibles. Sus métricas"
+    + " no se comparan entre estudios; la evidencia incremental válida está dentro del"
+    + " run de funding.",
+  same:
+    "Dos estudios de la misma familia pueden diferir en datos, código o ventana; sus"
+    + " métricas no se comparan como pares. Esta vista sólo describe condiciones y no"
+    + " calcula delta, significancia cruzada ni un «mejor estudio».",
+});
+let experimentsRequestSequence = 0;
+let experimentsAbortController = null;
+let experimentsComparisonSequence = 0;
+let experimentsComparisonAbortController = null;
+let experimentsNextCursor = null;
+let experimentsPageCount = 0;
+let experimentsItems = [];
+let experimentsSelected = new Map();
+let experimentsDetails = new Map();
+let experimentsActiveKey = null;
+let experimentsDownloadUrl = null;
+
+function experimentsKey(family, runId) {
+  return `${family}|${runId}`;
+}
+
+function experimentsFamily() {
+  return byId("experiments-family").value;
+}
+
+function experimentsStatus(text) {
+  byId("experiments-status").textContent = text;
+}
+
+function experimentsComparisonStatus(text) {
+  byId("experiments-comparison-status").textContent = text;
+}
+
+function experimentsText(value) {
+  return value === null || value === undefined || value === "" ? "—" : String(value);
+}
+
+function experimentsFigureOrAbsent(value) {
+  return value === null || value === undefined ? "—" : mlResearchFigure(value);
+}
+
+function experimentsDefinition(rows) {
+  return mlResearchTable(
+    ["Concepto", "Valor"],
+    rows.map((row) => [row[0], experimentsText(row[1])]),
+  );
+}
+
+function experimentsScoresTable(scores) {
+  const ordered = ["technical_logistic", "funding_logistic", "logistic_regression",
+    "hist_gradient_boosting", "half_probability", "training_class_prior"];
+  const byScorer = new Map((scores || []).map((item) => [item.scorer, item]));
+  const rows = ordered
+    .filter((scorer) => byScorer.has(scorer))
+    .map((scorer) => {
+      const item = byScorer.get(scorer);
+      return [
+        mlResearchScorerLabel(scorer),
+        experimentsFigureOrAbsent(item.brier),
+        experimentsFigureOrAbsent(item.log_loss),
+        formatInteger(item.rows),
+        `${formatInteger(item.positives)} / ${formatInteger(item.negatives)}`,
+      ];
+    });
+  return mlResearchTable(
+    ["Scorer", "Brier", "Log-loss", "Filas", "Pos / Neg"],
+    rows,
+  );
+}
+
+function experimentsFoldsTable(family, folds) {
+  const brierColumns = family === "funding"
+    ? [
+      ["technical_logistic", "Control técnico"],
+      ["funding_logistic", "Funding"],
+      ["half_probability", "p = 0.5"],
+      ["training_class_prior", "Prior"],
+    ]
+    : [
+      ["logistic_regression", "Logística"],
+      ["hist_gradient_boosting", "HGB"],
+      ["half_probability", "p = 0.5"],
+      ["training_class_prior", "Prior"],
+    ];
+  const headers = [
+    "Fold",
+    "Train",
+    "Eval",
+    "Pos / Neg",
+    "Purge",
+    "Embargo",
+    "Inelegibles",
+    "Funding no disp.",
+  ].concat(brierColumns.map((column) => column[1]));
+  const rows = (folds || []).slice(0, 3).map((fold) => {
+    const scores = new Map((fold.scores || []).map((item) => [item.scorer, item]));
+    const row = [
+      formatInteger(fold.fold),
+      formatInteger(fold.train_rows),
+      formatInteger(fold.evaluation_rows),
+      `${formatInteger(fold.evaluation_positives)} / ${formatInteger(fold.evaluation_negatives)}`,
+      formatInteger(fold.purged_excluded),
+      formatInteger(fold.embargo_excluded),
+      fold.ineligible_excluded === undefined ? "—" : formatInteger(fold.ineligible_excluded),
+      fold.funding_unavailable_excluded === undefined
+        ? "—"
+        : formatInteger(fold.funding_unavailable_excluded),
+    ];
+    for (const column of brierColumns) {
+      const item = scores.get(column[0]);
+      row.push(item ? mlResearchFigure(item.brier) : "—");
+    }
+    return row;
+  });
+  return mlResearchTable(headers, rows);
+}
+
+function experimentsComparisonsTable(comparisons) {
+  const rows = (comparisons || []).slice(0, 3).map((item) => [
+    mlResearchScorerLabel(item.model),
+    mlResearchScorerLabel(item.reference),
+    mlResearchPercent(item.relative_improvement),
+    experimentsFigureOrAbsent(item.lower_bound),
+    item.criterion_satisfied ? "Sí" : "No",
+  ]);
+  return mlResearchTable(
+    ["Modelo", "Referencia", "Mejora relativa", "Límite inferior", "¿Criterio?"],
+    rows,
+  );
+}
+
+function experimentsCalibrationTable(tables) {
+  const container = createElement("div", "experiments-calibration");
+  for (const table of (tables || []).slice(0, 2)) {
+    const rows = (table.bins || []).slice(0, 10).map((bin) => [
+      formatInteger(bin.index),
+      `${bin.lower_bound}–${bin.upper_bound}${bin.includes_upper ? " (incl.)" : ""}`,
+      formatInteger(bin.count),
+      bin.count === 0 ? "—" : experimentsFigureOrAbsent(bin.mean_probability),
+      bin.count === 0 ? "—" : experimentsFigureOrAbsent(bin.observed_frequency),
+    ]);
+    container.append(
+      createElement("p", "patterns-event-title", mlResearchScorerLabel(table.scorer)),
+      mlResearchTable(
+        ["Bin", "Rango", "Filas", "Probabilidad media", "Frecuencia observada"],
+        rows,
+      ),
+    );
+  }
+  return container;
+}
+
+function experimentsDecision(payload) {
+  if (payload.payload.family === "baseline") {
+    const report = payload.payload.report;
+    if (report.artifact.status === "insufficient_evaluation_sample") {
+      return { label: "Muestra insuficiente", tone: "warn" };
+    }
+    if (report.development?.decision === "no_demonstrated_edge") {
+      return { label: "No se demostró ventaja", tone: "neutral" };
+    }
+    if (report.development?.decision === "candidate_selected") {
+      return { label: "Candidato seleccionado en desarrollo; no promovido", tone: "warn" };
+    }
+    return { label: "Estado no reconocido", tone: "bad" };
+  }
+  const detail = payload.payload;
+  if (detail.decision === "no_demonstrated_increment") {
+    return { label: "No se demostró incremento", tone: "neutral" };
+  }
+  if (detail.decision === "incremental_evidence_observed") {
+    return { label: "Incremento observado en desarrollo; no promovido", tone: "warn" };
+  }
+  return { label: "Estado no reconocido", tone: "bad" };
+}
+
+function experimentsReading(payload) {
+  if (payload.payload.family === "funding") {
+    return "Evaluación retrospectiva de desarrollo con el holdout cerrado"
+      + ` (${payload.payload.holdout.accesses} accesos, ${payload.payload.holdout.fits} fits).`
+      + " Es evidencia del experimento declarado, no una señal utilizable ni una recomendación.";
+  }
+  return "Evaluación retrospectiva tal como quedó sellada; el holdout se representa por"
+    + " separado y no se infiere. No es una señal utilizable, una recomendación ni una promoción.";
+}
+
+function experimentsDetailRows(payload) {
+  const context = payload.context;
+  const rows = [
+    ["Familia y protocolo", `${EXPERIMENT_FAMILY_LABELS[context.family]} · ${context.family}`],
+    ["Activo de catálogo", context.asset_id],
+    ["Run", context.run_id],
+    ["Estado del artefacto", EXPERIMENT_STATUS_LABELS[context.family === "funding"
+      ? "completed"
+      : payload.payload.report.artifact.status] || "—"],
+    ["Creado", formatInstant(context.created_at)],
+    ["Artefacto", `${formatInteger(context.artifact_bytes)} B`],
+    ["Manifiesto SHA-256", context.manifest_sha256],
+    ["Protocolo SHA-256", context.protocol_sha256],
+    ["Reporte SHA-256", context.report_sha256],
+  ];
+  if (payload.payload.family === "baseline") {
+    const report = payload.payload.report;
+    const development = report.development;
+    rows.push(
+      ["Objetivo", report.protocol.hypothesis],
+      ["Ventana de decisión",
+        `${report.protocol.decision_start} a ${report.protocol.decision_end}`
+        + ` · ${formatInteger(report.protocol.decision_rows)} decisiones`],
+      ["Target", `${report.protocol.target.target_version}`
+        + ` · horizonte ${formatInteger(report.protocol.target.horizon_intervals)}`
+        + ` · ${report.protocol.target.positive_rule}`],
+      ["Features", report.protocol.feature_columns.join(", ")],
+      ["Dataset", `${report.provenance.dataset_id}`],
+      ["Dataset contenido", report.provenance.dataset_content_sha256],
+      ["Dataset manifiesto", report.provenance.dataset_manifest_sha256],
+      ["Filas del dataset", report.provenance.dataset_rows_sha256],
+      ["Disponibilidad", `${report.protocol.availability_basis}`
+        + ` · strict_pit_verified=${String(report.protocol.strict_pit_verified)}`],
+      ["Criterio", `mejora relativa ≥ ${mlResearchPercent(
+        report.protocol.criteria.min_relative_brier_improvement,
+      )} frente a ${report.protocol.criteria.references.map(mlResearchScorerLabel).join(" y ")}`],
+      ["Holdout", report.holdout ? String(report.holdout.status) : "no disponible"],
+      ["Filas OOS selladas", formatInteger(report.artifact.prediction_rows)],
+      ["Fits de desarrollo", development ? formatInteger(development.development_fits) : "—"],
+      ["Entorno", `Python ${report.artifact.environment.python_version}`
+        + ` · scikit-learn ${report.artifact.environment.scikit_learn_version}`
+        + ` · numpy ${report.artifact.environment.numpy_version}`],
+    );
+    return rows;
+  }
+  const detail = payload.payload;
+  rows.push(
+    ["Objetivo", detail.protocol.hypothesis],
+    ["Ventana de decisión",
+      `${detail.protocol.decision_start} a ${detail.protocol.decision_end}`
+      + ` · ${formatInteger(detail.decision_rows)} decisiones`],
+    ["Target", `${detail.protocol.target.target_version}`
+      + ` · horizonte ${formatInteger(detail.protocol.target.horizon_intervals)}`
+      + ` · ${detail.protocol.target.positive_rule}`],
+    ["Features técnicas", detail.protocol.technical_feature_columns.join(", ")],
+    ["Features de funding", detail.protocol.funding_feature_columns.join(", ")],
+    ["Dataset", `${detail.protocol.dataset_id}`],
+    ["Dataset contenido", detail.protocol.dataset_content_sha256],
+    ["Dataset manifiesto", detail.provenance.dataset_manifest_sha256],
+    ["Bundle", `${detail.protocol.bundle_id}`],
+    ["Bundle contenido", detail.protocol.bundle_content_sha256],
+    ["Bundle manifiesto", detail.provenance.bundle_manifest_sha256],
+    ["Código", detail.provenance.code_material_sha256],
+    ["Archivos de código", detail.provenance.code_material_files.join(", ")],
+    ["Disponibilidad", `${detail.protocol.availability_basis}`
+      + ` · strict_pit_verified=${String(detail.protocol.strict_pit_verified)}`],
+    ["Criterio", `mejora relativa ≥ ${mlResearchPercent(
+      detail.protocol.criteria.min_relative_brier_improvement,
+    )} y los tres límites inferiores > 0`],
+    ["Holdout", `${detail.holdout.status} · ${formatInteger(detail.holdout.accesses)} accesos`
+      + ` · ${formatInteger(detail.holdout.fits)} fits`],
+    ["Predicciones OOS", formatInteger(detail.prediction_rows)],
+    ["Fits de desarrollo", formatInteger(detail.development_fits)],
+    ["Entorno", `Python ${detail.environment.python_version}`
+      + ` · scikit-learn ${detail.environment.scikit_learn_version}`
+      + ` · numpy ${detail.environment.numpy_version}`],
+  );
+  return rows;
+}
+
+function experimentsLimitations(payload) {
+  if (payload.payload.family === "baseline") {
+    const report = payload.payload.report;
+    const declared = report.protocol.limitations || [];
+    return declared.slice().concat([report.provenance.source_id_note]);
+  }
+  const detail = payload.payload;
+  return detail.protocol.limitations.slice().concat([detail.provenance.source_id_note]);
+}
+
+function experimentsEvidence(payload) {
+  const container = createElement("div", "experiments-evidence");
+  if (payload.payload.family === "baseline") {
+    const development = payload.payload.report.development;
+    if (!development) {
+      container.append(renderAbsenceMark(
+        "not-evaluable",
+        "Sin evaluación de desarrollo",
+        payload.payload.report.insufficiency_reason || "El artefacto no contiene métricas",
+      ));
+      return container;
+    }
+    container.append(
+      createElement("p", "patterns-event-title", "Métricas pooled"),
+      experimentsScoresTable(development.pooled_scores),
+      createElement("p", "patterns-event-title", "Folds"),
+      experimentsFoldsTable("baseline", development.folds),
+      createElement("p", "patterns-event-title", "Calibración"),
+      experimentsCalibrationTable(development.calibration),
+    );
+    return container;
+  }
+  const detail = payload.payload;
+  container.append(
+    createElement("p", "patterns-event-title", "Métricas pooled"),
+    experimentsScoresTable(detail.pooled_scores),
+    createElement("p", "patterns-event-title", "Comparaciones pareadas del run"),
+    experimentsComparisonsTable(detail.pooled_comparisons),
+    createElement("p", "patterns-event-title", "Folds"),
+    experimentsFoldsTable("funding", detail.folds),
+    createElement("p", "patterns-event-title", "Calibración"),
+    experimentsCalibrationTable(detail.calibration),
+  );
+  return container;
+}
+
+function experimentsRevokeDownload() {
+  if (experimentsDownloadUrl) {
+    URL.revokeObjectURL(experimentsDownloadUrl);
+    experimentsDownloadUrl = null;
+  }
+}
+
+function experimentsClearDetail() {
+  experimentsActiveKey = null;
+  experimentsRevokeDownload();
+  byId("experiments-detail").classList.add("hidden");
+  byId("experiments-detail-title").textContent = "Detalle verificado";
+  byId("experiments-detail-decision").textContent = "";
+  byId("experiments-detail-decision").className = "badge neutral";
+  byId("experiments-detail-context").textContent = "";
+  byId("experiments-detail-reading").textContent = "";
+  byId("experiments-detail-blocks").replaceChildren();
+  byId("experiments-detail-limitations").replaceChildren();
+  byId("experiments-detail-evidence").replaceChildren();
+  byId("experiments-detail-json").textContent = "";
+  byId("experiments-download").disabled = true;
+}
+
+function experimentsRenderDetail(payload) {
+  const context = payload.context;
+  const family = EXPERIMENT_FAMILY_LABELS[context.family] || context.family;
+  const decision = experimentsDecision(payload);
+  byId("experiments-detail-title").textContent = `${family} · run ${context.run_id}`;
+  const badge = byId("experiments-detail-decision");
+  badge.textContent = decision.label;
+  badge.className = `badge ${decision.tone}`;
+  byId("experiments-detail-context").textContent =
+    `${context.asset_id} · ${context.family} · creado ${formatInstant(context.created_at)}`
+    + ` · ${formatInteger(context.artifact_bytes)} B · manifiesto ${context.manifest_sha256}`;
+  byId("experiments-detail-reading").textContent = experimentsReading(payload);
+  const blocks = byId("experiments-detail-blocks");
+  blocks.replaceChildren();
+  const identity = createElement("article", "patterns-card");
+  identity.append(
+    createElement("h4", "", "Condiciones y proveniencia"),
+    experimentsDefinition(experimentsDetailRows(payload)),
+  );
+  blocks.append(identity);
+  const limitations = byId("experiments-detail-limitations");
+  limitations.replaceChildren();
+  for (const limitation of experimentsLimitations(payload)) {
+    limitations.append(createElement("li", "", limitation));
+  }
+  const evidence = byId("experiments-detail-evidence");
+  evidence.replaceChildren(experimentsEvidence(payload));
+  const json = JSON.stringify(payload, null, 2);
+  byId("experiments-detail-json").textContent = json;
+  const size = new TextEncoder().encode(JSON.stringify(payload)).length;
+  byId("experiments-download").disabled = size > EXPERIMENT_EXPORT_LIMIT_BYTES;
+  byId("experiments-detail").classList.remove("hidden");
+}
+
+function experimentsRememberDetail(payload) {
+  const key = experimentsKey(payload.context.family, payload.context.run_id);
+  experimentsDetails.delete(key);
+  experimentsDetails.set(key, payload);
+  while (experimentsDetails.size > EXPERIMENT_SELECTION_LIMIT) {
+    const oldest = experimentsDetails.keys().next().value;
+    experimentsDetails.delete(oldest);
+  }
+  experimentsActiveKey = key;
+}
+
+function experimentsListItem(entry) {
+  const key = experimentsKey(entry.family, entry.run_id);
+  const item = createElement("li", "experiments-item");
+  item.dataset.experimentKey = key;
+  const title = createElement("p", "experiments-item-title");
+  title.append(createElement("strong", "", EXPERIMENT_FAMILY_LABELS[entry.family] || entry.family));
+  title.append(
+    ` · ${EXPERIMENT_STATUS_LABELS[entry.artifact_status] || entry.artifact_status}`,
+    ` · creado ${formatInstant(entry.created_at)}`,
+    ` · ${formatInteger(entry.artifact_bytes)} B`,
+  );
+  item.append(title);
+  const identity = createElement("p", "experiments-item-identity");
+  identity.append(
+    createElement("code", "", entry.protocol_id),
+    ` · activo ${entry.asset_id} · run ${entry.run_id}`,
+    ` · manifiesto ${entry.manifest_sha256}`,
+  );
+  item.append(identity);
+  const actions = createElement("div", "experiments-item-actions");
+  const open = createElement("button", "button", "Abrir detalle");
+  open.type = "button";
+  open.addEventListener("click", () => {
+    void experimentsOpenDetail(entry);
+  });
+  actions.append(open);
+  const selector = createElement("label", "experiments-select");
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = experimentsSelected.has(key);
+  checkbox.addEventListener("change", () => {
+    experimentsToggleSelection(entry, checkbox.checked);
+  });
+  selector.append(checkbox, " Contrastar");
+  actions.append(selector);
+  item.append(actions);
+  return item;
+}
+
+function experimentsRenderList() {
+  const list = byId("experiments-list");
+  list.replaceChildren();
+  if (!experimentsItems.length) {
+    const item = createElement("li", "experiments-empty");
+    item.append(renderAbsenceMark(
+      "missing",
+      "Sin estudios para este activo en esta página",
+      "La página puede estar vacía y ofrecer una página siguiente.",
+    ));
+    list.append(item);
+    return;
+  }
+  for (const entry of experimentsItems) {
+    list.append(experimentsListItem(entry));
+  }
+}
+
+function experimentsRenderPage(payload) {
+  const coverage = byId("experiments-coverage");
+  coverage.replaceChildren();
+  for (const root of payload.roots || []) {
+    const label = EXPERIMENT_FAMILY_LABELS[root.family] || root.family;
+    const text = root.status === "available"
+      ? `${label}: raíz disponible con ${formatInteger(root.entries)} entrada(s) directas.`
+      : `${label}: raíz no disponible; el estado vacío es explícito y no un cero.`;
+    coverage.append(createElement("span", "experiments-coverage-item", text));
+  }
+  const warnings = byId("experiments-warnings");
+  warnings.replaceChildren();
+  for (const warning of payload.warnings || []) {
+    const label = EXPERIMENT_WARNING_LABELS[warning.code] || "Advertencia";
+    const family = EXPERIMENT_FAMILY_LABELS[warning.family] || warning.family;
+    const run = warning.run_id ? ` · run ${warning.run_id}` : "";
+    warnings.append(createElement(
+      "p",
+      "experiments-warning",
+      `${label} · ${family}${run}: ${warning.message}`,
+    ));
+  }
+  experimentsRenderList();
+}
+
+function resetExperimentsExplorer() {
+  experimentsRequestSequence += 1;
+  experimentsComparisonSequence += 1;
+  if (experimentsAbortController) {
+    experimentsAbortController.abort();
+    experimentsAbortController = null;
+  }
+  if (experimentsComparisonAbortController) {
+    experimentsComparisonAbortController.abort();
+    experimentsComparisonAbortController = null;
+  }
+  experimentsNextCursor = null;
+  experimentsPageCount = 0;
+  experimentsItems = [];
+  experimentsSelected = new Map();
+  experimentsDetails = new Map();
+  byId("experiments-list").replaceChildren();
+  byId("experiments-warnings").replaceChildren();
+  byId("experiments-coverage").textContent = "";
+  byId("experiments-next").disabled = true;
+  byId("experiments-load").disabled = false;
+  experimentsClearDetail();
+  byId("experiments-comparison").classList.add("hidden");
+  byId("experiments-comparison-body").replaceChildren();
+  experimentsComparisonStatus("");
+  experimentsStatus(
+    "Sin cargar. Pulsa «Cargar estudios» para consultar el activo seleccionado.",
+  );
+}
+
+async function experimentsLoadPage(reset) {
+  const assetId = selectedMarketAsset;
+  if (!assetId) {
+    experimentsStatus("Selecciona un activo del catálogo antes de cargar estudios.");
+    return;
+  }
+  const family = experimentsFamily();
+  if (!reset && !experimentsNextCursor) {
+    experimentsStatus("No hay más páginas para este listado.");
+    return;
+  }
+  if (reset) resetExperimentsExplorer();
+  const sequence = ++experimentsRequestSequence;
+  if (experimentsAbortController) experimentsAbortController.abort();
+  const controller = new AbortController();
+  experimentsAbortController = controller;
+  const parameters = new URLSearchParams({
+    asset_id: assetId,
+    family,
+    limit: String(EXPERIMENT_PAGE_LIMIT),
+  });
+  if (!reset) parameters.set("cursor", experimentsNextCursor);
+  byId("experiments-load").disabled = true;
+  byId("experiments-next").disabled = true;
+  experimentsStatus(reset ? "Verificando cabeceras selladas…" : "Cargando la siguiente página…");
+  try {
+    const payload = await api(
+      `/api/v1/research/experiments?${parameters.toString()}`,
+      { signal: controller.signal },
+    );
+    if (
+      sequence !== experimentsRequestSequence
+      || controller.signal.aborted
+      || assetId !== selectedMarketAsset
+      || family !== experimentsFamily()
+    ) {
+      return;
+    }
+    if (
+      payload.schema_version !== EXPERIMENT_LIST_SCHEMA
+      || payload.context?.asset_id !== assetId
+      || payload.context?.family !== family
+    ) {
+      throw new Error("El listado de estudios no respetó su contrato versionado.");
+    }
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    experimentsItems = reset ? items.slice() : experimentsItems.concat(items);
+    experimentsNextCursor = payload.next_cursor || null;
+    experimentsPageCount += 1;
+    experimentsRenderPage(payload);
+    experimentsStatus(
+      `Página ${formatInteger(experimentsPageCount)} verificada:`
+      + ` ${formatInteger(items.length)} estudio(s) de este activo y`
+      + ` ${formatInteger(payload.examined_candidates)} candidato(s) examinado(s).`,
+    );
+  } catch (error) {
+    if (sequence !== experimentsRequestSequence || controller.signal.aborted) return;
+    if (reset) {
+      experimentsItems = [];
+      experimentsNextCursor = null;
+      byId("experiments-list").replaceChildren();
+      byId("experiments-warnings").replaceChildren();
+    }
+    experimentsStatus(error.message);
+  } finally {
+    if (sequence === experimentsRequestSequence) {
+      byId("experiments-load").disabled = false;
+      byId("experiments-next").disabled = !experimentsNextCursor;
+    }
+  }
+}
+
+async function experimentsOpenDetail(entry) {
+  const assetId = selectedMarketAsset;
+  if (!assetId) {
+    experimentsStatus("Selecciona un activo del catálogo antes de abrir un estudio.");
+    return;
+  }
+  const key = experimentsKey(entry.family, entry.run_id);
+  const cached = experimentsDetails.get(key);
+  if (cached) {
+    experimentsActiveKey = key;
+    experimentsRenderDetail(cached);
+    byId("experiments-download").disabled = false;
+    experimentsStatus("Detalle verificado reutilizado desde la memoria acotada del navegador.");
+    return;
+  }
+  const sequence = ++experimentsRequestSequence;
+  if (experimentsAbortController) experimentsAbortController.abort();
+  const controller = new AbortController();
+  experimentsAbortController = controller;
+  const parameters = new URLSearchParams({
+    asset_id: assetId,
+    family: entry.family,
+    run_id: entry.run_id,
+  });
+  experimentsStatus("Verificando el artefacto sellado del estudio…");
+  byId("experiments-download").disabled = true;
+  try {
+    const payload = await api(
+      `/api/v1/research/experiment-report?${parameters.toString()}`,
+      { signal: controller.signal },
+    );
+    if (
+      sequence !== experimentsRequestSequence
+      || controller.signal.aborted
+      || assetId !== selectedMarketAsset
+    ) {
+      return;
+    }
+    if (
+      payload.schema_version !== EXPERIMENT_VIEW_SCHEMA
+      || payload.context?.asset_id !== assetId
+      || payload.context?.family !== entry.family
+      || payload.context?.run_id !== entry.run_id
+    ) {
+      throw new Error("El detalle no respetó su contrato versionado o cambió de identidad.");
+    }
+    experimentsRememberDetail(payload);
+    experimentsRenderDetail(payload);
+    experimentsStatus(
+      "Detalle verificado desde el artefacto sellado; no se reejecutó el entrenamiento.",
+    );
+  } catch (error) {
+    if (sequence !== experimentsRequestSequence || controller.signal.aborted) return;
+    experimentsClearDetail();
+    experimentsStatus(error.message);
+  }
+}
+
+function experimentsToggleSelection(entry, checked) {
+  const key = experimentsKey(entry.family, entry.run_id);
+  if (!checked) {
+    experimentsSelected.delete(key);
+    experimentsRenderComparison();
+    return;
+  }
+  if (experimentsSelected.has(key)) return;
+  if (experimentsSelected.size >= EXPERIMENT_SELECTION_LIMIT) {
+    experimentsStatus(
+      "Sólo puedes contrastar dos estudios del mismo activo; quita una selección.",
+    );
+    experimentsRenderList();
+    return;
+  }
+  experimentsSelected.set(key, entry);
+  experimentsRenderComparison();
+}
+
+async function experimentsComparisonDetail(entry, signal) {
+  const key = experimentsKey(entry.family, entry.run_id);
+  const cached = experimentsDetails.get(key);
+  if (cached) return cached;
+  const parameters = new URLSearchParams({
+    asset_id: selectedMarketAsset,
+    family: entry.family,
+    run_id: entry.run_id,
+  });
+  const payload = await api(
+    `/api/v1/research/experiment-report?${parameters.toString()}`,
+    { signal },
+  );
+  if (
+    payload.schema_version !== EXPERIMENT_VIEW_SCHEMA
+    || payload.context?.family !== entry.family
+    || payload.context?.run_id !== entry.run_id
+  ) {
+    throw new Error("El contraste recibió una vista que no respeta su contrato.");
+  }
+  experimentsRememberDetail(payload);
+  return payload;
+}
+
+function experimentsComparisonValue(payload, reader) {
+  try {
+    const value = reader(payload);
+    return value === null || value === undefined || value === "" ? "—" : String(value);
+  } catch (error) {
+    if (error instanceof TypeError) return "—";
+    throw error;
+  }
+}
+
+function experimentsComparisonRow(label, left, right) {
+  const difference = left === "—" || right === "—"
+    ? "desconocido"
+    : (left === right ? "igual" : "distinto");
+  return [
+    label,
+    left,
+    right,
+    difference === "distinto" ? "Distinto" : (difference === "igual" ? "Igual" : "Desconocido"),
+  ];
+}
+
+function experimentsComparisonRows(payload) {
+  return {
+    family: payload.context.family,
+    rows: [
+      ["Protocolo", EXPERIMENT_FAMILY_LABELS[payload.context.family]
+        || payload.context.family],
+      ["Run", payload.context.run_id],
+      ["Objetivo", experimentsComparisonValue(payload, (item) => item.payload.protocol?.hypothesis
+        || item.payload.report?.protocol?.hypothesis)],
+      ["Horizonte del target", experimentsComparisonValue(
+        payload,
+        (item) => item.payload.protocol?.target?.horizon_intervals
+          ?? item.payload.report?.protocol?.target?.horizon_intervals,
+      )],
+      ["Ventana de decisión", experimentsComparisonValue(
+        payload,
+        (item) => {
+          const protocol = item.payload.protocol || item.payload.report?.protocol;
+          return protocol ? `${protocol.decision_start} a ${protocol.decision_end}` : "—";
+        },
+      )],
+      ["Decisiones", experimentsComparisonValue(
+        payload,
+        (item) => item.payload.decision_rows ?? item.payload.report?.protocol?.decision_rows,
+      )],
+      ["Features", experimentsComparisonValue(
+        payload,
+        (item) => (item.payload.protocol?.feature_columns
+          || item.payload.report?.protocol?.feature_columns || []).join(", "),
+      )],
+      ["Dataset", experimentsComparisonValue(
+        payload,
+        (item) => item.payload.protocol?.dataset_id || item.payload.report?.provenance?.dataset_id,
+      )],
+      ["Dataset contenido", experimentsComparisonValue(
+        payload,
+        (item) => item.payload.protocol?.dataset_content_sha256
+          || item.payload.report?.provenance?.dataset_content_sha256,
+      )],
+      ["Bundle", experimentsComparisonValue(
+        payload,
+        (item) => item.payload.protocol?.bundle_id,
+      )],
+      ["Elegibilidad declarada", experimentsComparisonValue(
+        payload,
+        (item) => (item.payload.folds || item.payload.report?.development?.folds || [])
+          .map((fold) => `fold ${fold.fold}: purge ${fold.purged_excluded},`
+            + ` embargo ${fold.embargo_excluded},`
+            + ` inelegibles ${fold.ineligible_excluded ?? "—"},`
+            + ` funding no disp. ${fold.funding_unavailable_excluded ?? "—"}`)
+          .join("; "),
+      )],
+      ["Train por fold", experimentsComparisonValue(
+        payload,
+        (item) => (item.payload.folds || item.payload.report?.development?.folds || [])
+          .map((fold) => `fold ${fold.fold}: ${fold.train_rows}`)
+          .join("; "),
+      )],
+      ["Eval por fold", experimentsComparisonValue(
+        payload,
+        (item) => (item.payload.folds || item.payload.report?.development?.folds || [])
+          .map((fold) => `fold ${fold.fold}: ${fold.evaluation_rows}`)
+          .join("; "),
+      )],
+      ["Disponibilidad / PIT", experimentsComparisonValue(
+        payload,
+        (item) => {
+          const protocol = item.payload.protocol || item.payload.report?.protocol;
+          return protocol
+            ? `${protocol.availability_basis} · strict_pit_verified=${String(
+              protocol.strict_pit_verified,
+            )}`
+            : "—";
+        },
+      )],
+      ["Criterio estadístico", experimentsComparisonValue(
+        payload,
+        (item) => {
+          const criteria = item.payload.protocol?.criteria
+            || item.payload.report?.protocol?.criteria;
+          return criteria
+            ? `mejora relativa ≥ ${criteria.min_relative_brier_improvement}`
+            : "—";
+        },
+      )],
+      ["Holdout", experimentsComparisonValue(
+        payload,
+        (item) => {
+          if (item.payload.holdout) {
+            return `${item.payload.holdout.status} · ${item.payload.holdout.accesses} accesos`
+              + ` · ${item.payload.holdout.fits} fits`;
+          }
+          const holdout = item.payload.report?.holdout;
+          return holdout ? String(holdout.status) : "no disponible";
+        },
+      )],
+      ["Decisión literal", experimentsComparisonValue(
+        payload,
+        (item) => item.payload.decision ?? item.payload.report?.development?.decision,
+      )],
+      ["Filas OOS selladas", experimentsComparisonValue(
+        payload,
+        (item) => item.payload.prediction_rows
+          ?? item.payload.report?.artifact?.prediction_rows,
+      )],
+      ["Entorno", experimentsComparisonValue(
+        payload,
+        (item) => {
+          const environment = item.payload.environment
+            || item.payload.report?.artifact?.environment;
+          return environment
+            ? `Python ${environment.python_version} · scikit-learn ${
+              environment.scikit_learn_version}`
+            : "—";
+        },
+      )],
+    ],
+  };
+}
+
+async function experimentsRenderComparison() {
+  const comparison = byId("experiments-comparison");
+  const body = byId("experiments-comparison-body");
+  if (experimentsSelected.size === 0) {
+    comparison.classList.add("hidden");
+    body.replaceChildren();
+    experimentsComparisonStatus("");
+    return;
+  }
+  comparison.classList.remove("hidden");
+  if (experimentsSelected.size < EXPERIMENT_SELECTION_LIMIT) {
+    body.replaceChildren();
+    experimentsComparisonStatus(
+      "Selecciona un segundo estudio del mismo activo para el contraste descriptivo.",
+    );
+    return;
+  }
+  const entries = Array.from(experimentsSelected.values());
+  if (entries[0].asset_id !== entries[1].asset_id) {
+    body.replaceChildren();
+    experimentsComparisonStatus("El contraste exige dos estudios del mismo activo.");
+    return;
+  }
+  const sequence = ++experimentsComparisonSequence;
+  if (experimentsComparisonAbortController) experimentsComparisonAbortController.abort();
+  const controller = new AbortController();
+  experimentsComparisonAbortController = controller;
+  experimentsComparisonStatus("Verificando ambas vistas selladas para el contraste…");
+  try {
+    const first = await experimentsComparisonDetail(entries[0], controller.signal);
+    const second = await experimentsComparisonDetail(entries[1], controller.signal);
+    if (
+      sequence !== experimentsComparisonSequence
+      || controller.signal.aborted
+      || !experimentsSelected.has(experimentsKey(entries[0].family, entries[0].run_id))
+      || !experimentsSelected.has(experimentsKey(entries[1].family, entries[1].run_id))
+    ) {
+      return;
+    }
+    const left = experimentsComparisonRows(first);
+    const right = experimentsComparisonRows(second);
+    const rows = left.rows.map((row, index) => experimentsComparisonRow(
+      row[0],
+      row[1],
+      index < right.rows.length ? right.rows[index][1] : "—",
+    ));
+    body.replaceChildren(
+      createElement(
+        "p",
+        "patterns-coverage",
+        left.family === right.family
+          ? EXPERIMENT_COMPARISON_NOTE.same
+          : EXPERIMENT_COMPARISON_NOTE.mixed,
+      ),
+      mlResearchTable(
+        ["Concepto", "Estudio A", "Estudio B", "Diferencia"],
+        rows,
+      ),
+      createElement(
+        "p",
+        "patterns-technical",
+        "Contraste descriptivo lado a lado; no se calcula delta, significancia cruzada,"
+        + " ranking ni un «mejor estudio».",
+      ),
+    );
+    experimentsComparisonStatus(
+      "Contraste construido sólo con las dos proyecciones verificadas; sin métricas agregadas.",
+    );
+  } catch (error) {
+    if (sequence !== experimentsComparisonSequence || controller.signal.aborted) return;
+    body.replaceChildren();
+    experimentsComparisonStatus(error.message);
+  }
+}
+
+function experimentsDownload() {
+  const payload = experimentsActiveKey
+    ? experimentsDetails.get(experimentsActiveKey)
+    : null;
+  if (!payload) {
+    experimentsStatus("Abre y verifica un detalle antes de descargar.");
+    return;
+  }
+  const body = JSON.stringify(payload);
+  const size = new TextEncoder().encode(body).length;
+  if (size > EXPERIMENT_EXPORT_LIMIT_BYTES) {
+    experimentsStatus(
+      "La proyección verificada supera 1 MiB; no se trunca ni se exporta.",
+    );
+    return;
+  }
+  experimentsRevokeDownload();
+  const blob = new Blob([body], { type: "application/json" });
+  experimentsDownloadUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = experimentsDownloadUrl;
+  link.download = `${payload.context.family}-${payload.context.run_id}.json`;
+  link.click();
+  experimentsStatus(
+    "Reporte verificado exportado desde la proyección recibida, sin recomputar nada.",
+  );
+}
+
+function initializeExperimentsExplorer() {
+  byId("experiments-family").addEventListener("change", () => {
+    resetExperimentsExplorer();
+  });
+  byId("experiments-load").addEventListener("click", () => {
+    void experimentsLoadPage(true);
+  });
+  byId("experiments-next").addEventListener("click", () => {
+    void experimentsLoadPage(false);
+  });
+  byId("experiments-download").addEventListener("click", () => {
+    experimentsDownload();
+  });
+  resetExperimentsExplorer();
+}
+
+initializeExperimentsExplorer();

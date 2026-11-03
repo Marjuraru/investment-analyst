@@ -99,6 +99,16 @@ negativos. No se ajustan parámetros, no se prueba otro ticker ni otra ventana, 
 no se promueve un predictor; V1-U4 permanece `UNKNOWN`. `PREDICTIVE-RESEARCH` sigue siendo el único
 `NEXT` y el siguiente PLAN decide si esta hipótesis se detiene.
 
+`RESEARCH-EXPERIMENTS-DELIVERY`/#407 (`ADVANCES`) convierte los artefactos ya sellados en un recorrido
+local completo: el panel de investigación descubre los estudios del activo por familia y páginas,
+abre el detalle verificado de baseline o funding y contrasta hasta dos condiciones lado a lado con
+exportación de la proyección consultada. No se crea un dashboard paralelo, un endpoint de comparación
+ni un artefacto persistente; no hay delta entre estudios, ranking, significancia cruzada ni «mejor
+estudio», y se declara que baseline y funding no son una comparación pareada porque el entrenamiento
+difiere por la máscara de funding. No se entrena, no se adquiere nada y el holdout sigue cerrado.
+`PREDICTIVE-RESEARCH` permanece `NEXT`, `FUNDAMENTALS-COVERAGE` sigue `PLANNED` y V1-U4 sigue
+`UNKNOWN`.
+
 La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de crecimiento viven en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md).
 La implementación vigente de reglas, replay y entrega se reconcilia en

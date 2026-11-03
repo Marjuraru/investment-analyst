@@ -1190,10 +1190,65 @@
             </summary>
             <div class="ml-research-body">
               <p class="patterns-summary">
-                Investigación retrospectiva; disponibilidad histórica supuesta. Pega el
-                <code>run_id</code> del recibo de evaluación para consultar el activo
-                seleccionado. Esta vista verifica el artefacto y no reejecuta el entrenamiento
-                ni evalúa el holdout.
+                Investigación retrospectiva; disponibilidad histórica supuesta. Carga el
+                listado para descubrir los estudios sellados del activo, abre uno y contrasta
+                hasta dos condiciones. Esta vista verifica el artefacto y no reejecuta el
+                entrenamiento ni evalúa el holdout.
+              </p>
+              <section class="experiments-explorer" aria-labelledby="experiments-title">
+                <h3 id="experiments-title">Estudios descubribles</h3>
+                <div class="ml-research-controls">
+                  <label class="field">
+                    <span>Familia</span>
+                    <select id="experiments-family">
+                      <option value="all">Todas</option>
+                      <option value="baseline">Baseline técnico</option>
+                      <option value="funding">Incremento de funding</option>
+                    </select>
+                  </label>
+                  <button id="experiments-load" class="button primary" type="button">
+                    Cargar estudios
+                  </button>
+                  <button id="experiments-next" class="button" type="button" disabled>
+                    Siguiente página
+                  </button>
+                </div>
+                <p id="experiments-status" class="chart-status" role="status" aria-live="polite">
+                  Sin cargar. Pulsa «Cargar estudios» para consultar el activo seleccionado.
+                </p>
+                <p id="experiments-coverage" class="patterns-coverage"></p>
+                <ul id="experiments-list" class="experiments-list"></ul>
+                <div id="experiments-warnings" class="experiments-warnings"></div>
+                <div id="experiments-detail" class="experiments-detail hidden">
+                  <h4 id="experiments-detail-title">Detalle verificado</h4>
+                  <p id="experiments-detail-decision" class="badge neutral"></p>
+                  <p id="experiments-detail-context" class="patterns-summary"></p>
+                  <p id="experiments-detail-reading" class="patterns-coverage"></p>
+                  <div id="experiments-detail-blocks" class="patterns-grid"></div>
+                  <ul id="experiments-detail-limitations" class="patterns-limitations"></ul>
+                  <details class="json-disclosure">
+                    <summary>Protocolo, folds, calibración y evidencia exacta</summary>
+                    <div id="experiments-detail-evidence"></div>
+                    <pre id="experiments-detail-json" tabindex="0"></pre>
+                  </details>
+                  <button id="experiments-download" class="button" type="button" disabled>
+                    Descargar reporte JSON
+                  </button>
+                </div>
+                <div id="experiments-comparison" class="experiments-comparison hidden">
+                  <h4>Contraste descriptivo</h4>
+                  <p
+                    id="experiments-comparison-status"
+                    class="chart-status"
+                    role="status"
+                    aria-live="polite"
+                  ></p>
+                  <div id="experiments-comparison-body"></div>
+                </div>
+              </section>
+              <p class="patterns-coverage">
+                Consulta manual por <code>run_id</code> (compatibilidad con el contrato
+                baseline-v1):
               </p>
               <form id="ml-research-form" class="patterns-controls ml-research-controls">
                 <label class="field">

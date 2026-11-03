@@ -247,6 +247,28 @@ holdout. El siguiente PLAN decide si esta hipótesis se detiene y si existe otra
 investigativa; la interpretación LLM sigue siendo una capa posterior e independiente sobre resultados
 estructurados.
 
+## Descubrimiento y contraste de estudios (2026-11-03)
+
+`RESEARCH-EXPERIMENTS-DELIVERY`/#407 (`ADVANCES`) cierra el recorrido de consulta: el usuario ya no
+necesita copiar un UUID para encontrar sus estudios. El panel de investigación carga el listado del
+activo, permite elegir familia, página y run, abre el detalle verificado de ambas familias, contrasta
+hasta dos condiciones lado a lado y descarga exactamente la proyección consultada. No se crea un
+segundo dashboard, un endpoint de comparación ni un artefacto persistente, y la consulta legacy
+continúa disponible para baseline.
+
+La honestidad del contraste es explícita: baseline y funding no comparten máscara de entrenamiento, de
+modo que sus métricas no son una comparación pareada entre estudios y la evidencia incremental válida
+sigue estando dentro del run de funding. Dos runs de la misma familia tampoco se comparan como pares:
+la vista describe condiciones, diferencias y campos desconocidos, sin delta, significancia cruzada,
+ranking ni «mejor estudio». El resultado negativo de #405 no se reabre, no se ajusta y no se promueve.
+
+Los cinco runs presentes (2 baseline y 3 funding) son inventario de ejecución, no cinco experimentos
+estadísticamente independientes; el listado los recorre por páginas sin elegir el mayor `mtime` ni
+ocultar los adicionales. Una raíz ausente es un estado vacío explícito, nunca un cero. El listado no
+abre reportes, predicciones, datasets ni lineage: sólo verifica cabeceras de la página solicitada.
+`FUNDAMENTALS-COVERAGE` permanece `PLANNED`, `PREDICTIVE-RESEARCH` sigue `NEXT` y V1-U4 permanece
+`UNKNOWN`.
+
 ## Evidencia histórica de funding (2026-11-02)
 
 `PREDICTIVE-FUNDING-DATA`/#399 (`ADVANCES`) prepara la evidencia de una hipótesis diferencial: la

@@ -270,6 +270,18 @@ from investment_analyst.providers.macro.fred_catalog_refresh import (
     FredCatalogRefreshSummary,
 )
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
+from investment_analyst.research.experiment_report_models import (
+    DEFAULT_EXPERIMENT_PAGE_LIMIT,
+    ExperimentListPage,
+    ExperimentReportView,
+)
+from investment_analyst.research.experiment_report_service import (
+    ExperimentCursorStaleError,
+    ExperimentReportCapacityError,
+    ExperimentReportConflictError,
+    ExperimentReportNotFoundError,
+    ExperimentReportService,
+)
 from investment_analyst.research.ml_report_models import MlResearchReportView
 from investment_analyst.research.ml_report_service import (
     MlReportConflictError,
@@ -1954,6 +1966,7 @@ class AaplLocalWebApplication:
         cazatiburones_notification_store: CazatiburonesNotificationStore | None = None,
         desktop_notifications: DesktopNotificationService | None = None,
         ml_reports: MlResearchReportService | None = None,
+        experiment_reports: ExperimentReportService | None = None,
     ) -> None:
         self._controller = controller
         self._scheduler = scheduler
@@ -1967,6 +1980,7 @@ class AaplLocalWebApplication:
         self._asset_preferences = asset_preferences
         self._desktop_notifications = desktop_notifications
         self._ml_reports = ml_reports
+        self._experiment_reports = experiment_reports
 
     def set_manual_operations(self, operations: ManualOperationQueue) -> None:
         """Attach the durable queue after its dispatcher can reference this adapter."""
@@ -2446,6 +2460,54 @@ class AaplLocalWebApplication:
             run_id=run_id,
         )
         return projection.to_json_dict()
+
+    def research_experiments(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """List discoverable sealed runs for one catalog asset without providers."""
+        allowed = {"asset_id", "family", "limit", "cursor"}
+        if set(parameters) - allowed:
+            raise ValueError("research experiments query contains unsupported parameters")
+        descriptor = self._market_asset(_one_parameter(parameters, "asset_id", required=True))
+        family = _one_parameter(parameters, "family", required=False) or "all"
+        limit = _integer_parameter(
+            _one_parameter(parameters, "limit", required=False),
+            name="limit",
+            default=DEFAULT_EXPERIMENT_PAGE_LIMIT,
+        )
+        cursor = _one_parameter(parameters, "cursor", required=False)
+        if self._experiment_reports is None:
+            raise ExperimentReportConflictError("research experiments are not configured")
+        page: ExperimentListPage = self._experiment_reports.list_experiments(
+            asset_id=descriptor.asset_id,
+            family=family,
+            limit=limit,
+            cursor=cursor,
+        )
+        return page.to_json_dict()
+
+    def research_experiment_report(
+        self, parameters: Mapping[str, tuple[str, ...]]
+    ) -> dict[str, object]:
+        """Validate one explicit family/run query without provider or storage access."""
+        allowed = {"asset_id", "family", "run_id"}
+        if set(parameters) - allowed:
+            raise ValueError("research experiment report query contains unsupported parameters")
+        descriptor = self._market_asset(_one_parameter(parameters, "asset_id", required=True))
+        family = _one_parameter(parameters, "family", required=True)
+        raw_run_id = _one_parameter(parameters, "run_id", required=True)
+        try:
+            run_id = UUID(raw_run_id)
+        except ValueError as error:
+            raise ValueError("run_id must be a canonical UUID") from error
+        if str(run_id) != raw_run_id:
+            raise ValueError("run_id must be a canonical UUID")
+        if self._experiment_reports is None:
+            raise ExperimentReportConflictError("research experiments are not configured")
+        view: ExperimentReportView = self._experiment_reports.report(
+            asset_id=descriptor.asset_id,
+            family=family,
+            run_id=run_id,
+        )
+        return view.to_json_dict()
 
     def report(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate query parameters and return the versioned report contract."""
@@ -3342,6 +3404,22 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                     server.application.ml_research_report(parameters),
                 )
                 return
+            if parsed.path == "/api/v1/research/experiments":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.research_experiments(parameters),
+                )
+                return
+            if parsed.path == "/api/v1/research/experiment-report":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=3)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.research_experiment_report(parameters),
+                )
+                return
             if parsed.path == "/api/v1/crypto-derivatives":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
                 parameters = {key: tuple(values) for key, values in raw.items()}
@@ -3680,6 +3758,30 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
             self._send_error(
                 HTTPStatus.CONFLICT,
                 "desktop_notification_unavailable",
+                str(error)[:500],
+            )
+        elif isinstance(error, ExperimentReportNotFoundError):
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "research_experiment_not_found",
+                str(error)[:500],
+            )
+        elif isinstance(error, ExperimentCursorStaleError):
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "research_experiment_cursor_stale",
+                str(error)[:500],
+            )
+        elif isinstance(error, ExperimentReportCapacityError):
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "research_experiment_capacity",
+                str(error)[:500],
+            )
+        elif isinstance(error, ExperimentReportConflictError):
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "research_experiment_conflict",
                 str(error)[:500],
             )
         elif isinstance(error, MlReportNotFoundError):

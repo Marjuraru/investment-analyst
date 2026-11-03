@@ -830,6 +830,7 @@ async function loadMarketAssets() {
     applySelectedMarketAsset();
     applyChartSettings();
     if (typeof resetMlResearchReport === "function") resetMlResearchReport();
+    if (typeof resetExperimentsExplorer === "function") resetExperimentsExplorer();
 
     // The former asset-specific fan-out (`presentation.hasFundamentals`,
     // `queryReport()`, and its companion queries) is intentionally centralized
