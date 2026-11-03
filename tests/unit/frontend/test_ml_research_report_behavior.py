@@ -252,7 +252,11 @@ function insufficientPayload() {
 function createContext({ search = "", assetId = ASSET } = {}) {
   const technical = fs.readFileSync(process.argv[2], "utf8");
   const core = fs.readFileSync(process.argv[3], "utf8");
-  const mlSource = technical.slice(technical.indexOf("const ML_REPORT_SCHEMA"));
+  // The explorer block owns its own harness; slice this disclosure only.
+  const mlSource = technical.slice(
+    technical.indexOf("const ML_REPORT_SCHEMA"),
+    technical.indexOf("const EXPERIMENT_LIST_SCHEMA"),
+  );
   if (!mlSource.includes("function queryMlResearchReport")) {
     throw new Error("ML behavior block was not found");
   }
@@ -538,3 +542,413 @@ def test_ml_report_disclosure_has_no_html_injection_and_one_explicit_route() -> 
     assert "Investigación retrospectiva; disponibilidad histórica supuesta." in index
     assert 'id="ml-research-panel"' in index
     assert "Consultar evaluación" in index
+
+
+_EXPLORER_HARNESS = r"""
+const fs = require("fs");
+
+function extractFunction(source, name) {
+  const pattern = new RegExp("function " + name + "\\([^)]*\\) \\{.*?\\n\\}", "s");
+  const match = source.match(pattern);
+  if (!match) throw new Error("missing function " + name);
+  return match[0];
+}
+
+class FakeClassList {
+  constructor() { this.values = new Set(); }
+  add(...names) { for (const name of names) this.values.add(name); }
+  remove(...names) { for (const name of names) this.values.delete(name); }
+  toggle(name, force) {
+    if (force === true) this.values.add(name);
+    else if (force === false) this.values.delete(name);
+    else if (this.values.has(name)) this.values.delete(name);
+    else this.values.add(name);
+  }
+  contains(name) { return this.values.has(name); }
+}
+
+class FakeText {
+  constructor(value) { this.textContent = String(value); }
+}
+
+class FakeElement {
+  constructor(tagName) {
+    this.tagName = tagName;
+    this.children = [];
+    this.attributes = {};
+    this.dataset = {};
+    this.classList = new FakeClassList();
+    this.listeners = {};
+    this.className = "";
+    this.value = "";
+    this.checked = false;
+    this.disabled = false;
+    this.download = "";
+    this.href = "";
+    this.type = "";
+    this.clicked = false;
+    this._textContent = "";
+  }
+  set textContent(value) { this._textContent = String(value); this.children = []; }
+  get textContent() {
+    if (this.children.length) return this.children.map(textOf).join("");
+    return this._textContent;
+  }
+  append(...nodes) {
+    for (const node of nodes) {
+      this.children.push(typeof node === "string" ? new FakeText(node) : node);
+    }
+  }
+  replaceChildren(...nodes) { this.children = []; this._textContent = ""; this.append(...nodes); }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  addEventListener(name, handler) {
+    if (!this.listeners[name]) this.listeners[name] = [];
+    this.listeners[name].push(handler);
+  }
+  dispatch(name, event = {}) {
+    for (const handler of this.listeners[name] || []) handler(event);
+  }
+  click() { this.clicked = true; }
+}
+
+function textOf(node) {
+  if (node === null || node === undefined) return "";
+  if (typeof node === "string") return node;
+  if (node.children && node.children.length) return node.children.map(textOf).join(" ");
+  return node.textContent || "";
+}
+
+const IDS = [
+  "experiments-family", "experiments-load", "experiments-next", "experiments-status",
+  "experiments-coverage", "experiments-list", "experiments-warnings", "experiments-detail",
+  "experiments-detail-title", "experiments-detail-decision", "experiments-detail-context",
+  "experiments-detail-reading", "experiments-detail-blocks", "experiments-detail-limitations",
+  "experiments-detail-evidence", "experiments-detail-json", "experiments-download",
+  "experiments-comparison", "experiments-comparison-status", "experiments-comparison-body",
+];
+
+const ASSET = "crypto:btc-usd";
+const FUNDING_RUN = "8dbc6330-1ff2-51bc-b701-a65611afa495";
+
+function listPayload() {
+  return {
+    schema_version: "research-experiment-list-v1",
+    context: { asset_id: ASSET, family: "all", limit: 20 },
+    items: [{
+      family: "funding",
+      run_id: FUNDING_RUN,
+      asset_id: ASSET,
+      protocol_id: "crypto-historical-5d-funding-increment-v1",
+      artifact_status: "completed",
+      created_at: "2026-11-03T12:00:00Z",
+      manifest_sha256: "0".repeat(64),
+      protocol_sha256: "1".repeat(64),
+      report_sha256: "2".repeat(64),
+      artifact_bytes: 56159,
+    }],
+    next_cursor: null,
+    roots: [
+      { family: "baseline", status: "available", entries: 2 },
+      { family: "funding", status: "available", entries: 3 },
+    ],
+    warnings: [],
+    examined_candidates: 1,
+  };
+}
+
+function fundingView() {
+  return {
+    schema_version: "research-experiment-report-view-v1",
+    context: {
+      asset_id: ASSET,
+      family: "funding",
+      run_id: FUNDING_RUN,
+      manifest_sha256: "0".repeat(64),
+      protocol_sha256: "1".repeat(64),
+      report_sha256: "2".repeat(64),
+      artifact_bytes: 56159,
+      created_at: "2026-11-03T12:00:00Z",
+    },
+    payload: {
+      family: "funding",
+      protocol: {
+        hypothesis: "Causal funding adds incremental information.",
+        decision_start: "2020-01-01",
+        decision_end: "2025-12-25",
+        decision_rows: 2186,
+        technical_feature_columns: ["a", "b", "c"],
+        funding_feature_columns: ["d", "e"],
+        feature_columns: ["a", "b", "c", "d", "e"],
+        target: { target_version: "v1", horizon_intervals: 5, positive_rule: "r > 0" },
+        criteria: { min_relative_brier_improvement: "0.05" },
+        availability_basis: "historical_reconstruction_assumed",
+        strict_pit_verified: false,
+        dataset_id: "d927c7f1-794a-571c-b729-6bb68d311115",
+        dataset_content_sha256: "3".repeat(64),
+        bundle_id: "fca740b8-8f38-5703-8006-e6a467bfb3ba",
+        bundle_content_sha256: "4".repeat(64),
+        limitations: ["Retrospectiva."],
+      },
+      provenance: {
+        dataset_manifest_sha256: "5".repeat(64),
+        bundle_manifest_sha256: "6".repeat(64),
+        code_material_sha256: "7".repeat(64),
+        code_material_files: ["ml_funding_models.py"],
+        source_id: null,
+        source_id_note: "Sin source_id.",
+      },
+      environment: { python_version: "3.12.3", scikit_learn_version: "1.9.1" },
+      decision: "no_demonstrated_increment",
+      decision_rows: 2186,
+      prediction_rows: 2532,
+      development_fits: 6,
+      folds: [],
+      pooled_scores: [],
+      pooled_comparisons: [],
+      calibration: [],
+      holdout: { status: "not_evaluated", accesses: 0, fits: 0 },
+      timings: {},
+      peak_rss_bytes: null,
+    },
+  };
+}
+
+function createExplorerContext() {
+  const technical = fs.readFileSync(process.argv[2], "utf8");
+  const core = fs.readFileSync(process.argv[3], "utf8");
+  const explorer = technical.slice(technical.indexOf("const EXPERIMENT_LIST_SCHEMA"));
+  if (!explorer.includes("function initializeExperimentsExplorer")) {
+    throw new Error("explorer block was not found");
+  }
+  const ml = technical.slice(
+    technical.indexOf("const ML_REPORT_SCHEMA"),
+    technical.indexOf("const EXPERIMENT_LIST_SCHEMA"),
+  );
+  const helperSource = [
+    extractFunction(core, "createElement"),
+    extractFunction(core, "renderAbsenceMark"),
+    extractFunction(core, "formatInstant"),
+    extractFunction(core, "numericValue"),
+    extractFunction(core, "formatNumber"),
+    extractFunction(core, "formatInteger"),
+    extractFunction(ml, "mlResearchScorerLabel"),
+    extractFunction(ml, "mlResearchPercent"),
+    extractFunction(ml, "mlResearchFigure"),
+    extractFunction(ml, "mlResearchTable"),
+  ].join("\n");
+  const elements = new Map();
+  for (const id of IDS) elements.set(id, new FakeElement("div"));
+  const created = [];
+  const document = {
+    createElement: (tag) => {
+      const element = new FakeElement(tag);
+      created.push(element);
+      return element;
+    },
+    getElementById: (id) => elements.get(id) || null,
+  };
+  const objectUrls = [];
+  const URL = {
+    createObjectURL: (blob) => { objectUrls.push(blob); return "blob:" + objectUrls.length; },
+    revokeObjectURL: () => {},
+  };
+  const apiCalls = [];
+  let apiImpl = async () => { throw new Error("unexpected fetch"); };
+  const api = (path, options) => {
+    apiCalls.push({ path, options });
+    return apiImpl(path, options);
+  };
+  const prefix = `
+    const LOCALE = "es-PE";
+    const DEFAULT_TIME_ZONE = "America/Lima";
+    ${helperSource}
+    const byId = (id) => document.getElementById(id);
+    let selectedMarketAsset = state.assetId;
+    let marketAssets = state.marketAssets;
+  `;
+  const suffix = `
+    ; return {
+      experimentsLoadPage,
+      experimentsToggleSelection,
+      experimentsComparisonRow,
+      experimentsDecision,
+      experimentsDownload,
+      resetExperimentsExplorer,
+      rememberDetail: experimentsRememberDetail,
+      selectedKeys: () => Array.from(experimentsSelected.keys()),
+      setAsset(value) { selectedMarketAsset = value; },
+    };
+  `;
+  const factory = new Function(
+    "state", "document", "URL", "api", prefix + explorer + suffix,
+  );
+  const context = factory({ assetId: ASSET, marketAssets: {} }, document, URL, api);
+  return {
+    elements,
+    created,
+    objectUrls,
+    apiCalls,
+    context,
+    setApi(implementation) { apiImpl = implementation; },
+    text(id) { return textOf(elements.get(id)); },
+    hidden(id) { return elements.get(id).classList.contains("hidden"); },
+  };
+}
+
+function assertEquals(actual, expected, label) {
+  if (actual !== expected) {
+    throw new Error(
+      `${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
+    );
+  }
+}
+function assertIncludes(text, fragment, label) {
+  if (!String(text).includes(fragment)) {
+    throw new Error(`${label}: ${JSON.stringify(fragment)} not found in ${JSON.stringify(text)}`);
+  }
+}
+async function flush() {
+  for (let index = 0; index < 8; index += 1) await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function scenarioSelectionLimit() {
+  const ctx = createExplorerContext();
+  ctx.context.resetExperimentsExplorer();
+  const entries = ["1", "2", "3"].map((suffix) => ({
+    family: "baseline",
+    run_id: "00000000-0000-4000-8000-00000000000" + suffix,
+    asset_id: ASSET,
+  }));
+  ctx.context.experimentsToggleSelection(entries[0], true);
+  ctx.context.experimentsToggleSelection(entries[1], true);
+  ctx.context.experimentsToggleSelection(entries[2], true);
+  assertEquals(ctx.context.selectedKeys().length, 2, "only two studies are contrasted");
+  assertIncludes(ctx.text("experiments-status"), "dos estudios", "limit message");
+  ctx.context.experimentsToggleSelection(entries[0], false);
+  assertEquals(ctx.context.selectedKeys().length, 1, "deselection removes");
+  return "selection_limit";
+}
+
+async function scenarioDecisionLiterals() {
+  const ctx = createExplorerContext();
+  const baseline = {
+    payload: {
+      family: "baseline",
+      report: {
+        artifact: { status: "completed" },
+        development: { decision: "no_demonstrated_edge" },
+      },
+    },
+  };
+  const funding = { payload: { family: "funding", decision: "no_demonstrated_increment" } };
+  const unknown = { payload: { family: "funding", decision: null } };
+  assertEquals(
+    ctx.context.experimentsDecision(baseline).label, "No se demostró ventaja", "baseline",
+  );
+  assertEquals(
+    ctx.context.experimentsDecision(funding).label, "No se demostró incremento", "funding",
+  );
+  assertEquals(ctx.context.experimentsDecision(unknown).tone, "bad", "unknown is explicit");
+  return "decision_literals";
+}
+
+async function scenarioComparisonDifferences() {
+  const ctx = createExplorerContext();
+  assertEquals(ctx.context.experimentsComparisonRow("X", "1", "1")[3], "Igual", "equal");
+  assertEquals(ctx.context.experimentsComparisonRow("X", "1", "2")[3], "Distinto", "different");
+  assertEquals(ctx.context.experimentsComparisonRow("X", "—", "2")[3], "Desconocido", "unknown");
+  return "comparison_differences";
+}
+
+async function scenarioDownload() {
+  const ctx = createExplorerContext();
+  const view = fundingView();
+  ctx.context.rememberDetail(view);
+  ctx.context.experimentsDownload();
+  const anchor = ctx.created[ctx.created.length - 1];
+  assertEquals(anchor.download, "funding-" + FUNDING_RUN + ".json", "deterministic name");
+  assertEquals(ctx.objectUrls.length, 1, "one object url");
+  const oversized = fundingView();
+  oversized.payload.protocol.hypothesis = "x".repeat(1200000);
+  ctx.context.rememberDetail(oversized);
+  ctx.context.experimentsDownload();
+  assertEquals(ctx.objectUrls.length, 1, "oversized export is refused");
+  assertIncludes(ctx.text("experiments-status"), "1 MiB", "explicit size error");
+  return "download";
+}
+
+async function scenarioLateListResponseIsDiscarded() {
+  const ctx = createExplorerContext();
+  let resolveFirst;
+  ctx.setApi(() => new Promise((resolve) => { resolveFirst = resolve; }));
+  const loading = ctx.context.experimentsLoadPage(true);
+  ctx.context.setAsset("equity:us:aapl");
+  resolveFirst(listPayload());
+  await loading;
+  await flush();
+  assertEquals(
+    ctx.elements.get("experiments-list").children.length,
+    0,
+    "late response is discarded",
+  );
+  assertEquals(ctx.hidden("experiments-comparison"), true, "comparison stays hidden");
+  return "late_list_response";
+}
+
+(async () => {
+  const results = [];
+  for (const scenario of [
+    scenarioSelectionLimit,
+    scenarioDecisionLiterals,
+    scenarioComparisonDifferences,
+    scenarioDownload,
+    scenarioLateListResponseIsDiscarded,
+  ]) {
+    results.push(await scenario());
+  }
+  console.log(JSON.stringify({ ok: true, scenarios: results }));
+})().catch((error) => {
+  console.error(error && error.stack ? error.stack : String(error));
+  process.exit(1);
+});
+"""
+
+
+def test_experiment_explorer_behavior() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the real JavaScript behavior harness")
+    result = subprocess.run(
+        [node, "-", str(_TECHNICAL), str(_CORE)],
+        input=_EXPLORER_HARNESS,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["scenarios"] == [
+        "selection_limit",
+        "decision_literals",
+        "comparison_differences",
+        "download",
+        "late_list_response",
+    ]
+
+
+def test_experiment_explorer_has_no_html_injection_and_no_aggregate_scoring() -> None:
+    source = _TECHNICAL.read_text(encoding="utf-8")
+    block = source[source.index("const EXPERIMENT_LIST_SCHEMA") :]
+    assert "innerHTML" not in block
+    assert "https://" not in block
+    assert "localStorage" not in block
+    assert "sessionStorage" not in block
+    assert block.count("/api/v1/research/experiments?") == 1
+    assert block.count("/api/v1/research/experiment-report?") == 2
+    assert "initializeExperimentsExplorer();" in block
+    assert "máscara de funding" in block
+    assert "No es una comparación pareada" in block
+    assert "no se calcula delta, significancia cruzada," in block
+    assert block.count("mejor estudio") <= 2

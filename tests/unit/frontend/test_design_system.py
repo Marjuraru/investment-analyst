@@ -1676,8 +1676,11 @@ def _check_no_new_capability_or_route_is_introduced_by_the_shell(app_js: str) ->
 # BOARD_REGISTRY declaration. UI-7 adds the already-integrated, read-only
 # Cazatiburones notification inbox route; #375 adds the already-integrated,
 # read-only explicit annual filing options route; #377 adds the explicit
-# annual horizons route authorized by its own Work Block. No transport or
-# contract changes beyond those authorized Work Blocks.
+# annual horizons route authorized by its own Work Block. RESEARCH-
+# EXPERIMENTS-DELIVERY adds the two read-only discovery routes it owns
+# (`/api/v1/research/experiments` and `/api/v1/research/experiment-report`);
+# the legacy `/api/v1/research/ml-report` remains for the compatibility
+# lookup. No transport or contract changes beyond those authorized blocks.
 _BASELINE_API_ROUTES = frozenset(
     {
         "/api/alerts",
@@ -1711,6 +1714,8 @@ _BASELINE_API_ROUTES = frozenset(
         "/api/v1/market-comparison",
         "/api/v1/market-patterns",
         "/api/v1/overview",
+        "/api/v1/research/experiment-report",
+        "/api/v1/research/experiments",
         "/api/v1/research/ml-report",
         "/api/v1/sec-document-timeline",
         "/api/v1/universe-coverage",

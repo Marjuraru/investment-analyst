@@ -879,6 +879,129 @@ hashes (`eaf3d5f8…` y `c8369212…`). El lector funcionó con las dependencias
   hay entrenamiento automático posterior ni promoción de predictor. Un resultado longitudinal no
   demuestra por sí mismo una ventaja operativa ni cambia V1-U4.
 
+## Descubrimiento, detalle y contraste de estudios (#407)
+
+`RESEARCH-EXPERIMENTS-DELIVERY` completa el recorrido local de investigación: descubrir los estudios
+sellados de un activo, abrir su detalle verificado, contrastar condiciones lado a lado y descargar la
+proyección consultada. Reutiliza el lector baseline y `read_funding_ml_artifact`; crea sólo dos
+contratos de presentación aislados, `research-experiment-list-v1` y
+`research-experiment-report-view-v1`, con una unión discriminada `family=baseline|funding`. No
+recomputa evaluaciones, no entrena, no abre el workspace, no contacta proveedores y no convierte un
+resultado retrospectivo en señal, recomendación o ranking.
+
+### Contratos y composición
+
+- `GET /api/v1/research/experiments?asset_id=<catalog-id>&family=all|baseline|funding&limit=<1..50>&cursor=<token>`
+  enumera sólo hijos directos de las dos raíces, con tope de 256 entradas por raíz. `family` default
+  `all`, `limit` default 20. La página lee únicamente `manifest.json` y `protocol.json` de sus
+  candidatos (≤64 KiB cada uno), verifica codificación canónica, binding protocolo↔manifiesto y
+  `asset_id` antes de hidratar nada; no abre `report.json`, `predictions.parquet`, datasets ni
+  lineage y no publica métricas ni veredicto.
+- `GET /api/v1/research/experiment-report?asset_id=<catalog-id>&family=baseline|funding&run_id=<uuid>`
+  devuelve la vista discriminada. Baseline delega exactamente en `MlResearchReportService` y su
+  proyección existente; funding verifica el run completo y copia protocolo, resultados y proveniencia
+  sin recomputar la evaluación. Los `Decimal` viajan como texto y no se convierten a float.
+- `--ml-results-root` conserva su contrato. Se añade `--ml-funding-results-root` (absoluto, default
+  `~/.local/share/investment-analyst/research/ml-funding-validation`). Las raíces son del servidor y
+  nunca llegan por HTTP; no se crean directorios al iniciar ni al consultar. El servicio nuevo se
+  inyecta junto a la misma instancia baseline: no hay segunda caché ni segunda construcción de
+  storage. `GET /api/v1/research/ml-report` y `?ml_run_id=<uuid>` siguen funcionando como baseline;
+  `ml_family` sólo identifica la familia y nunca una ruta.
+
+### Límites, errores y coste
+
+- Raíz ausente es estado vacío explícito (`missing`), nunca cero. Raíz symlink o ilegible falla
+  cerrada; no se sigue ningún symlink, no se acepta traversal y un nombre de directorio no canónico
+  nunca se convierte en ruta. Un candidato incompleto o corrupto se declara como advertencia compacta
+  y no se presenta como estudio verificado.
+- El cursor es opaco y versionado: valida el último `(family, run_id)`, el contexto activo / familia /
+  límite y la huella del inventario ordenado. Un inventario cambiado devuelve error explícito y exige
+  reiniciar el listado, sin saltos ni duplicados silenciosos. Una página puede tener cero
+  coincidencias y ofrecer cursor: no se anuncia fin mientras queden candidatos.
+- Caps de funding: protocolo y manifiesto ≤64 KiB, reporte ≤1 MiB, predicciones ≤8 MiB, conjunto
+  ≤16 MiB. La caché nueva conserva ≤4 entradas / 2 MiB de proyecciones —nunca datasets, modelos ni
+  Parquet— y la baseline conserva su 8 / 2 MiB: presupuesto combinado ≤12 entradas / 4 MiB. Un cambio
+  de contenido invalida aunque se preserven tamaño y `mtime`; las peticiones idénticas concurrentes se
+  coalescen y una respuesta tardía se descarta.
+- `400` para parámetros ausentes, duplicados, desconocidos, UUID no canónico, límite fuera de rango,
+  familia inválida o activo fuera del catálogo; `404` para raíz o run inexistente; `409` para artefacto
+  incompatible/corrupto, `asset_id` distinto, cursor stale, capacidad excedida o servicio no
+  configurado. No hay fallback a otro run.
+
+### Interfaz
+
+El panel de investigación existente se amplía; no se crea un dashboard paralelo. La primera apertura
+ocurre por acción explícita, con selector de familia, páginas navegables, selección de run y consulta
+manual por UUID como alternativa. Al cambiar activo, familia, página o run se cancelan las peticiones
+obsoletas, se limpia el detalle y el contraste incompatibles y se descartan respuestas tardías; la app
+no consulta estudios al iniciar ni en polling.
+
+El detalle muestra el resultado principal neutral según la decisión literal, distingue siempre la
+evaluación retrospectiva de una señal utilizable y expone objetivo, ventana, tamaño OOS con sus cuatro
+scorers, criterio, protocolo, folds, calibración, proveniencia y JSON en disclosure progresivo. El
+contraste admite hasta dos estudios del mismo activo y es sólo descriptivo: no calcula delta,
+significancia cruzada, ranking ni «mejor estudio». Declara explícitamente que baseline y funding no son
+una comparación pareada porque el entrenamiento difiere por la máscara de funding, y que las métricas
+de #395 no son un control válido para #405. «Descargar reporte JSON» exporta exactamente la proyección
+verificada como `family-run_id.json` desde el navegador, con límite de 1 MiB y sin filesystem del
+servidor, red adicional ni recomputación.
+
+### Comandos y verificación
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/serve_investment_analyst.py \
+  --ml-results-root /home/marjuraru/.local/share/investment-analyst/research/ml-baseline-validation \
+  --ml-funding-results-root /home/marjuraru/.local/share/investment-analyst/research/ml-funding-validation
+```
+
+```text
+GET http://127.0.0.1:8765/api/v1/research/experiments?asset_id=crypto:btc-usd&family=all&limit=20
+GET http://127.0.0.1:8765/api/v1/research/experiment-report?asset_id=crypto:btc-usd&family=funding&run_id=8dbc6330-1ff2-51bc-b701-a65611afa495
+```
+
+La prueba focalizada es
+`tests/unit/research/test_experiment_report_service.py`,
+`tests/integration/frontend/test_research_experiments.py`,
+`tests/unit/frontend/test_ml_research_report_behavior.py`,
+`tests/integration/frontend/test_ml_research_report.py`,
+`tests/unit/research/test_ml_report_service.py`,
+`tests/unit/frontend/test_design_system.py`,
+`tests/integration/application/test_serve_storage_observability_composition.py` y
+`tests/unit/test_delivery_route_contract.py`. El smoke premerge usa el servicio local con scheduler
+deshabilitado, raíces reales en sólo lectura y Chromium con Node/CDP.
+
+### Resultado real (premerge, 2026-11-03)
+
+Smoke desde el candidato exact-SHA sobre las raíces reales, con workspace, estado, perfil y puerto
+scratch, scheduler deshabilitado y sin proveedores:
+
+- Servicio: el listado `family=all` con `limit=2` recorrió los 5 candidatos en 3 páginas (2+2+1), sin
+  duplicados ni saltos. Los 3 runs verificables son `276e7e72…` y `fc4ea570…` (baseline) y
+  `8dbc6330…` (funding). Los candidatos de funding `151ce74c…` y `411a4c42…` quedaron como
+  `incompatible_artifact`: se sellaron con un campo `criteria.tie_tolerance` que el lector vigente
+  rechaza —`read_funding_ml_artifact` también los rechaza—, así que no se presentan como estudios y no
+  se reescriben.
+- Igualdad con los lectores originales: el detalle baseline coincide exactamente con la proyección
+  JSON de `MlResearchReportService` (`manifest ecacc2c8…`, `no_demonstrated_edge`, holdout
+  `not_evaluated`, 2.532 filas OOS); el detalle funding coincide con `read_funding_ml_artifact`
+  (`manifest 7540484f…`, reporte `8154507e…`, `no_demonstrated_increment`, Brier 0,249403… /
+  0,250944… / 0,25 / 0,248535…) y el holdout sigue en 0 accesos y 0 fits. Ningún payload incluye
+  rutas absolutas.
+- Navegador real (`Chromium 153.0.8010.12`, Node 24.20.0 y CDP, perfil y descargas scratch):
+  descubrió el listado, abrió ambos runs de referencia, construyó el contraste de 19 filas con la nota
+  de no-comparación pareada y descargó `funding-8dbc6330-1ff2-51bc-b701-a65611afa495.json` (28.890 B)
+  cuyo JSON es idéntico a la proyección recibida. Con una petición de listado retenida y un cambio de
+  activo a `equity:us:aapl`, la app canceló la petición y no renderizó la respuesta tardía: lista
+  vacía, detalle y contraste ocultos.
+- El control «Siguiente página» se ejerció contra una raíz scratch de 21 entradas: la página 1 examinó
+  20 candidatos, la página 2 examinó 3 y detuvo el cursor.
+- Coste medido: listado en frío 2,1 ms y en caliente 1,4 ms con 10 lecturas de cabecera y 27.111 B
+  (sólo manifiesto y protocolo de los candidatos examinados); detalle funding en frío 16,4 ms y en
+  caliente 0,24 ms, con una única verificación completa y caché de 1 entrada / 28.890 B; el detalle no
+  vuelve a enumerar raíces. RSS pico del proceso de medición 98,0 MB. Un corpus ajeno de 21 y 210
+  entradas mantuvo el examen en 20 candidatos, 9.666 B y tiempos planos: sólo crece la enumeración
+  acotada de nombres.
+
 ## Presupuesto y retención
 
 La raíz real `~/.local/share/investment-analyst/research/predictive-foundation` tiene cap de 16 MiB;

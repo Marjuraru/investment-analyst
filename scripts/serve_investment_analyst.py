@@ -85,6 +85,7 @@ from investment_analyst.frontend.local_web import (
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
 from investment_analyst.providers.macro.fred_alfred import FredApiKey
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials
+from investment_analyst.research.experiment_report_service import ExperimentReportService
 from investment_analyst.research.ml_report_service import MlResearchReportService
 from investment_analyst.storage import StorageError, StoragePaths
 from investment_analyst.workspace.service import WorkspaceError
@@ -103,6 +104,9 @@ _SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS = 60.0
 _BYTES_PER_MEGABYTE = 1024 * 1024
 _DEFAULT_ML_RESULTS_ROOT = (
     Path.home() / ".local/share/investment-analyst/research/ml-baseline-validation"
+)
+_DEFAULT_ML_FUNDING_RESULTS_ROOT = (
+    Path.home() / ".local/share/investment-analyst/research/ml-funding-validation"
 )
 
 
@@ -199,6 +203,11 @@ def _parser() -> argparse.ArgumentParser:
         "--ml-results-root",
         type=_absolute_path,
         default=_DEFAULT_ML_RESULTS_ROOT,
+    )
+    parser.add_argument(
+        "--ml-funding-results-root",
+        type=_absolute_path,
+        default=_DEFAULT_ML_FUNDING_RESULTS_ROOT,
     )
     parser.add_argument("--port", type=_port, default=8765)
     parser.add_argument("--no-scheduler", action="store_true")
@@ -425,6 +434,10 @@ def _serve_after_lock(
     )
 
     ml_reports = MlResearchReportService(arguments.ml_results_root)
+    experiment_reports = ExperimentReportService(
+        baseline_reports=ml_reports,
+        funding_root=arguments.ml_funding_results_root,
+    )
     web_application = AaplLocalWebApplication(
         controller,
         scheduler,
@@ -437,6 +450,7 @@ def _serve_after_lock(
         asset_preferences=preference_service,
         desktop_notifications=desktop_notification_service,
         ml_reports=ml_reports,
+        experiment_reports=experiment_reports,
     )
     manual_operations = ManualOperationQueue(
         ManualOperationStateStore(state_root / _MANUAL_OPERATION_STATE_FILE),
