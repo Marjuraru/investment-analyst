@@ -27,9 +27,11 @@ trading, posición u orden.
 ## Contrato de provider e intervalos
 
 Las fechas públicas son inclusivas y se convierten a un intervalo interno UTC half-open. Funding
-se solicita en chunks máximos de 31 días y siempre se filtra con
+se solicita en chunks máximos de 743 horas (31 días menos una hora) y siempre se filtra con
 `start <= timestamp < end`: una fila devuelta exactamente en `end_timestamp` no entra en el
-information set. `interest_1h` e `interest_8h` son campos históricos distintos.
+information set. El límite de 743 h evita la pérdida de puntos iniciales observada en ventanas más
+largas; los archivos históricos sellados con páginas de hasta 31 días siguen siendo legibles y no se
+reescriben. `interest_1h` e `interest_8h` son campos históricos distintos.
 
 DVOL usa resolución literal `1D`, chunks máximos de 366 días y paginación hacia atrás. El valor
 `continuation` pasa a ser el próximo `end_timestamp`; repetición, ciclo, dirección no decreciente o

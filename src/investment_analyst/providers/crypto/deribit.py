@@ -19,7 +19,9 @@ FUNDING_METHOD = "public/get_funding_rate_history"
 DVOL_METHOD = "public/get_volatility_index_data"
 SUMMARY_METHOD = "public/get_book_summary_by_instrument"
 DVOL_RESOLUTION = "1D"
-MAX_FUNDING_INTERVAL = timedelta(days=31)
+# Deribit drops leading points on longer funding windows; 743 h keeps the observed
+# boundary intact while remaining below the 31-day historical archive limit.
+MAX_FUNDING_INTERVAL = timedelta(hours=743)
 MAX_DVOL_INTERVAL = timedelta(days=366)
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_HISTORICAL_ROWS = 1_000
@@ -273,7 +275,7 @@ class DeribitClient:
         start: datetime,
         end: datetime,
     ) -> DeribitFundingFetch:
-        """Fetch consecutive 31-day chunks and enforce internal half-open semantics."""
+        """Fetch consecutive 743-hour chunks and enforce internal half-open semantics."""
         _require_instrument(instrument_name)
         requested_start, requested_end = _range(start, end)
         points_by_time: dict[datetime, DeribitFundingPoint] = {}

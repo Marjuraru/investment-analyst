@@ -12,23 +12,30 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from pydantic import ValidationError
 
-from investment_analyst.providers.crypto.deribit import DeribitClient
+from investment_analyst.providers.crypto.deribit import MAX_FUNDING_INTERVAL, DeribitClient
 from investment_analyst.providers.http import HttpResponse
 from investment_analyst.research.funding_archive import (
     FundingArchiveConflictError,
     FundingArchiveError,
     FundingArchiveRequestError,
     FundingArchiveScopeError,
+    _page_bytes,
+    _sha256_bytes,
     acquire_funding_archive,
+    build_funding_archive,
     read_funding_archive,
     resolve_funding_scope,
+    seal_funding_archive,
     validate_funding_archive_request,
 )
 from investment_analyst.research.funding_models import (
     ARCHIVE_PAGES_FILE_NAME,
     MANIFEST_FILE_NAME,
+    FundingArchivePage,
+    FundingPoint,
     assumed_funding_available_instant,
     funding_archive_request,
+    funding_point_id,
 )
 
 _START = date(2024, 1, 1)
@@ -159,6 +166,10 @@ def _request(start: date = _START, end: date = _END):
     )
 
 
+def _ms(value: datetime) -> int:
+    return int(value.timestamp() * 1_000)
+
+
 def test_three_day_request_seals_one_page_with_exact_derived_range(tmp_path: Path) -> None:
     transport = FakeTransport(_handler())
     receipt = _acquire(
@@ -209,11 +220,112 @@ def test_full_derived_range_uses_the_bounded_sequential_page_count(tmp_path: Pat
     assert receipt.missing_points == 0
     assert receipt.page_count == 71
     assert receipt.page_count <= 72
-    assert len(transport.requests) == 71
+    assert len(transport.requests) == receipt.page_count
     archive = read_funding_archive(Path(receipt.archive_dir))
+    assert archive.points[0].timestamp == archive.manifest.request.requested_start
+    assert archive.points[-1].timestamp == (
+        archive.manifest.request.requested_end - timedelta(hours=1)
+    )
+    for index, page in enumerate(archive.manifest.pages):
+        query = parse_qs(urlparse(page.request_url).query)
+        assert int(query["start_timestamp"][0]) == _ms(page.requested_start) - 1
+        assert int(query["end_timestamp"][0]) == _ms(page.requested_end)
+        page_points = tuple(
+            point for point in archive.points if point.page_index == page.page_index
+        )
+        assert page_points[0].timestamp == page.requested_start
+        assert page_points[-1].timestamp == page.requested_end - timedelta(hours=1)
+        if index < len(archive.manifest.pages) - 1:
+            assert page.requested_end - page.requested_start == MAX_FUNDING_INTERVAL
+        else:
+            assert page.requested_end - page.requested_start <= MAX_FUNDING_INTERVAL
     for previous, current in zip(archive.manifest.pages, archive.manifest.pages[1:], strict=False):
         assert current.requested_start == previous.requested_end
-        assert current.requested_end - current.requested_start <= timedelta(days=31)
+
+
+def _legacy_point(timestamp: datetime) -> FundingPoint:
+    raw = {
+        "timestamp": str(_ms(timestamp)),
+        "index_price": _INDEX,
+        "prev_index_price": "100",
+        "interest_1h": _INTEREST,
+        "interest_8h": "0.000008",
+    }
+    return FundingPoint(
+        point_id=funding_point_id(
+            funding_source_id="deribit:btc-perpetual:funding-rate-history",
+            timestamp=timestamp,
+            index_price=Decimal(_INDEX),
+            prev_index_price=Decimal("100"),
+            interest_1h=Decimal(_INTEREST),
+            interest_8h=Decimal("0.000008"),
+            raw_payload=raw,
+        ),
+        page_index=0,
+        timestamp=timestamp,
+        index_price=Decimal(_INDEX),
+        prev_index_price=Decimal("100"),
+        interest_1h=Decimal(_INTEREST),
+        interest_8h=Decimal("0.000008"),
+        raw_payload=raw,
+        assumed_available_at=assumed_funding_available_instant(timestamp),
+    )
+
+
+def test_legacy_31_day_archive_is_readable_and_reused_without_rewrite(tmp_path: Path) -> None:
+    request = _request(date(2024, 1, 1), date(2024, 1, 25))
+    assert request.requested_end - request.requested_start == timedelta(days=31)
+    points = tuple(
+        _legacy_point(request.requested_start + timedelta(hours=offset))
+        for offset in range(request.expected_points)
+    )
+    payload = _page_bytes(points)
+    page = FundingArchivePage(
+        page_index=0,
+        requested_start=request.requested_start,
+        requested_end=request.requested_end,
+        request_url="https://example.invalid/legacy-31-day-page",
+        started_at=datetime(2026, 11, 2, 0, 0, 0, tzinfo=UTC),
+        finished_at=datetime(2026, 11, 2, 0, 1, 0, tzinfo=UTC),
+        elapsed_milliseconds=1_000,
+        retrieved_at=_RETRIEVED,
+        point_count=len(points),
+        points_sha256=_sha256_bytes(payload),
+        points_bytes=len(payload),
+    )
+    scope = resolve_funding_scope("crypto:btc-usd")
+    archive = build_funding_archive(
+        asset=scope.asset,
+        request=request,
+        pages=(page,),
+        points=points,
+        retrieved_at=_RETRIEVED,
+    )
+    receipt = seal_funding_archive(archive, output_dir=tmp_path / "legacy")
+    archive_dir = Path(receipt.archive_dir)
+    pages_path = archive_dir / ARCHIVE_PAGES_FILE_NAME
+    manifest_path = archive_dir / MANIFEST_FILE_NAME
+    pages_before = pages_path.read_bytes()
+    manifest_before = manifest_path.read_bytes()
+    pages_mtime = pages_path.stat().st_mtime_ns
+    manifest_mtime = manifest_path.stat().st_mtime_ns
+
+    def forbidden(_url: str) -> tuple[int, bytes]:
+        raise AssertionError("provider must not be called for a legacy sealed archive")
+
+    reused = _acquire(
+        _client(handler=forbidden),
+        request,
+        output_dir=tmp_path / "legacy",
+    )
+    assert reused.status == "reused"
+    assert reused.archive_id == receipt.archive_id
+    assert reused.page_count == 1
+    assert pages_path.read_bytes() == pages_before
+    assert manifest_path.read_bytes() == manifest_before
+    assert pages_path.stat().st_mtime_ns == pages_mtime
+    assert manifest_path.stat().st_mtime_ns == manifest_mtime
+    assert read_funding_archive(archive_dir).points == points
 
 
 def test_decimal_and_raw_text_are_preserved_exactly(tmp_path: Path) -> None:

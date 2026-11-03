@@ -84,6 +84,12 @@ complemento con sumas causales de 24 h y 168 h. La admisión queda
 frente al piso de 95 %. No se entrena, no se evalúa el holdout, no se promueve un predictor y V1-U4
 permanece `UNKNOWN`. `PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`.
 
+`FUNDING-BOUNDARY-COVERAGE`/#403 (`ADVANCES`) corrige la partición a 743 h: recupera 70 de las 72
+ausencias de #399, conserva las dos internas y publica la recepción `9d6c0972…` con 52.606/52.608
+puntos. El bundle `fca740b8…` pasa a `funding_data_ready` con 1.719/1.726 = 99,59 % de cobertura
+conjunta; no se entrena, no se evalúa el holdout y no se promueve un predictor.
+`PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`.
+
 La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de crecimiento viven en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md).
 La implementación vigente de reglas, replay y entrega se reconcilia en

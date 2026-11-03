@@ -11,6 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from investment_analyst.providers.crypto.deribit import (
+    MAX_FUNDING_INTERVAL,
     MAX_SUMMARY_CLOCK_LEAD,
     SUMMARY_CLOCK_TOLERANCE_POLICY,
     DeribitClient,
@@ -78,6 +79,48 @@ def _funding_row(timestamp: datetime) -> dict[str, object]:
     }
 
 
+class _FundingTransport:
+    """Deterministic transport that reproduces the observed leading-point truncation."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        timeout_seconds: float,
+        max_response_bytes: int | None = None,
+    ) -> HttpResponse:
+        del headers, timeout_seconds, max_response_bytes
+        self.calls.append(url)
+        query = parse_qs(urlsplit(url).query)
+        start_ms = int(query["start_timestamp"][0]) + 1
+        end_ms = int(query["end_timestamp"][0])
+        rows: list[dict[str, object]] = []
+        timestamp = start_ms
+        while timestamp < end_ms:
+            rows.append(
+                {
+                    "timestamp": timestamp,
+                    "index_price": "100000.01",
+                    "prev_index_price": "99999.99",
+                    "interest_1h": "0.000001",
+                    "interest_8h": "0.000008",
+                }
+            )
+            timestamp += 3_600_000
+        if end_ms - start_ms > int(MAX_FUNDING_INTERVAL.total_seconds() * 1_000):
+            rows = rows[1:]
+        return HttpResponse(
+            status_code=200,
+            body=_rpc(rows),
+            headers={},
+            url=url,
+        )
+
+
 def _dvol_row(timestamp: datetime, close: str) -> list[object]:
     return [_ms(timestamp), "50", "60", "45", close]
 
@@ -133,7 +176,7 @@ def test_funding_filters_exact_end_boundary_and_preserves_historical_fields() ->
     assert int(query["end_timestamp"][0]) == _ms(_END)
 
 
-def test_funding_rejects_duplicate_timestamp_and_chunks_at_31_days() -> None:
+def test_funding_rejects_duplicate_timestamp() -> None:
     duplicate = _funding_row(_START)
     with pytest.raises(DeribitError, match="duplicate funding timestamp"):
         DeribitClient(
@@ -142,19 +185,67 @@ def test_funding_rejects_duplicate_timestamp_and_chunks_at_31_days() -> None:
             clock=lambda: _END,
         ).fetch_funding_history("BTC-PERPETUAL", _START, _END)
 
-    transport = _Transport(_rpc([]), _rpc([]))
-    DeribitClient(
+
+@pytest.mark.parametrize(
+    ("hours", "expected_windows"),
+    [(3, (3,)), (743, (743,)), (757, (743, 14))],
+)
+def test_funding_safe_window_boundaries_and_partial_tail(
+    hours: int,
+    expected_windows: tuple[int, ...],
+) -> None:
+    end = _START + timedelta(hours=hours)
+    transport = _FundingTransport()
+    result = DeribitClient(
         transport,
         sleep=lambda _: None,
-        clock=lambda: _START + timedelta(days=33),
-    ).fetch_funding_history(
-        "BTC-PERPETUAL",
-        _START,
-        _START + timedelta(days=32),
+        clock=lambda: end + timedelta(hours=1),
+    ).fetch_funding_history("BTC-PERPETUAL", _START, end)
+
+    queries = tuple(parse_qs(urlsplit(url).query) for url in transport.calls)
+    observed_windows = tuple(
+        (int(query["end_timestamp"][0]) - (int(query["start_timestamp"][0]) + 1)) // 3_600_000
+        for query in queries
     )
-    queries = tuple(parse_qs(urlsplit(call[0]).query) for call in transport.calls)
-    assert int(queries[0]["end_timestamp"][0]) == _ms(_START + timedelta(days=31))
-    assert int(queries[1]["start_timestamp"][0]) == _ms(_START + timedelta(days=31)) - 1
+    assert observed_windows == expected_windows
+    assert result.points[0].timestamp == _START
+    assert result.points[-1].timestamp == end - timedelta(hours=1)
+    assert timedelta(hours=743) == MAX_FUNDING_INTERVAL
+
+
+@pytest.mark.parametrize("instrument_name", ["BTC-PERPETUAL", "ETH-PERPETUAL"])
+def test_funding_long_interval_equals_its_safe_partition_union(
+    instrument_name: str,
+) -> None:
+    end = _START + timedelta(hours=744)
+    transport = _FundingTransport()
+    long_fetch = DeribitClient(
+        transport,
+        sleep=lambda _: None,
+        clock=lambda: end + timedelta(hours=1),
+    ).fetch_funding_history(instrument_name, _START, end)
+
+    assert len(transport.calls) == 2
+    assert long_fetch.points[0].timestamp == _START
+    assert len(long_fetch.points) == 744
+
+    partitioned: list[DeribitFundingPoint] = []
+    windows = (
+        (_START, _START + MAX_FUNDING_INTERVAL),
+        (_START + MAX_FUNDING_INTERVAL, end),
+    )
+    for window_start, window_end in windows:
+        partitioned.extend(
+            DeribitClient(
+                _FundingTransport(),
+                sleep=lambda _: None,
+                clock=lambda: end + timedelta(hours=1),
+            )
+            .fetch_funding_history(instrument_name, window_start, window_end)
+            .points
+        )
+
+    assert long_fetch.points == tuple(partitioned)
 
 
 def test_historical_fetch_rejects_interval_not_closed_at_retrieval() -> None:

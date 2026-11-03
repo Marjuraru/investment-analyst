@@ -498,6 +498,24 @@ control técnico sobre exactamente las mismas fechas, sin tuning ni promoción a
 construcción correcta es una entrega válida aunque la admisión sea insuficiente; el resultado no
 reabre el experimento ML cerrado ni cambia V1-U4.
 
+### FUNDING-BOUNDARY-COVERAGE — páginas seguras y nueva admisión (`ADVANCES`, sin cierre)
+
+`FUNDING-BOUNDARY-COVERAGE`/#403 avanza la misma fila sin cerrarla. Ajusta la partición de funding a
+743 h, reutiliza el mismo máximo en la capa de archivo para que cada página lógica sea un request y
+conserva la lectura de archivos históricos de 31 días. La nueva recepción `9d6c0972…` (semántico
+`bf5dbd75…`, páginas `3281f58c…`) observa 52.606/52.608 puntos: recupera las 70 ausencias de borde,
+conserva `2020-08-27T06:00Z` y `07:00Z`, y no retira ni revisa puntos. El bundle `fca740b8…` con
+`known_at=2026-11-02T22:36:16Z` alcanza `funding_data_ready` con 1.719/1.726 = 0,995944… y mantiene
+los pisos de train 1.293, validation 426 y holdout 438. No se entrena, no se evalúa el holdout, no se
+calcula correlación ni se promueve un predictor. El siguiente esperado es `ML-FUNDING-VALIDATION`
+sólo si PLAN lo autoriza; este bloque no lo ejecuta.
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
+
+`FUNDAMENTALS-COVERAGE` continúa `PLANNED` y `DATA-CHASSIS` permanece `DONE`. V1-U4 permanece
+`UNKNOWN`; la mejora de cobertura es una condición necesaria, no una señal ni una promesa de
+rendimiento.
+
 ### Objetivos V1
 
 Este bloque especifica métodos: no ejecuta campañas, no declara `MET` y no crea otro marco ni

@@ -642,8 +642,10 @@ El rango se deriva de la grilla del dataset reconstruido, nunca de labels. Para 
 12:00 UTC el ancla es D 00:00 UTC; la ventana de 24 h contiene D00−23 h..D00 y la de 168 h contiene
 D00−167 h..D00. Para `2020-01-01..2025-12-25` el intervalo es
 `[2019-12-25T01:00:00Z, 2025-12-25T01:00:00Z)`, con 2.186 decisiones y 52.608 puntos horarios
-máximos. La adquisición usa páginas lógicas de hasta 31 días, secuenciales, con el pacing y el
-transporte existentes, y un máximo de 72 páginas. Un fallo de página no sella un archivo parcial.
+máximos. La adquisición usa páginas lógicas de hasta 743 horas (31 días menos una hora), una por
+request, secuenciales, con el pacing y el transporte existentes, y un máximo de 72 páginas. El
+modelo de archivo conserva la admisión histórica de 31 días para leer recepciones ya selladas. Un
+fallo de página no sella un archivo parcial.
 
 `pages.jsonl` conserva por fila `page_index`, `point_id`, `timestamp` y el `raw_payload` con los
 cinco campos exactos como texto. El manifiesto guarda el contexto común: identidad de catálogo,
@@ -721,20 +723,43 @@ La vista TRAIN/VALIDATION devuelve 1.748 filas con features y targets separados;
 quedan fuera y su disponibilidad sólo se cuenta. No se entrena, no se calcula correlación,
 performance, selección de clases ni target de holdout, y no se declara una señal o recomendación.
 
+### Corrección de paginación y nueva recepción (2026-11-02)
+
+La recepción anterior `95c542f0…` se conserva como evidencia histórica de #399. La comparación por
+timestamp y payload Decimal mostró que 70 de sus 72 ausencias coincidían con inicios de página de 31
+días y sólo `2020-08-27T06:00Z` y `07:00Z` eran huecos internos.
+
+La nueva recepción `9d6c0972-984d-5dac-a3ad-5f7ef3d05973` (semántico `bf5dbd75…`, páginas
+`3281f58c…`) usa páginas de 743 h y un request por página. Tiene 71 páginas, 52.606/52.608 puntos
+observados, `pages.jsonl` de 14.649.075 B y manifiesto de 41.170 B; terminó en
+`2026-11-02T22:36:01.797130Z` tras 71 requests, 107,72 s y un pico RSS de 488.376 KB. Recupera las 70
+ausencias de borde, conserva las dos internas, no añade ausencias en inicios de página y no retira ni
+revisa ningún punto.
+
+El bundle `fca740b8-8f38-5703-8006-e6a467bfb3ba` (contenido `2c626662…`) se construyó con
+`known_at=2026-11-02T22:36:16Z`: 2.186 filas, Parquet de 786.546 B y manifiesto de 2.491.635 B, en
+11,16 s con pico RSS de 371.188 KB. La raíz completa ocupa 17.968.426 B. La admisión pasa a
+`funding_data_ready` con 1.719/1.726 = 0,995944… frente al piso 0,95; train 1.293, validation 426 y
+holdout 438. Permanecen 1 fila sin `funding_sum_1h_24h` y 7 sin `funding_sum_1h_168h` por los dos
+huecos internos; no se imputa ninguna. La vista TRAIN/VALIDATION conserva 1.748 filas y el holdout
+sigue fuera. Este resultado habilita un experimento de funding como siguiente decisión de PLAN; no
+se entrena, no se evalúa el holdout y no se promueve un predictor.
+
 ### Limitaciones y siguiente decisión
 
 - El funding se reconstruye con la recepción actual; no demuestra la primera publicación histórica
   ni satisface el gate de PIT observado.
 - La disponibilidad es un supuesto de fin de ventana más una hora, no un SLA ni una observación de
   recepción por punto.
-- Los 72 huecos del proveedor se conservan; una ventana de 168 h que contenga uno de ellos queda
-  `missing`, aunque la de 24 h sí esté disponible. No se acorta ni se interpola.
+- En la recepción histórica de #399 se conservaban 72 huecos; la recepción corregida conserva sólo
+  los dos internos. Una ventana de 168 h que contenga uno de ellos queda `missing`, aunque la de 24 h
+  sí esté disponible. No se acorta ni se interpola.
 - El uso es personal y local; no se afirma licencia abierta ni derecho de redistribución.
-- La admisión insuficiente no es una prueba estadística ni autoriza entrenar. El siguiente PLAN
-  decide sobre la carencia demostrada; si en una revisión posterior hubiera cobertura suficiente,
-  deberá congelar un experimento nuevo que compare el aporte incremental del funding frente a
-  referencias y control técnico sobre exactamente las mismas fechas, sin tuning ni promoción
-  automática.
+- La admisión de #399 era insuficiente; la recepción corregida alcanza `funding_data_ready`, que
+  tampoco es una prueba estadística ni autoriza por sí solo un predictor. El siguiente PLAN decide
+  el experimento de funding; si lo autoriza, deberá congelar una comparación nueva que compare el
+  aporte incremental del funding frente a referencias y control técnico sobre exactamente las mismas
+  fechas, sin tuning ni promoción automática.
 
 ## Presupuesto y retención
 
