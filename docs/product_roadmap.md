@@ -53,6 +53,16 @@
 > se cierra la ruta y conceptos monetarios ausentes, retornos con balances promedio y nuevas fuentes
 > siguen pendientes.
 >
+> `US-EQUITY-ONBOARDING-3`/#409 (`ADVANCES`, sin cierre) incorpora al catálogo tres identidades
+> equity estadounidenses: Moog clase A `MOG.A`, Alphabet clase A `GOOGL` y Nike clase B `NKE`, con
+> bindings Alpaca IEX/all y SEC CIK/CUSIP/taxonomy/ticker, base `reported_common_share` factor `1` y
+> source IDs deterministas. `MOG.A` conserva el punto en Alpaca y usa `MOG-A` sólo en su ticker SEC;
+> los aliases no introducen `GOOG` ni `MOG.B`. El catálogo pasa a 40 activos, 29 equities, 34 rutas
+> daily y 21 bases declaradas, conservando las 37 entradas previas. La capacidad es genérica: no
+> añade ramas por ticker, no hereda datos de otra clase ni promete 11/11. La adopción local de datos
+> y preferencias queda autorizada post-merge; este candidato sólo registra readiness. La fila
+> `ASSET-EXPANSION` permanece `PLANNED` y `PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`.
+>
 > Las notas y cronologías fechadas de este documento son registro histórico. No describen un Issue
 > activo ni autorizan ejecución; la única autoridad de Work Block es el Issue abierto con
 > `workflow:active` resuelto desde GitHub vivo.
@@ -62,7 +72,7 @@
 La V1 es el recorrido local `catálogo/watchlist → actualización incremental → análisis → candidato →
 notificación → evidencia/exportación` sobre activos configurados compatibles. El mercado diario es la
 cadencia inicial; los fundamentales siguen la frecuencia que cada perfil soporta y los eventos sólo
-aparecen cuando existe fuente y disponibilidad reales. No promete todas las capacidades para las 37
+aparecen cuando existe fuente y disponibilidad reales. No promete todas las capacidades para las 40
 identidades: cada ausencia incompatible o no soportada se explica y la misma categoría no implica la
 misma disponibilidad de fuente.
 

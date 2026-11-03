@@ -19,21 +19,24 @@ from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.core.models import AssetClass
 from investment_analyst.storage import LocalStorage
 
-_SIXTEEN_COMMON_SHARE_ISSUER_IDS = frozenset(
+_NINETEEN_COMMON_SHARE_ISSUER_IDS = frozenset(
     {
         "equity:us:amzn",
         "equity:us:b",
         "equity:us:cat",
         "equity:us:cde",
         "equity:us:cvx",
+        "equity:us:googl",
         "equity:us:hymc",
         "equity:us:intc",
         "equity:us:jnj",
+        "equity:us:mog.a",
         "equity:us:msft",
         "equity:us:mstr",
         "equity:us:mu",
         "equity:us:mux",
         "equity:us:nem",
+        "equity:us:nke",
         "equity:us:nvda",
         "equity:us:pltr",
         "equity:us:scco",
@@ -72,9 +75,9 @@ class _EmptyStorage:
         return {}
 
 
-def test_sixteen_common_share_issuers_declare_explicit_share_basis() -> None:
+def test_nineteen_common_share_issuers_declare_explicit_share_basis() -> None:
     catalog = AssetCatalogService.load_default()
-    for asset_id in _SIXTEEN_COMMON_SHARE_ISSUER_IDS:
+    for asset_id in _NINETEEN_COMMON_SHARE_ISSUER_IDS:
         asset = catalog.get(asset_id)
         assert asset.security_unit_basis == "reported_common_share"
         assert asset.security_unit_basis_version == "security-unit-basis-v1"
@@ -87,9 +90,9 @@ def test_sixteen_common_share_issuers_declare_explicit_share_basis() -> None:
         if asset.security_unit_basis is not None
     }
     assert all_declared == (
-        _SIXTEEN_COMMON_SHARE_ISSUER_IDS | _PRIOR_EVALUABLE_COMMON_SHARE_ISSUER_IDS
+        _NINETEEN_COMMON_SHARE_ISSUER_IDS | _PRIOR_EVALUABLE_COMMON_SHARE_ISSUER_IDS
     )
-    assert len(all_declared) == 18
+    assert len(all_declared) == 21
 
 
 def test_bvn_and_tsm_declare_documented_revisions_without_static_fields() -> None:
@@ -152,14 +155,14 @@ def _valuation_service_for_asset(
     )
 
 
-def test_corporate_valuation_does_not_fail_with_share_basis_unavailable_for_sixteen_issuers() -> (
+def test_corporate_valuation_does_not_fail_with_share_basis_unavailable_for_nineteen_issuers() -> (
     None
 ):
     catalog = AssetCatalogService.load_default()
     resolver = ProviderAssetContextResolver(catalog)
     storage = _EmptyStorage()  # type: ignore[arg-type]
 
-    for asset_id in _SIXTEEN_COMMON_SHARE_ISSUER_IDS:
+    for asset_id in _NINETEEN_COMMON_SHARE_ISSUER_IDS:
         asset = catalog.get(asset_id)
         service = _valuation_service_for_asset(catalog, resolver, storage, asset)  # type: ignore[arg-type]
         snapshot = service.query(

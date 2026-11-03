@@ -54,13 +54,16 @@ def test_list_assets_filters_and_is_cwd_independent(tmp_path) -> None:
         "equity:us:aapl",
         "equity:us:b",
         "equity:us:bvn",
+        "equity:us:googl",
+        "equity:us:mog.a",
+        "equity:us:nke",
         "equity:us:tsm",
         "etf:us:gbtc",
         "etf:us:ibit",
         "etf:us:spy",
     }.issubset(all_asset_ids)
-    assert json.loads(equities.stdout)["count"] == 26
-    assert json.loads(market.stdout)["count"] == 31
+    assert json.loads(equities.stdout)["count"] == 29
+    assert json.loads(market.stdout)["count"] == 34
 
 
 def test_resolve_by_id_alias_and_binding(tmp_path) -> None:

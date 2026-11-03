@@ -134,10 +134,10 @@ def test_minute_bars_capability_still_appears_exactly_once_and_no_asset_gains_ca
             declared.update(binding.get("capabilities", []))
         capabilities[asset["asset_id"]] = frozenset(declared)
 
-    assert len(capabilities) == 37
-    assert sum("market.daily_bars" in item for item in capabilities.values()) == 31
+    assert len(capabilities) == 40
+    assert sum("market.daily_bars" in item for item in capabilities.values()) == 34
     assert sum("market.minute_bars" in item for item in capabilities.values()) == 1
-    assert sum("fundamentals.company_facts" in item for item in capabilities.values()) == 20
+    assert sum("fundamentals.company_facts" in item for item in capabilities.values()) == 23
     assert sum("derivatives.perpetual.snapshot" in item for item in capabilities.values()) == 2
     assert capabilities["crypto:btc-usd"] == frozenset(
         {

@@ -25,7 +25,7 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
 
     assert universe.schema_version == "market-asset-universe-v5"
     assert universe.catalog_version == 1
-    assert len(universe.assets) == 31
+    assert len(universe.assets) == 34
     assert tuple(item.asset_id for item in universe.assets) == tuple(
         sorted(item.asset_id for item in universe.assets)
     )
@@ -43,15 +43,18 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
         "CAT",
         "CVX",
         "GBTC",
+        "GOOGL",
         "HYMC",
         "IBIT",
         "INTC",
         "JNJ",
+        "MOG.A",
         "MSTR",
         "MSFT",
         "MU",
         "MUX",
         "NEM",
+        "NKE",
         "NVDA",
         "PLTR",
         "QQQ",
@@ -89,6 +92,22 @@ def test_default_universe_exposes_supported_assets_and_source_contracts() -> Non
     assert b.has_fundamentals
     assert b.has_corporate_valuation
     assert b.fundamental_frequencies == (DataFrequency.ANNUAL,)
+    for symbol, source_id in (
+        ("GOOGL", "alpaca-market-data:iex:googl:daily-bars:adjustment-all"),
+        ("MOG.A", "alpaca-market-data:iex:mog.a:daily-bars:adjustment-all"),
+        ("NKE", "alpaca-market-data:iex:nke:daily-bars:adjustment-all"),
+    ):
+        added = by_symbol[symbol]
+        assert added.asset_class is AssetClass.EQUITY
+        assert added.provider == "alpaca"
+        assert added.source_id == source_id
+        assert added.volume_unit == "shares"
+        assert added.has_fundamentals
+        assert added.has_corporate_valuation
+        assert added.fundamental_frequencies == (
+            DataFrequency.ANNUAL,
+            DataFrequency.QUARTERLY,
+        )
     for symbol in ("BVN", "TSM"):
         foreign_issuer = by_symbol[symbol]
         assert foreign_issuer.has_fundamentals
