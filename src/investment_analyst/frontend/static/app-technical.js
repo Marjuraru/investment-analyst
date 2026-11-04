@@ -2009,3 +2009,401 @@ function initializeExperimentsExplorer() {
 }
 
 initializeExperimentsExplorer();
+
+const READINESS_VIEW_SCHEMA = "research-pit-readiness-view-v1";
+const READINESS_DEFAULT_DATE_COUNT = 366;
+const READINESS_STATE_LABELS = Object.freeze({
+  available: "Disponible",
+  missing: "Faltante",
+  not_yet_available: "Aún no disponible",
+  incompatible: "Incompatible",
+  ambiguous: "Ambiguo",
+});
+const READINESS_STATUS_LABELS = Object.freeze({
+  research_ready: "Apto para investigación",
+  insufficient_pit_sample: "Muestra PIT insuficiente",
+});
+const READINESS_SPLIT_LABELS = Object.freeze({
+  train: "Train",
+  validation: "Validation",
+  holdout: "Holdout",
+});
+const READINESS_FEATURE_COUNT_KEYS = Object.freeze([
+  ["feature_available", "Features disponibles"],
+  ["feature_missing", "Features faltantes"],
+  ["feature_not_yet_available", "Features aún no disponibles"],
+  ["feature_incompatible", "Features incompatibles"],
+  ["feature_ambiguous", "Features ambiguas"],
+  ["label_available", "Labels disponibles"],
+  ["label_missing", "Labels faltantes"],
+  ["label_not_yet_available", "Labels pendientes de madurar"],
+  ["label_incompatible", "Labels incompatibles"],
+  ["label_ambiguous", "Labels ambiguos"],
+  ["eligible_before_split", "Elegibles antes del split"],
+  ["purged", "Purgadas por solape o embargo"],
+  ["requested", "Decisiones solicitadas"],
+]);
+let readinessRequestSequence = 0;
+let readinessAbortController = null;
+let readinessPayload = null;
+let readinessDownloadUrl = null;
+let readinessRequestKey = null;
+
+function readinessIsoDate(offsetDays) {
+  const day = new Date();
+  day.setUTCHours(0, 0, 0, 0);
+  day.setUTCDate(day.getUTCDate() + offsetDays);
+  return day.toISOString().slice(0, 10);
+}
+
+function readinessCutInstant() {
+  const day = new Date();
+  day.setUTCHours(0, 0, 0, 0);
+  return day.toISOString().replace(".000Z", "Z");
+}
+
+function readinessApplyDefaults() {
+  byId("readiness-end").value = readinessIsoDate(-1);
+  byId("readiness-start").value = readinessIsoDate(-READINESS_DEFAULT_DATE_COUNT);
+  byId("readiness-known-at").value = readinessCutInstant();
+}
+
+function readinessStatus(text) {
+  byId("readiness-status").textContent = text;
+}
+
+function readinessContext() {
+  const assetId = selectedMarketAsset;
+  const presentation = assetId ? marketAssets[assetId] : null;
+  byId("readiness-context").textContent = presentation
+    ? `Activo actual: ${presentation.symbol} · ${presentation.name}`
+      + ` (${presentation.asset_class}). El experimento registrado sólo admite cripto spot USD.`
+    : "Selecciona un activo del catálogo para consultar su preparación point-in-time.";
+}
+
+function readinessKey() {
+  return [
+    selectedMarketAsset || "",
+    byId("readiness-start").value.trim(),
+    byId("readiness-end").value.trim(),
+    byId("readiness-known-at").value.trim(),
+  ].join("|");
+}
+
+function readinessRevokeDownload() {
+  if (readinessDownloadUrl) {
+    URL.revokeObjectURL(readinessDownloadUrl);
+    readinessDownloadUrl = null;
+  }
+}
+
+function readinessAbort() {
+  readinessRequestSequence += 1;
+  if (readinessAbortController) {
+    readinessAbortController.abort();
+    readinessAbortController = null;
+  }
+}
+
+function readinessClearPresentation() {
+  readinessRevokeDownload();
+  readinessPayload = null;
+  readinessRequestKey = null;
+  byId("readiness-results").classList.add("hidden");
+  byId("readiness-results").setAttribute("aria-busy", "false");
+  byId("readiness-decision").textContent = "";
+  byId("readiness-decision").className = "badge neutral";
+  byId("readiness-range").textContent = "";
+  byId("readiness-identity").textContent = "";
+  byId("readiness-counts").replaceChildren();
+  byId("readiness-floors").replaceChildren();
+  byId("readiness-columns").replaceChildren();
+  byId("readiness-limitations").replaceChildren();
+  byId("readiness-json").textContent = "";
+  byId("readiness-download").disabled = true;
+  byId("readiness-submit").disabled = false;
+}
+
+function resetReadinessPanel() {
+  readinessAbort();
+  readinessClearPresentation();
+  readinessApplyDefaults();
+  readinessContext();
+  readinessStatus("Sin consultar. Define rango y corte y pulsa «Consultar preparación».");
+}
+
+function readinessInvalidate() {
+  readinessAbort();
+  readinessClearPresentation();
+  readinessStatus(
+    "La selección cambió. La presentación y la descarga previas se descartaron;"
+      + " vuelve a consultar para este rango y corte.",
+  );
+}
+
+function readinessFigure(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return String(value ?? "");
+  return formatInteger(parsed);
+}
+
+function readinessTable(headers, rows) {
+  const table = createElement("table", "patterns-segments-table readiness-table");
+  const head = createElement("thead");
+  const headRow = createElement("tr");
+  for (const header of headers) {
+    headRow.append(createElement("th", "", header));
+  }
+  head.append(headRow);
+  table.append(head);
+  const body = createElement("tbody");
+  for (const row of rows) {
+    const bodyRow = createElement("tr");
+    for (const cell of row) {
+      const bodyCell = createElement("td");
+      if (typeof cell === "string" || typeof cell === "number") {
+        bodyCell.textContent = String(cell);
+      } else {
+        bodyCell.append(cell);
+      }
+      bodyRow.append(bodyCell);
+    }
+    body.append(bodyRow);
+  }
+  table.append(body);
+  return table;
+}
+
+function readinessCountsBlock(payload) {
+  const container = createElement("div");
+  const counts = payload.summary.counts;
+  container.append(
+    readinessTable(
+      ["Admisión", "Decisiones"],
+      READINESS_FEATURE_COUNT_KEYS.map(([key, label]) => [
+        label,
+        createElement("span", "figure", readinessFigure(counts[key])),
+      ]),
+    ),
+  );
+  const splits = createElement("div", "readiness-splits");
+  splits.append(createElement("h4", "", "Particiones temporales y purga"));
+  splits.append(
+    readinessTable(
+      ["Split", "Propuestas", "Purgadas", "Restantes", "Elegibles", "Positivas", "Negativas"],
+      payload.summary.splits.map((split) => [
+        READINESS_SPLIT_LABELS[split.split] || split.split,
+        createElement("span", "figure", readinessFigure(split.proposed)),
+        createElement("span", "figure", readinessFigure(split.purged)),
+        createElement("span", "figure", readinessFigure(split.remaining)),
+        createElement("span", "figure", readinessFigure(split.eligible_after_purge)),
+        split.positive === null
+          ? renderAbsenceMark("not-applicable", "No se expone fuera de train")
+          : createElement("span", "figure", readinessFigure(split.positive)),
+        split.negative === null
+          ? renderAbsenceMark("not-applicable", "No se expone fuera de train")
+          : createElement("span", "figure", readinessFigure(split.negative)),
+      ]),
+    ),
+  );
+  container.append(splits);
+  return container;
+}
+
+function readinessColumnBlock(column) {
+  const article = createElement("article", "patterns-card readiness-column");
+  article.append(createElement("h4", "", column.column_name));
+  const identity = [
+    column.algorithm_version ? `versión ${column.algorithm_version}` : null,
+    column.unit ? `unidad ${column.unit}` : null,
+  ].filter(Boolean).join(" · ");
+  if (identity) article.append(createElement("p", "patterns-coverage", identity));
+  article.append(
+    readinessTable(
+      ["Estado", "Decisiones"],
+      column.states.map((entry) => [
+        READINESS_STATE_LABELS[entry.state] || entry.state,
+        createElement("span", "figure", readinessFigure(entry.samples)),
+      ]),
+    ),
+  );
+  if (column.reasons.length) {
+    const reasons = createElement("ul", "patterns-limitations readiness-reasons");
+    for (const reason of column.reasons) {
+      reasons.append(
+        createElement(
+          "li",
+          "",
+          `${reason.code}: ${readinessFigure(reason.occurrences)} incidencias`,
+        ),
+      );
+    }
+    article.append(
+      createElement(
+        "p",
+        "patterns-coverage",
+        "Las incidencias de razones pueden solaparse; no particionan la columna.",
+      ),
+    );
+    article.append(reasons);
+  }
+  return article;
+}
+
+function readinessRender(payload) {
+  const summary = payload.summary;
+  const status = summary.readiness.status;
+  const badge = byId("readiness-decision");
+  badge.textContent = READINESS_STATUS_LABELS[status] || status;
+  badge.className = status === "research_ready" ? "badge good" : "badge warn";
+  byId("readiness-range").textContent =
+    `Rango inclusivo ${summary.request.start_date} → ${summary.request.end_date}`
+      + ` con corte ${summary.request.dataset_known_at}.`
+      + ` workspace ${payload.workspace_uuid}.`;
+  byId("readiness-identity").textContent =
+    `dataset ${summary.dataset_id} · contenido ${summary.dataset_content_sha256}`
+      + ` · experimento ${summary.experiment_spec_id}`
+      + ` · target ${summary.target_version}`
+      + ` · features ${summary.feature_set_version}`
+      + ` · fuente ${summary.asset.source_id}.`;
+  byId("readiness-counts").replaceChildren(readinessCountsBlock(payload));
+  const floors = byId("readiness-floors");
+  floors.replaceChildren();
+  if (summary.readiness.unmet_requirements.length) {
+    for (const requirement of summary.readiness.unmet_requirements) {
+      floors.append(createElement("li", "", requirement));
+    }
+  } else {
+    floors.append(createElement("li", "", "Cumple todos los pisos declarados."));
+  }
+  byId("readiness-columns").replaceChildren(
+    ...payload.feature_columns.map((column) => readinessColumnBlock(column)),
+  );
+  const limitations = byId("readiness-limitations");
+  limitations.replaceChildren();
+  for (const limitation of payload.limitations) {
+    limitations.append(createElement("li", "", limitation));
+  }
+  byId("readiness-json").textContent = JSON.stringify(payload, null, 2);
+  byId("readiness-results").classList.remove("hidden");
+  byId("readiness-results").setAttribute("aria-busy", "false");
+  byId("readiness-download").disabled = false;
+  readinessStatus(
+    `${READINESS_STATUS_LABELS[status] || status}:`
+      + ` ${readinessFigure(summary.counts.eligible_before_split)} elegibles antes del split,`
+      + ` ${readinessFigure(summary.counts.purged)} purgadas y`
+      + ` ${readinessFigure(summary.counts.requested)} decisiones solicitadas.`,
+  );
+}
+
+async function readinessQuery() {
+  if (!selectedMarketAsset) {
+    readinessStatus("Selecciona un activo del catálogo antes de consultar la preparación.");
+    return;
+  }
+  const assetId = selectedMarketAsset;
+  const start = byId("readiness-start").value.trim();
+  const end = byId("readiness-end").value.trim();
+  const knownAt = byId("readiness-known-at").value.trim();
+  if (!start || !end || !knownAt) {
+    readinessStatus("Define fecha inicial, fecha final y corte UTC antes de consultar.");
+    return;
+  }
+  if (start > end) {
+    readinessStatus("La fecha inicial no puede ser posterior a la fecha final.");
+    return;
+  }
+  const cut = Date.parse(knownAt);
+  if (!Number.isFinite(cut)) {
+    readinessStatus("El corte debe ser una fecha ISO 8601 con zona horaria, por ejemplo 2026-11-04T00:00:00Z.");
+    return;
+  }
+  const finalDecision = Date.parse(`${end}T12:00:00Z`);
+  if (!Number.isFinite(finalDecision)) {
+    readinessStatus("La fecha final no es válida para el calendario UTC.");
+    return;
+  }
+  if (finalDecision > cut) {
+    readinessStatus(
+      "El corte es anterior a la decisión final del rango (12:00 UTC de la fecha final)."
+        + " Ajusta el corte o la fecha final; la selección no se modifica sola.",
+    );
+    return;
+  }
+  const key = readinessKey();
+  readinessAbort();
+  const sequence = readinessRequestSequence;
+  const controller = new AbortController();
+  readinessAbortController = controller;
+  readinessClearPresentation();
+  byId("readiness-submit").disabled = true;
+  byId("readiness-results").setAttribute("aria-busy", "true");
+  readinessStatus("Reconstruyendo la muestra point-in-time con evidencia local…");
+  const parameters = new URLSearchParams({
+    asset_id: assetId,
+    start_date: start,
+    end_date: end,
+    known_at: knownAt,
+  });
+  try {
+    const payload = await api(`/api/v1/research/readiness?${parameters.toString()}`, {
+      signal: controller.signal,
+    });
+    if (
+      sequence !== readinessRequestSequence
+      || controller.signal.aborted
+      || assetId !== selectedMarketAsset
+      || key !== readinessKey()
+    ) return;
+    if (!payload || payload.schema_version !== READINESS_VIEW_SCHEMA) {
+      throw new Error("La respuesta de preparación no coincide con el contrato declarado.");
+    }
+    readinessPayload = payload;
+    readinessRequestKey = key;
+    readinessRender(payload);
+  } catch (error) {
+    if (sequence !== readinessRequestSequence || controller.signal.aborted) return;
+    readinessClearPresentation();
+    readinessStatus(error.message);
+  } finally {
+    if (sequence === readinessRequestSequence) {
+      byId("readiness-submit").disabled = false;
+      readinessAbortController = null;
+    }
+  }
+}
+
+function readinessDownload() {
+  if (!readinessPayload || readinessRequestKey !== readinessKey()) {
+    readinessStatus("Vuelve a consultar: la selección actual no coincide con la proyección recibida.");
+    return;
+  }
+  const body = JSON.stringify(readinessPayload);
+  readinessRevokeDownload();
+  const blob = new Blob([body], { type: "application/json" });
+  readinessDownloadUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = readinessDownloadUrl;
+  link.download = `readiness-${readinessPayload.summary.dataset_id}.json`;
+  link.click();
+  readinessStatus(
+    "Proyección JSON exacta descargada desde la respuesta recibida, sin recomputar nada.",
+  );
+}
+
+function initializeReadinessPanel() {
+  for (const controlId of ["readiness-start", "readiness-end", "readiness-known-at"]) {
+    byId(controlId).addEventListener("input", () => {
+      readinessInvalidate();
+    });
+  }
+  byId("readiness-submit").addEventListener("click", () => {
+    void readinessQuery();
+  });
+  byId("readiness-download").addEventListener("click", () => {
+    readinessDownload();
+  });
+  resetReadinessPanel();
+}
+
+initializeReadinessPanel();

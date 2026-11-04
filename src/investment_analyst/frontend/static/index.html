@@ -1181,6 +1181,78 @@
               </details>
             </div>
           </section>
+          <details id="research-readiness-panel" class="patterns-section readiness-section">
+            <summary class="ml-research-summary">
+              <span>
+                <strong>Preparación PIT de datos</strong>
+                <small>Admisión explicable del experimento registrado; no es un predictor validado.</small>
+              </span>
+            </summary>
+            <div class="readiness-body">
+              <p id="readiness-context" class="chart-quote-context">
+                Selecciona un activo del catálogo para consultar su preparación point-in-time.
+              </p>
+              <p class="patterns-summary">
+                Esta lectura reconstruye la muestra con evidencia local disponible al corte y
+                muestra por qué cada decisión entra o no en la admisión. Para este experimento
+                sólo el perfil cripto spot USD es compatible; equities y ETF muestran ese motivo.
+              </p>
+              <div class="readiness-controls">
+                <label class="field">
+                  <span>Desde (UTC)</span>
+                  <input id="readiness-start" type="date">
+                </label>
+                <label class="field">
+                  <span>Hasta (UTC)</span>
+                  <input id="readiness-end" type="date">
+                </label>
+                <label class="field">
+                  <span>Corte conocido (UTC)</span>
+                  <input
+                    id="readiness-known-at"
+                    type="text"
+                    inputmode="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="2026-11-04T19:51:37Z"
+                  >
+                </label>
+                <button id="readiness-submit" class="button primary" type="button">
+                  Consultar preparación
+                </button>
+                <button id="readiness-download" class="button" type="button" disabled>
+                  Descargar JSON
+                </button>
+              </div>
+              <p id="readiness-status" class="chart-status" role="status" aria-live="polite">
+                Sin consultar. Define rango y corte y pulsa «Consultar preparación».
+              </p>
+              <div id="readiness-results" class="patterns-results readiness-results hidden" aria-busy="false">
+                <p id="readiness-decision" class="badge neutral"></p>
+                <p id="readiness-range" class="patterns-summary"></p>
+                <p id="readiness-identity" class="patterns-technical"></p>
+                <div class="patterns-grid">
+                  <article class="patterns-card">
+                    <h3>Admisión y particiones</h3>
+                    <div id="readiness-counts"></div>
+                  </article>
+                  <article class="patterns-card">
+                    <h3>Pisos incumplidos</h3>
+                    <ul id="readiness-floors" class="patterns-limitations"></ul>
+                  </article>
+                </div>
+                <section aria-labelledby="readiness-columns-title">
+                  <h3 id="readiness-columns-title">Razones por columna de feature</h3>
+                  <div id="readiness-columns" class="readiness-columns"></div>
+                </section>
+                <ul id="readiness-limitations" class="patterns-limitations"></ul>
+                <details class="json-disclosure">
+                  <summary>Proyección JSON exacta recibida</summary>
+                  <pre id="readiness-json" tabindex="0"></pre>
+                </details>
+              </div>
+            </div>
+          </details>
           <details id="ml-research-panel" class="patterns-section ml-research-section">
             <summary class="ml-research-summary">
               <span>

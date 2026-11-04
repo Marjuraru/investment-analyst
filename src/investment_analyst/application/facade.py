@@ -329,6 +329,9 @@ from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistorical
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials, AlpacaStockClient
 from investment_analyst.providers.ownership.sec_ownership_pipeline import SecOwnershipPipeline
 from investment_analyst.providers.peru.smv_open_data import SmvOpenDataClient
+from investment_analyst.research.predictive_models import PredictiveDatasetRequest
+from investment_analyst.research.readiness_models import ResearchPitReadinessView
+from investment_analyst.research.readiness_service import ReadinessService
 from investment_analyst.storage import LocalStorage
 from investment_analyst.storage.read_dependency_signature import (
     READ_DEPENDENCY_CODE_VERSION,
@@ -566,6 +569,23 @@ class InvestmentAnalystApplication:
     def _read_code_version(self) -> str:
         """Bind read reuse to the exact code and declared catalog semantics."""
         return f"{READ_DEPENDENCY_CODE_VERSION}:{self._runtime.catalog.semantic_digest}"
+
+    def query_research_readiness(
+        self,
+        request: PredictiveDatasetRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> ResearchPitReadinessView:
+        """Project the preregistered experiment readiness from one read-only session."""
+        with self._runtime.open_storage(
+            location,
+            access_mode=WorkspaceAccessMode.READ_ONLY,
+        ) as storage:
+            return ReadinessService(
+                storage,
+                provider_resolver=self._runtime.provider_resolver,
+                catalog=self._runtime.catalog,
+            ).query(request)
 
     def query_listed_company_diagnostics(
         self,

@@ -288,6 +288,22 @@ from investment_analyst.research.ml_report_service import (
     MlReportNotFoundError,
     MlResearchReportService,
 )
+from investment_analyst.research.predictive_models import (
+    FEATURE_DAY_OFFSETS,
+    LABEL_EXIT_OFFSET_DAYS,
+    MACD_HISTOGRAM_METRIC_KEY,
+    PREREGISTERED_EXPERIMENT,
+    RSI_METRIC_KEY,
+    PredictiveDatasetRequest,
+    bar_start_instant,
+)
+from investment_analyst.research.readiness_models import ResearchPitReadinessView
+from investment_analyst.research.readiness_service import (
+    ReadinessAssetUnsupportedError,
+    ReadinessIntegrityError,
+    ReadinessRequestError,
+    ReadinessServiceError,
+)
 from investment_analyst.storage import StorageError
 from investment_analyst.storage.read_dependency_signature import (
     ReadDependencyFamily,
@@ -499,6 +515,15 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> ReadDependencySignature:
         """Return a content-bound read signature for bounded server reuse."""
+        ...
+
+    def query_research_readiness(
+        self,
+        request: PredictiveDatasetRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> ResearchPitReadinessView:
+        """Project one deterministic research readiness view without writes."""
         ...
 
     def query_listed_company_diagnostics(
@@ -1109,6 +1134,53 @@ class AaplLocalController:
             loader,
             revalidate=lambda: self._composite_signature(queries),
             family="coverage",
+        )
+
+    def research_readiness_request(
+        self,
+        request: PredictiveDatasetRequest,
+    ) -> ResearchPitReadinessView:
+        """Project readiness from persisted evidence without providers or writes."""
+        descriptor = self._market_assets_by_id.get(request.asset_id)
+        source_ids = (descriptor.source_id,) if descriptor is not None else ()
+        selector = (
+            f"experiment={PREREGISTERED_EXPERIMENT.experiment_spec_id};"
+            f"target={PREREGISTERED_EXPERIMENT.target_version};"
+            f"features={PREREGISTERED_EXPERIMENT.feature_set_version};"
+            f"asset={request.asset_id};"
+            f"start={request.start_date.isoformat()};"
+            f"end={request.end_date.isoformat()};"
+            f"known_at={request.dataset_known_at.isoformat()}"
+        )
+        bars_query = ReadDependencyQuery(
+            family=ReadDependencyFamily.MARKET_BARS,
+            endpoint="/api/v1/research/readiness",
+            asset_ids=(request.asset_id,),
+            source_ids=source_ids,
+            field_names=("close",),
+            frequency="day_1",
+            start=bar_start_instant(request.start_date + timedelta(days=FEATURE_DAY_OFFSETS[1])),
+            end=bar_start_instant(request.end_date + timedelta(days=LABEL_EXIT_OFFSET_DAYS + 1)),
+            known_at=request.dataset_known_at,
+            selector=selector,
+        )
+        metrics_query = ReadDependencyQuery(
+            family=ReadDependencyFamily.METRICS,
+            endpoint="/api/v1/research/readiness",
+            asset_ids=(request.asset_id,),
+            source_ids=source_ids,
+            metric_keys=tuple(sorted((RSI_METRIC_KEY, MACD_HISTOGRAM_METRIC_KEY))),
+            start=bar_start_instant(request.start_date + timedelta(days=-1)),
+            end=bar_start_instant(request.end_date),
+            known_at=request.dataset_known_at,
+            selector=selector,
+        )
+        return self._signed_read_composite(
+            (bars_query, metrics_query),
+            lambda: self._application.query_research_readiness(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
         )
 
     def run_payload(self, payload: dict[str, object]) -> AaplDailyRunState:
@@ -2440,6 +2512,20 @@ class AaplLocalWebApplication:
         """Return additive, bounded critical-read telemetry without storage access."""
         return self._controller.read_performance()
 
+    def research_readiness(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Validate one explicit readiness query without providers or writes."""
+        allowed = {"asset_id", "start_date", "end_date", "known_at"}
+        if set(parameters) - allowed:
+            raise ValueError("research readiness query contains unsupported parameters")
+        descriptor = self._market_asset(_one_parameter(parameters, "asset_id", required=True))
+        request = PredictiveDatasetRequest(
+            asset_id=descriptor.asset_id,
+            start_date=_date_parameter(_one_parameter(parameters, "start_date", required=True)),
+            end_date=_date_parameter(_one_parameter(parameters, "end_date", required=True)),
+            dataset_known_at=_aware_datetime(_one_parameter(parameters, "known_at", required=True)),
+        )
+        return self._controller.research_readiness_request(request).to_json_dict()
+
     def ml_research_report(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate one explicit sealed-run query without provider or storage access."""
         allowed = {"asset_id", "run_id"}
@@ -3396,6 +3482,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                     server.application.daily_market_patterns(parameters),
                 )
                 return
+            if parsed.path == "/api/v1/research/readiness":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.research_readiness(parameters),
+                )
+                return
             if parsed.path == "/api/v1/research/ml-report":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=2)
                 parameters = {key: tuple(values) for key, values in raw.items()}
@@ -3788,6 +3882,26 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
             self._send_error(HTTPStatus.NOT_FOUND, "ml_report_not_found", str(error)[:500])
         elif isinstance(error, MlReportConflictError):
             self._send_error(HTTPStatus.CONFLICT, "ml_report_conflict", str(error)[:500])
+        elif isinstance(error, ReadinessAssetUnsupportedError):
+            self._send_error(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "asset_incompatible",
+                str(error)[:500],
+            )
+        elif isinstance(error, ReadinessRequestError):
+            self._send_error(HTTPStatus.BAD_REQUEST, "invalid_request", str(error)[:500])
+        elif isinstance(error, ReadinessIntegrityError):
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "operational_error",
+                str(error)[:500],
+            )
+        elif isinstance(error, ReadinessServiceError):
+            self._send_error(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "readiness_unavailable",
+                str(error)[:500],
+            )
         elif isinstance(error, (ValueError, SecDocumentTimelineApplicationError)):
             self._send_error(HTTPStatus.BAD_REQUEST, "invalid_request", str(error)[:500])
         elif isinstance(

@@ -301,3 +301,31 @@ conjunta. Esa mejora habilita un experimento de funding, no un predictor ni una 
 PLAN decide el experimento sin ampliar fuentes por inercia y debe congelar la comparación del aporte
 incremental frente a referencias y control técnico sobre exactamente las mismas fechas, sin tuning
 ni promoción automática. La interpretación LLM sigue siendo una capa posterior e independiente.
+
+## Preparación PIT observable en el producto (2026-11-04)
+
+`PIT-READINESS-DELIVERY`/#418 (`ADVANCES`) convierte la admisión PIT en una lectura de producto sin
+cambiar la estrategia de información: la misma pregunta, el mismo target de cinco intervalos, las
+mismas tres features y los mismos pisos y splits. La información nueva es operativa, no estadística:
+el analista puede ver, por activo y corte, cuántas decisiones solicitadas están disponibles, aún no
+disponibles, ausentes, incompatibles o ambiguas, y qué código de razón explica cada incidencia.
+
+La lectura es descriptiva y acotada. `research-pit-readiness-view-v1` publica sólo agregados y el
+summary ya existente; no expone filas, precios, retornos ni clases del holdout, y rotula que las
+incidencias de razón pueden solaparse porque una decisión puede leer varios insumos. Una consulta de
+`equity:us:aapl` responde 422 `asset_incompatible`: el experimento registrado cubre cripto spot USD y
+este bloque no expande el label ni el universo a equities.
+
+El coste se mantiene proporcional: la proyección reutiliza el constructor del dataset y su caché
+firmada, la respuesta se mantiene muy por debajo de 256 KiB y el workspace no cambia (mismo tamaño y
+`mtime` de `index.duckdb`, sin WAL, mismo SHA-256 de `manifest.json`). No hay proveedor, no hay
+entrenamiento, no hay export persistente en servidor y la descarga del navegador reproduce la
+proyección recibida.
+
+La evidencia PIT observada sigue siendo escasa: BTC y SOL informan 1 feature disponible de 93
+decisiones en 2026-08-03..2026-11-03 con corte `2026-11-04T19:51:37Z`, y `insufficient_pit_sample`.
+El contrato admite hasta 366 fechas por consulta y acumular PIT depende del calendario; no se promete
+que esperar alcance los pisos. `PREDICTIVE-RESEARCH` permanece `NEXT` y V1-U4 sigue `UNKNOWN`. La
+siguiente decisión debe justificar con evidencia si otra hipótesis preregistrada o datos externos
+merecen un experimento, conservando costes, el holdout cerrado y la separación entre reconstrucción
+histórica y disponibilidad real.

@@ -126,6 +126,18 @@ difiere por la máscara de funding. No se entrena, no se adquiere nada y el hold
 `PREDICTIVE-RESEARCH` permanece `NEXT`, `FUNDAMENTALS-COVERAGE` sigue `PLANNED` y V1-U4 sigue
 `UNKNOWN`.
 
+`PIT-READINESS-DELIVERY`/#418 (`ADVANCES`) hace explicable la admisión PIT real desde el producto:
+`GET /api/v1/research/readiness` y el panel de investigación proyectan el summary del experimento
+registrado con una partición por columna y estado, las incidencias de razón que pueden solaparse y
+los pisos incumplidos, reutilizando el constructor, la firma compuesta y la caché acotada ya
+existentes. Una consulta BTC `crypto:btc-usd` 2026-08-03..2026-11-03 con corte
+`2026-11-04T19:51:37Z` devuelve 93 decisiones, 1 feature disponible y 92 aún no disponibles, 88
+labels maduros, 22 purgadas y `insufficient_pit_sample` (dataset `dbb83880…`, 4.361 B); SOL
+reproduce la misma carencia con `b05e9853…`. El bloque no entrena, no requiere proveedor, no escribe
+el workspace y no abre el holdout. `PREDICTIVE-RESEARCH` permanece `NEXT`, `FUNDAMENTALS-COVERAGE`
+sigue `PLANNED` y V1-U4 sigue `UNKNOWN`; acumular PIT depende del calendario y el contrato admite
+hasta 366 fechas, sin que esperar garantice alcanzar los pisos.
+
 La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de crecimiento viven en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md).
 La implementación vigente de reglas, replay y entrega se reconcilia en
