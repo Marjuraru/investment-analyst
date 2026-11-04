@@ -577,10 +577,8 @@ class InvestmentAnalystApplication:
         location: StorageLocationRequest,
     ) -> ResearchPitReadinessView:
         """Project the preregistered experiment readiness from one read-only session."""
-        with self._runtime.open_storage(
-            location,
-            access_mode=WorkspaceAccessMode.READ_ONLY,
-        ) as storage:
+        read_only = WorkspaceAccessMode.READ_ONLY
+        with self._runtime.open_storage(location, access_mode=read_only) as storage:
             return ReadinessService(
                 storage,
                 provider_resolver=self._runtime.provider_resolver,
