@@ -1,8 +1,9 @@
 """Explicit stored-bar schemas for each supported market-data source."""
 
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from types import MappingProxyType
 
 from investment_analyst.core.models.enums import DataFrequency, DataQuality
@@ -133,3 +134,34 @@ def get_market_bar_schema(source_id: str) -> MarketBarSchema:
         return _SCHEMAS[source_id]
     except KeyError as error:
         raise ValueError(f"unsupported market source: {source_id}") from error
+
+
+def missing_market_bar_fields(
+    schema: MarketBarSchema,
+    *,
+    present_fields: Collection[str],
+    values: Mapping[str, Decimal],
+) -> tuple[str, ...]:
+    """Return required fields absent from one already-scoped market bar."""
+    missing = set(schema.required_fields) - set(present_fields)
+    if "vwap" in missing and _alpaca_vwap_may_be_absent(schema, values):
+        missing.discard("vwap")
+    return tuple(sorted(missing))
+
+
+def _alpaca_vwap_may_be_absent(
+    schema: MarketBarSchema,
+    values: Mapping[str, Decimal],
+) -> bool:
+    if _ALPACA_SOURCE_PATTERN.fullmatch(schema.source_id) is None:
+        return False
+    if schema.frequency is not DataFrequency.DAY_1:
+        return False
+    volume = values.get("volume")
+    trade_count = values.get("trade_count")
+    return (
+        isinstance(volume, Decimal)
+        and isinstance(trade_count, Decimal)
+        and volume == 0
+        and trade_count == 0
+    )

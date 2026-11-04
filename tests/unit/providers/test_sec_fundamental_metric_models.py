@@ -11,6 +11,7 @@ from investment_analyst.core.models import DataFrequency, DataQuality
 from investment_analyst.providers.fundamentals.sec_metric_models import (
     SEC_FUNDAMENTAL_METRIC_DEFINITIONS,
     SecFundamentalMetricCandidate,
+    SecFundamentalMetricImportSummary,
     SecFundamentalMetricInput,
     SecFundamentalMetricRequest,
     SecMetricComparison,
@@ -154,3 +155,45 @@ def test_candidate_preserves_decimal_and_serializes_explicitly() -> None:
 def test_candidate_requires_deterministic_role_order() -> None:
     with pytest.raises(ValidationError, match="ordered by role"):
         _candidate(input_roles=tuple(reversed(_candidate().input_roles)))
+
+
+def test_import_summary_conflict_defaults_and_consistency() -> None:
+    period_end = datetime(2025, 9, 27, tzinfo=UTC)
+    summary = SecFundamentalMetricImportSummary(
+        asset_id="equity:us:aapl",
+        known_at=datetime(2026, 1, 1, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+        computed_at=datetime(2026, 1, 2, tzinfo=UTC),
+        periods_examined=1,
+        target_periods=1,
+        complete_periods=0,
+        incomplete_periods=1,
+        metrics_generated=0,
+        metrics_created=0,
+        metrics_reused=0,
+        metric_counts={},
+        skipped_counts={},
+        earliest_period_end=period_end,
+        latest_period_end=period_end,
+        raw_records_created=0,
+        observations_created=0,
+        diagnostics_created=0,
+        traceability_verified=True,
+    )
+
+    assert summary.conflict_count == 0
+    assert summary.conflicts == ()
+    assert summary.has_conflicts is False
+    payload = summary.to_json_dict()
+    assert payload["conflict_count"] == 0
+    assert payload["conflicts"] == []
+    assert payload["has_conflicts"] is False
+
+    with pytest.raises(ValidationError, match="has_conflicts"):
+        SecFundamentalMetricImportSummary.model_validate(
+            {**summary.model_dump(), "has_conflicts": True}
+        )
+    with pytest.raises(ValidationError, match="conflict_count"):
+        SecFundamentalMetricImportSummary.model_validate(
+            {**summary.model_dump(), "conflict_count": 1}
+        )

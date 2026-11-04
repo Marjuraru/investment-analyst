@@ -162,7 +162,7 @@ def bar_to_observations(
     normalized_at: datetime,
     configuration: AlpacaAssetConfiguration | None = None,
 ) -> tuple[NormalizedObservation, ...]:
-    """Create exactly seven IEX bar observations without inventing reporting periods."""
+    """Create six or seven IEX bar observations without inventing reporting periods."""
     resolved = configuration or _default_configuration()
     if (
         raw_record.asset_id != resolved.asset_id
@@ -176,8 +176,9 @@ def bar_to_observations(
         ("close", bar.close, "USD"),
         ("volume", bar.volume, "shares"),
         ("trade_count", bar.trade_count, "count"),
-        ("vwap", bar.vwap, "USD"),
     )
+    if not bar.vwap_is_unavailable:
+        fields = (*fields, ("vwap", bar.vwap, "USD"))
     return tuple(
         NormalizedObservation(
             observation_id=observation_id(raw_record.record_id, field_name),

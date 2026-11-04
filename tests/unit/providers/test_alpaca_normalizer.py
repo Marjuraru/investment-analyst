@@ -23,16 +23,22 @@ NORMALIZED_AT = datetime(2026, 7, 12, 12, 1, tzinfo=UTC)
 REQUEST_URL = "https://data.alpaca.markets/v2/stocks/AAPL/bars?feed=iex"
 
 
-def _bar(*, close: str = "205.70") -> AlpacaStockBar:
+def _bar(
+    *,
+    close: str = "205.70",
+    volume: str = "34210600",
+    trade_count: str = "153890",
+    vwap: str = "204.88",
+) -> AlpacaStockBar:
     raw_values = {
         "t": "2026-07-07T04:00:00Z",
         "o": "203.95",
         "h": "206.40",
         "l": "202.85",
         "c": close,
-        "v": "34210600",
-        "n": "153890",
-        "vw": "204.88",
+        "v": volume,
+        "n": trade_count,
+        "vw": vwap,
     }
     return AlpacaStockBar(
         symbol="AAPL",
@@ -118,6 +124,55 @@ def test_normalization_creates_seven_partial_observations_without_periods() -> N
     assert all(item.source == raw_record.source for item in observations)
     assert len({item.observation_id for item in observations}) == 7
     assert all(item.model_dump_json() for item in observations)
+
+
+def test_unavailable_vwap_omits_only_that_observation_and_preserves_raw() -> None:
+    bar = _bar(volume="0", trade_count="0", vwap="0")
+    raw_record = bar_to_raw_record(
+        bar,
+        retrieved_at=RETRIEVED_AT,
+        request_url=REQUEST_URL,
+    )
+    observations = bar_to_observations(
+        bar,
+        raw_record,
+        normalized_at=NORMALIZED_AT,
+    )
+
+    assert bar.vwap_is_unavailable is True
+    assert len(observations) == 6
+    assert {item.field_name for item in observations} == {
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "trade_count",
+    }
+    assert "vwap" not in {item.field_name for item in observations}
+    assert all(item.value != 0 for item in observations if item.unit == "USD")
+    assert all(item.quality is DataQuality.PARTIAL for item in observations)
+    assert raw_record.payload["raw_bar"]["vw"] == "0"
+    assert raw_record.source.checksum_sha256 == raw_bar_checksum(bar)
+    assert len({item.observation_id for item in observations}) == 6
+
+
+def test_positive_vwap_with_zero_volume_keeps_seven_observations() -> None:
+    bar = _bar(volume="0", trade_count="0", vwap="204.88")
+    raw_record = bar_to_raw_record(
+        bar,
+        retrieved_at=RETRIEVED_AT,
+        request_url=REQUEST_URL,
+    )
+    observations = bar_to_observations(
+        bar,
+        raw_record,
+        normalized_at=NORMALIZED_AT,
+    )
+
+    assert bar.vwap_is_unavailable is False
+    assert len(observations) == 7
+    assert "vwap" in {item.field_name for item in observations}
 
 
 def test_fixture_is_explicitly_local_test_data() -> None:

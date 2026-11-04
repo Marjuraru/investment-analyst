@@ -63,6 +63,13 @@
 > y preferencias queda autorizada post-merge; este candidato sólo registra readiness. La fila
 > `ASSET-EXPANSION` permanece `PLANNED` y `PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`.
 >
+> `EQUITY-DATA-COMPATIBILITY-AND-ADOPTION`/#416 (`ADVANCES`, sin cierre) representa de forma general
+> VWAP no calculable y conflictos SEC de igual disponibilidad sin selección arbitraria: seis
+> observaciones Alpaca con VWAP ausente, lectores legado/v2 y gráficos que preservan la ausencia, y
+> modo `report` tipado que excluye sólo las métricas dependientes. Prepara la adopción verificable de
+> MOG.A, GOOGL y NKE; la adopción operativa y de preferencias sigue siendo el gate postmerge. La
+> fila `ASSET-EXPANSION` permanece `PLANNED` y `PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`.
+>
 > Las notas y cronologías fechadas de este documento son registro histórico. No describen un Issue
 > activo ni autorizan ejecución; la única autoridad de Work Block es el Issue abierto con
 > `workflow:active` resuelto desde GitHub vivo.

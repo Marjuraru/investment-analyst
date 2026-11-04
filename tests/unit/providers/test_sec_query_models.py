@@ -9,9 +9,11 @@ from pydantic import ValidationError
 
 from investment_analyst.core.models import DataFrequency
 from investment_analyst.providers.fundamentals.sec_query_models import (
+    SecFundamentalAmbiguityPolicy,
     SecFundamentalPeriodView,
     SecFundamentalPointInTimeResult,
     SecFundamentalQuery,
+    SecFundamentalRevisionConflict,
     SecSelectedFundamentalFact,
     allowed_sec_fundamental_fields,
 )
@@ -164,3 +166,127 @@ def test_models_reject_extra_fields_and_unsorted_facts() -> None:
             is_complete=False,
             latest_available_at=revenue.available_at,
         )
+
+
+def _conflict() -> SecFundamentalRevisionConflict:
+    first = _fact()
+    second = _fact().model_copy(
+        update={
+            "observation_id": uuid4(),
+            "value": Decimal("101"),
+            "accession_number": "0000320193-25-000002",
+        }
+    )
+    candidates = tuple(
+        sorted((first, second), key=lambda item: (item.available_at, item.observation_id))
+    )
+    return SecFundamentalRevisionConflict(
+        asset_id="equity:us:aapl",
+        source_id=first.source_id,
+        frequency=first.frequency,
+        field_name=first.field_name,
+        period_end=first.period_end,
+        tied_available_at=(first.available_at,),
+        candidates=candidates,
+    )
+
+
+def test_conflict_only_period_is_valid_and_bare_empty_period_is_not() -> None:
+    conflict = _conflict()
+    missing = tuple(sorted(allowed_sec_fundamental_fields()))
+    period = SecFundamentalPeriodView(
+        period_end=conflict.period_end,
+        frequency=conflict.frequency,
+        facts=(),
+        conflict_fields=(conflict.field_name,),
+        missing_fields=missing,
+        available_fields=(),
+        is_complete=False,
+        latest_available_at=conflict.tied_available_at[-1],
+    )
+
+    assert period.facts == ()
+    assert period.conflict_fields == ("fundamental.revenue",)
+
+    with pytest.raises(ValidationError, match="fact or a conflict"):
+        SecFundamentalPeriodView(
+            period_end=conflict.period_end,
+            frequency=conflict.frequency,
+            facts=(),
+            missing_fields=missing,
+            available_fields=(),
+            is_complete=False,
+            latest_available_at=conflict.tied_available_at[-1],
+        )
+
+
+def test_conflict_rejects_equivalent_or_unsorted_candidates() -> None:
+    conflict = _conflict()
+    equivalent = conflict.candidates[0].model_copy(update={"observation_id": uuid4()})
+    equivalent_candidates = tuple(
+        sorted(
+            (conflict.candidates[0], equivalent),
+            key=lambda item: (item.available_at, item.observation_id),
+        )
+    )
+    with pytest.raises(ValidationError, match="distinct semantic"):
+        SecFundamentalRevisionConflict(
+            **{
+                **conflict.model_dump(),
+                "candidates": equivalent_candidates,
+            }
+        )
+    with pytest.raises(ValidationError, match="ordered by available_at"):
+        SecFundamentalRevisionConflict(
+            **{
+                **conflict.model_dump(),
+                "candidates": tuple(reversed(conflict.candidates)),
+            }
+        )
+
+
+def test_raise_result_rejects_conflicts_and_report_serializes_them() -> None:
+    conflict = _conflict()
+    period = SecFundamentalPeriodView(
+        period_end=conflict.period_end,
+        frequency=conflict.frequency,
+        facts=(),
+        conflict_fields=(conflict.field_name,),
+        missing_fields=tuple(sorted(allowed_sec_fundamental_fields())),
+        available_fields=(),
+        is_complete=False,
+        latest_available_at=conflict.tied_available_at[-1],
+    )
+    common = {
+        "periods": (period,),
+        "conflicts": (conflict,),
+        "has_conflicts": True,
+        "observations_examined": 2,
+        "observations_eligible": 2,
+        "observations_selected": 0,
+        "observations_superseded": 0,
+        "periods_returned": 1,
+        "earliest_period_end": conflict.period_end,
+        "latest_period_end": conflict.period_end,
+        "latest_period_complete": False,
+        "traceability_verified": True,
+    }
+    raise_query = SecFundamentalQuery(
+        known_at=datetime(2026, 1, 1, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+    )
+    with pytest.raises(ValidationError, match="raise queries"):
+        SecFundamentalPointInTimeResult(query=raise_query, **common)
+
+    report_query = SecFundamentalQuery(
+        known_at=datetime(2026, 1, 1, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+        ambiguity_policy=SecFundamentalAmbiguityPolicy.REPORT,
+    )
+    result = SecFundamentalPointInTimeResult(query=report_query, **common)
+    payload = result.to_json_dict()
+
+    assert payload["query"]["ambiguity_policy"] == "report"
+    assert payload["has_conflicts"] is True
+    assert payload["conflicts"][0]["field_name"] == "fundamental.revenue"
+    assert payload["periods"][0]["conflict_fields"] == ["fundamental.revenue"]

@@ -1,6 +1,6 @@
 """Deterministic Decimal engine for SEC issuer fundamental metrics."""
 
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Context, Decimal, localcontext
@@ -20,6 +20,7 @@ from investment_analyst.providers.fundamentals.sec_metric_models import (
 from investment_analyst.providers.fundamentals.sec_query_models import (
     SecFundamentalPeriodView,
     SecFundamentalPointInTimeResult,
+    SecFundamentalRevisionConflict,
     SecSelectedFundamentalFact,
 )
 from investment_analyst.providers.fundamentals.sec_raw_records import (
@@ -67,6 +68,7 @@ class _PeriodContext:
     asset_id: str
     period: SecFundamentalPeriodView
     facts: dict[str, SecSelectedFundamentalFact]
+    conflict_fields: frozenset[str]
     fiscal_metadata: _FiscalMetadata | None
     metadata_status: str
 
@@ -148,6 +150,11 @@ class SecFundamentalMetricEngine:
                 "point-in-time source must contain the complete available history"
             )
 
+        conflicts_by_period: dict[datetime, list[SecFundamentalRevisionConflict]] = defaultdict(
+            list
+        )
+        for conflict in result.conflicts:
+            conflicts_by_period[conflict.period_end].append(conflict)
         contexts: list[_PeriodContext] = []
         for period in result.periods:
             contexts.append(
@@ -156,6 +163,7 @@ class SecFundamentalMetricEngine:
                     request,
                     source_id=self._configuration.companyfacts_source_id,
                     accounting_standard=self._configuration.accounting_standard,
+                    conflicts=tuple(conflicts_by_period.get(period.period_end, ())),
                 )
             )
         period_ends = tuple(context.period.period_end for context in contexts)
@@ -170,12 +178,14 @@ def _validate_period(
     *,
     source_id: str,
     accounting_standard: SecAccountingStandard,
+    conflicts: tuple[SecFundamentalRevisionConflict, ...] = (),
 ) -> _PeriodContext:
     if period.frequency is not request.frequency:
         raise MalformedSecFundamentalPeriodError("period mixes fundamental frequencies")
     if period.period_end.tzinfo is not UTC or period.latest_available_at.tzinfo is not UTC:
         raise MalformedSecFundamentalPeriodError("period timestamps must be normalized to UTC")
     facts: dict[str, SecSelectedFundamentalFact] = {}
+    conflict_fields = frozenset(period.conflict_fields)
     metadata_values: set[_FiscalMetadata] = set()
     metadata_missing = False
     metadata_inconsistent = False
@@ -213,6 +223,22 @@ def _validate_period(
             metadata_values.add(metadata)
         facts[fact.field_name] = fact
 
+    if not facts and conflict_fields:
+        for conflict in conflicts:
+            if conflict.field_name not in conflict_fields:
+                continue
+            for candidate in conflict.candidates:
+                metadata, status = _fiscal_metadata(
+                    candidate,
+                    accounting_standard=accounting_standard,
+                )
+                if status == "missing":
+                    metadata_missing = True
+                elif status == "inconsistent":
+                    metadata_inconsistent = True
+                elif metadata is not None:
+                    metadata_values.add(metadata)
+
     if metadata_inconsistent or len(metadata_values) > 1:
         metadata_status = "inconsistent"
         fiscal_metadata = None
@@ -226,6 +252,7 @@ def _validate_period(
         request.asset_id,
         period,
         facts,
+        conflict_fields,
         fiscal_metadata,
         metadata_status,
     )
@@ -326,6 +353,7 @@ def _build_fiscal_index(
                 asset_id=context.asset_id,
                 period=context.period,
                 facts=context.facts,
+                conflict_fields=context.conflict_fields,
                 fiscal_metadata=None,
                 metadata_status="inconsistent",
             )
@@ -350,7 +378,11 @@ def _same_period_candidates(
     net_income = facts.get("fundamental.net_income")
     revenue = facts.get("fundamental.revenue")
     if net_income is None or revenue is None:
-        skipped["missing_current_input"] += 1
+        _skip_current(
+            context,
+            ("fundamental.net_income", "fundamental.revenue"),
+            skipped,
+        )
     elif revenue.value <= 0:
         skipped["non_positive_revenue"] += 1
     else:
@@ -369,7 +401,11 @@ def _same_period_candidates(
     liabilities = facts.get("fundamental.liabilities")
     assets = facts.get("fundamental.assets")
     if liabilities is None or assets is None:
-        skipped["missing_current_input"] += 1
+        _skip_current(
+            context,
+            ("fundamental.liabilities", "fundamental.assets"),
+            skipped,
+        )
     elif assets.value <= 0:
         skipped["non_positive_assets"] += 1
     else:
@@ -387,7 +423,11 @@ def _same_period_candidates(
 
     equity = facts.get("fundamental.stockholders_equity")
     if liabilities is None or equity is None:
-        skipped["missing_current_input"] += 1
+        _skip_current(
+            context,
+            ("fundamental.liabilities", "fundamental.stockholders_equity"),
+            skipped,
+        )
     elif equity.value <= 0:
         skipped["non_positive_equity"] += 1
     else:
@@ -403,6 +443,28 @@ def _same_period_candidates(
             )
         )
     return candidates
+
+
+def _skip_current(
+    context: _PeriodContext,
+    field_names: tuple[str, ...],
+    skipped: Counter[str],
+) -> None:
+    if any(field_name in context.conflict_fields for field_name in field_names):
+        skipped["ambiguous_current_input"] += 1
+    else:
+        skipped["missing_current_input"] += 1
+
+
+def _skip_previous(
+    previous: _PeriodContext,
+    field_name: str,
+    skipped: Counter[str],
+) -> None:
+    if field_name in previous.conflict_fields:
+        skipped["ambiguous_previous_input"] += 1
+    else:
+        skipped["missing_previous_input"] += 1
 
 
 def _year_over_year_candidates(
@@ -424,13 +486,13 @@ def _year_over_year_candidates(
     )
     current_revenue = context.facts.get("fundamental.revenue")
     if current_revenue is None:
-        skipped["missing_current_input"] += 1
+        _skip_current(context, ("fundamental.revenue",), skipped)
     elif previous is None:
         skipped["missing_previous_period"] += 1
     else:
         previous_revenue = previous.facts.get("fundamental.revenue")
         if previous_revenue is None:
-            skipped["missing_previous_input"] += 1
+            _skip_previous(previous, "fundamental.revenue", skipped)
         elif previous_revenue.value <= 0:
             skipped["non_positive_previous_revenue"] += 1
         else:
@@ -448,13 +510,13 @@ def _year_over_year_candidates(
 
     current_net_income = context.facts.get("fundamental.net_income")
     if current_net_income is None:
-        skipped["missing_current_input"] += 1
+        _skip_current(context, ("fundamental.net_income",), skipped)
     elif previous is None:
         skipped["missing_previous_period"] += 1
     else:
         previous_net_income = previous.facts.get("fundamental.net_income")
         if previous_net_income is None:
-            skipped["missing_previous_input"] += 1
+            _skip_previous(previous, "fundamental.net_income", skipped)
         elif previous_net_income.value == 0:
             skipped["zero_previous_net_income"] += 1
         else:

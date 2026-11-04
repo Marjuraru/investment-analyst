@@ -54,6 +54,24 @@ uses its absolute value.
 The summary records skipped reasons instead of substituting zero, carrying values forward, or
 creating an invalid `MetricResult`.
 
+## Equal-availability conflicts
+
+The metric pipeline queries the complete available history with the explicit `report` ambiguity
+policy. Metrics whose current inputs are conflict fields are skipped as
+`ambiguous_current_input`; year-over-year metrics whose previous inputs are conflict fields are
+skipped as `ambiguous_previous_input`. Unaffected same-period and year-over-year metrics continue,
+and no metric input or traceability reference points to a conflict candidate. A conflict-only
+period can still be examined, but it produces no misleading ratio.
+
+When there is no conflict, metric identities, values, quality, and ordering remain identical to the
+previous behavior. When conflicts exist, `SecFundamentalMetricImportSummary` and
+`SecIssuerFundamentalRefreshSummary` expose `conflict_count`, the typed `conflicts`, and
+`has_conflicts` with compatible defaults for previously stored outcomes. The effective reuse key
+includes those conflicts, so a prior outcome with different inputs is not reused.
+
+The strict point-in-time service still raises for ambiguous explicit queries; `report` is an
+explicit analytical projection, not a silent fallback or a claim of complete coverage.
+
 ## Traceability and identity
 
 Each persisted result contains the ordered observation IDs and their analytical roles. Its

@@ -21,7 +21,10 @@ from investment_analyst.providers.fundamentals.sec_metric_models import (
 from investment_analyst.providers.fundamentals.sec_point_in_time_service import (
     SecIssuerFundamentalPointInTimeService,
 )
-from investment_analyst.providers.fundamentals.sec_query_models import SecFundamentalQuery
+from investment_analyst.providers.fundamentals.sec_query_models import (
+    SecFundamentalAmbiguityPolicy,
+    SecFundamentalQuery,
+)
 from investment_analyst.providers.fundamentals.sec_raw_records import (
     aapl_sec_configuration,
 )
@@ -112,6 +115,7 @@ class SecIssuerFundamentalMetricPipeline:
             start_period_end=None,
             end_period_end=None,
             limit=None,
+            ambiguity_policy=SecFundamentalAmbiguityPolicy.REPORT,
         )
         source_result = self._point_in_time_service.query(internal_query)
         reuse_key = self._reuse_key(request, source_result.model_dump(mode="json"))
@@ -125,6 +129,14 @@ class SecIssuerFundamentalMetricPipeline:
             if summary.metrics_generated != len(results):
                 raise SecFundamentalMetricTraceabilityError(
                     "reused fundamental outcome does not match its result set"
+                )
+            if (
+                summary.has_conflicts != source_result.has_conflicts
+                or summary.conflict_count != len(source_result.conflicts)
+                or summary.conflicts != source_result.conflicts
+            ):
+                raise SecFundamentalMetricTraceabilityError(
+                    "reused fundamental outcome does not match source conflicts"
                 )
             counts_after = self._protected_counts()
             if counts_after != counts_before:
@@ -180,6 +192,9 @@ class SecIssuerFundamentalMetricPipeline:
             computed_at=computed_at,
             periods_examined=len(source_result.periods),
             target_periods=len(target_views),
+            conflict_count=len(source_result.conflicts),
+            conflicts=source_result.conflicts,
+            has_conflicts=source_result.has_conflicts,
             complete_periods=sum(period.is_complete for period in target_views),
             incomplete_periods=sum(not period.is_complete for period in target_views),
             metrics_generated=len(proposed),

@@ -64,6 +64,7 @@ class ListedMarketRefreshSummary(ContractModel):
     analytics_lookback_days: Literal[90] = 90
     intervals_executed: int = Field(ge=0)
     bars_received: int = Field(ge=0)
+    vwap_unavailable_bars: int = Field(default=0, ge=0)
     raw_records_created: int = Field(ge=0)
     raw_records_reused: int = Field(ge=0)
     observations_created: int = Field(ge=0)
@@ -84,6 +85,7 @@ class ListedMarketRefreshSummary(ContractModel):
     @field_validator(
         "intervals_executed",
         "bars_received",
+        "vwap_unavailable_bars",
         "raw_records_created",
         "raw_records_reused",
         "observations_created",

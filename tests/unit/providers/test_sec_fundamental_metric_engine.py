@@ -22,9 +22,11 @@ from investment_analyst.providers.fundamentals.sec_metric_pipeline import (
     sec_fundamental_metric_result_id,
 )
 from investment_analyst.providers.fundamentals.sec_query_models import (
+    SecFundamentalAmbiguityPolicy,
     SecFundamentalPeriodView,
     SecFundamentalPointInTimeResult,
     SecFundamentalQuery,
+    SecFundamentalRevisionConflict,
     SecSelectedFundamentalFact,
 )
 
@@ -119,17 +121,26 @@ def _result(
     frequency: DataFrequency = DataFrequency.ANNUAL,
     known_at: datetime = datetime(2026, 12, 31, tzinfo=UTC),
     asset_id: str = "equity:us:aapl",
+    conflicts: tuple[SecFundamentalRevisionConflict, ...] = (),
 ) -> SecFundamentalPointInTimeResult:
     query = SecFundamentalQuery(
         asset_id=asset_id,
         known_at=known_at,
         frequency=frequency,
+        ambiguity_policy=(
+            SecFundamentalAmbiguityPolicy.REPORT
+            if conflicts
+            else SecFundamentalAmbiguityPolicy.RAISE
+        ),
     )
+    conflict_candidates = sum(len(conflict.candidates) for conflict in conflicts)
     return SecFundamentalPointInTimeResult(
         query=query,
         periods=periods,
-        observations_examined=sum(len(period.facts) for period in periods),
-        observations_eligible=sum(len(period.facts) for period in periods),
+        conflicts=conflicts,
+        has_conflicts=bool(conflicts),
+        observations_examined=sum(len(period.facts) for period in periods) + conflict_candidates,
+        observations_eligible=sum(len(period.facts) for period in periods) + conflict_candidates,
         observations_selected=sum(len(period.facts) for period in periods),
         observations_superseded=0,
         periods_returned=len(periods),
@@ -137,6 +148,114 @@ def _result(
         latest_period_end=periods[-1].period_end if periods else None,
         latest_period_complete=periods[-1].is_complete if periods else False,
         traceability_verified=True,
+    )
+
+
+def _conflict(
+    field_name: str,
+    period_end: datetime,
+    values: tuple[str, ...],
+    *,
+    fiscal_year: str = "2025",
+) -> SecFundamentalRevisionConflict:
+    candidates = tuple(
+        sorted(
+            (
+                _fact(
+                    field_name,
+                    value,
+                    period_end,
+                    fiscal_year=fiscal_year,
+                )
+                for value in values
+            ),
+            key=lambda item: (item.available_at, item.observation_id),
+        )
+    )
+    first = candidates[0]
+    return SecFundamentalRevisionConflict(
+        asset_id="equity:us:aapl",
+        source_id=first.source_id,
+        frequency=first.frequency,
+        field_name=field_name,
+        period_end=period_end,
+        tied_available_at=tuple(sorted({item.available_at for item in candidates})),
+        candidates=candidates,
+    )
+
+
+def _period_with_conflict(
+    period_end: datetime,
+    values: dict[str, str],
+    conflict_field: str,
+    *,
+    fiscal_year: str = "2025",
+) -> tuple[SecFundamentalPeriodView, SecFundamentalRevisionConflict]:
+    facts = tuple(
+        sorted(
+            (
+                _fact(
+                    field_name,
+                    value,
+                    period_end,
+                    fiscal_year=fiscal_year,
+                )
+                for field_name, value in values.items()
+            ),
+            key=lambda item: item.field_name,
+        )
+    )
+    conflict = _conflict(
+        conflict_field,
+        period_end,
+        ("100", "101"),
+        fiscal_year=fiscal_year,
+    )
+    available = tuple(fact.field_name for fact in facts)
+    missing = tuple(field for field in _FIELDS if field not in set(available))
+    latest = max(
+        [fact.available_at for fact in facts]
+        + [candidate.available_at for candidate in conflict.candidates]
+    )
+    return (
+        SecFundamentalPeriodView(
+            period_end=period_end,
+            frequency=DataFrequency.ANNUAL,
+            facts=facts,
+            conflict_fields=(conflict_field,),
+            missing_fields=missing,
+            available_fields=available,
+            is_complete=False,
+            latest_available_at=latest,
+        ),
+        conflict,
+    )
+
+
+def _conflict_only_period(
+    period_end: datetime,
+    conflict_field: str,
+    *,
+    fiscal_year: str = "2024",
+) -> tuple[SecFundamentalPeriodView, SecFundamentalRevisionConflict]:
+    conflict = _conflict(
+        conflict_field,
+        period_end,
+        ("100", "101"),
+        fiscal_year=fiscal_year,
+    )
+    return (
+        SecFundamentalPeriodView(
+            period_end=period_end,
+            frequency=DataFrequency.ANNUAL,
+            facts=(),
+            conflict_fields=(conflict_field,),
+            missing_fields=_FIELDS,
+            available_fields=(),
+            is_complete=False,
+            latest_available_at=max(candidate.available_at for candidate in conflict.candidates),
+        ),
+        conflict,
     )
 
 
@@ -168,6 +287,8 @@ def _annual_history() -> tuple[SecFundamentalPeriodView, ...]:
 
 def _compute(
     periods: tuple[SecFundamentalPeriodView, ...],
+    *,
+    conflicts: tuple[SecFundamentalRevisionConflict, ...] = (),
     **request_overrides: object,
 ):
     values: dict[str, object] = {
@@ -178,7 +299,12 @@ def _compute(
     request = SecFundamentalMetricRequest.model_validate(values)
     return SecFundamentalMetricEngine().compute(
         request,
-        _result(periods, frequency=request.frequency, known_at=request.known_at),
+        _result(
+            periods,
+            frequency=request.frequency,
+            known_at=request.known_at,
+            conflicts=conflicts,
+        ),
         computed_at=datetime(2027, 1, 1, tzinfo=UTC),
     )
 
@@ -198,6 +324,104 @@ def test_exact_same_period_and_yoy_formulas() -> None:
     assert current["fundamental.revenue_yoy_growth"].value == Decimal("0.25")
     assert current["fundamental.net_income_yoy_change_rate"].value == Decimal("0.5")
     assert computation.traceability_verified
+
+
+def test_ambiguous_current_input_skips_only_dependent_metrics() -> None:
+    previous, _ = _annual_history()
+    current, conflict = _period_with_conflict(
+        datetime(2025, 9, 27, tzinfo=UTC),
+        {
+            "fundamental.net_income": "30",
+            "fundamental.assets": "250",
+            "fundamental.liabilities": "100",
+            "fundamental.stockholders_equity": "150",
+        },
+        "fundamental.revenue",
+    )
+
+    computation = _compute((previous, current), conflicts=(conflict,))
+
+    current_candidates = {
+        candidate.metric_name
+        for candidate in computation.candidates
+        if candidate.period_end == current.period_end
+    }
+    assert current_candidates == {
+        "fundamental.liabilities_to_assets",
+        "fundamental.liabilities_to_equity",
+        "fundamental.net_income_yoy_change_rate",
+    }
+    assert computation.skipped_counts["ambiguous_current_input"] == 2
+    conflict_ids = {candidate.observation_id for candidate in conflict.candidates}
+    assert all(
+        not set(candidate.input_observation_ids()) & conflict_ids
+        for candidate in computation.candidates
+    )
+
+
+def test_ambiguous_previous_input_skips_only_dependent_comparison() -> None:
+    previous, conflict = _period_with_conflict(
+        datetime(2024, 9, 28, tzinfo=UTC),
+        {
+            "fundamental.net_income": "20",
+            "fundamental.assets": "200",
+            "fundamental.liabilities": "80",
+            "fundamental.stockholders_equity": "120",
+        },
+        "fundamental.revenue",
+        fiscal_year="2024",
+    )
+    _, current = _annual_history()
+
+    computation = _compute(
+        (previous, current),
+        conflicts=(conflict,),
+        start_period_end=date(2025, 1, 1),
+    )
+
+    current_candidates = {
+        candidate.metric_name
+        for candidate in computation.candidates
+        if candidate.period_end == current.period_end
+    }
+    assert "fundamental.revenue_yoy_growth" not in current_candidates
+    assert current_candidates == {
+        "fundamental.net_margin",
+        "fundamental.liabilities_to_assets",
+        "fundamental.liabilities_to_equity",
+        "fundamental.net_income_yoy_change_rate",
+    }
+    assert computation.skipped_counts["ambiguous_previous_input"] == 1
+
+
+def test_conflict_only_previous_period_reports_previous_ambiguity() -> None:
+    previous, conflict = _conflict_only_period(
+        datetime(2024, 9, 28, tzinfo=UTC),
+        "fundamental.revenue",
+        fiscal_year="2024",
+    )
+    _, current = _annual_history()
+
+    computation = _compute(
+        (previous, current),
+        conflicts=(conflict,),
+        start_period_end=date(2025, 1, 1),
+    )
+
+    current_candidates = {
+        candidate.metric_name
+        for candidate in computation.candidates
+        if candidate.period_end == current.period_end
+    }
+    assert "fundamental.revenue_yoy_growth" not in current_candidates
+    assert computation.skipped_counts["ambiguous_previous_input"] == 1
+
+
+def test_no_conflict_does_not_emit_ambiguous_reasons() -> None:
+    computation = _compute(_annual_history())
+
+    assert "ambiguous_current_input" not in computation.skipped_counts
+    assert "ambiguous_previous_input" not in computation.skipped_counts
 
 
 def test_negative_previous_net_income_uses_absolute_denominator() -> None:

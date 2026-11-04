@@ -164,6 +164,7 @@ class ListedMarketRefreshPipeline:
             analytics_known_at=analytics_known_at,
             intervals_executed=len(imports),
             bars_received=sum(item.bars_received for item in imports),
+            vwap_unavailable_bars=sum(item.vwap_unavailable_bars for item in imports),
             raw_records_created=sum(item.raw_records_created for item in imports),
             raw_records_reused=sum(item.raw_records_reused for item in imports),
             observations_created=sum(item.observations_created for item in imports),

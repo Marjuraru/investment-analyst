@@ -3,6 +3,7 @@
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -54,7 +55,12 @@ from investment_analyst.providers.fundamentals.sec_pipeline import (
     SecIssuerFundamentalsPipeline,
 )
 from investment_analyst.providers.fundamentals.sec_point_in_time_service import (
+    AmbiguousSecFundamentalRevisionError,
     SecIssuerFundamentalPointInTimeService,
+)
+from investment_analyst.providers.fundamentals.sec_query_models import (
+    SecFundamentalAmbiguityPolicy,
+    SecFundamentalQuery,
 )
 from investment_analyst.providers.http import HttpResponse
 from investment_analyst.storage import LocalStorage, StoragePaths
@@ -229,8 +235,9 @@ def _pipeline(
     configuration: SecAssetConfiguration = _CONFIGURATION,
     valuation_service: _ValuationService | None = None,
     valuation_pipeline: _ValuationPipeline | None = None,
+    documents: tuple[bytes, bytes] | None = None,
 ) -> tuple[SecIssuerFundamentalRefreshPipeline, _FixtureTransport]:
-    submissions, companyfacts = _documents()
+    submissions, companyfacts = documents or _documents()
     transport = _FixtureTransport(submissions, companyfacts)
     client = SecEdgarClient(
         transport,
@@ -295,6 +302,61 @@ def _request(
         frequency=DataFrequency.ANNUAL,
         requested_known_at=known_at,
     )
+
+
+def _conflicting_documents() -> tuple[bytes, bytes]:
+    submissions, companyfacts = _documents()
+    document = json.loads(companyfacts)
+    net_income_facts = document["facts"]["us-gaap"]["NetIncomeLoss"]["units"]["USD"]
+    conflicting = dict(net_income_facts[0])
+    conflicting["start"] = "2024-12-30"
+    net_income_facts.append(conflicting)
+    return (
+        submissions,
+        json.dumps(document, separators=(",", ":"), sort_keys=True).encode(),
+    )
+
+
+def test_refresh_reports_conflict_and_keeps_strict_raise_legacy(tmp_path: Path) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline, _ = _pipeline(storage, documents=_conflicting_documents())
+        summary = pipeline.run(_request())
+
+        assert summary.has_conflicts is True
+        assert summary.conflict_count == 1
+        assert summary.conflicts[0].field_name == "fundamental.net_income"
+        assert {candidate.value for candidate in summary.conflicts[0].candidates} == {
+            Decimal("4000")
+        }
+        assert summary.metric_skipped_counts["ambiguous_current_input"] == 2
+        assert summary.diagnostics_created + summary.diagnostics_reused == 1
+        assert summary.to_json_dict()["has_conflicts"] is True
+        conflict_ids = {candidate.observation_id for candidate in summary.conflicts[0].candidates}
+        assert all(
+            not set(result.input_observation_ids) & conflict_ids
+            for result in storage.metric_results.list(asset_id=_CONFIGURATION.asset_id)
+        )
+
+        service = SecIssuerFundamentalPointInTimeService(storage, _CONFIGURATION)
+        with pytest.raises(AmbiguousSecFundamentalRevisionError):
+            service.query(
+                SecFundamentalQuery(
+                    asset_id=_CONFIGURATION.asset_id,
+                    known_at=_KNOWN_AT,
+                    frequency=DataFrequency.ANNUAL,
+                )
+            )
+        report = service.query(
+            SecFundamentalQuery(
+                asset_id=_CONFIGURATION.asset_id,
+                known_at=_KNOWN_AT,
+                frequency=DataFrequency.ANNUAL,
+                ambiguity_policy=SecFundamentalAmbiguityPolicy.REPORT,
+            )
+        )
+        assert report.has_conflicts is True
+        assert report.conflicts[0].field_name == "fundamental.net_income"
+        assert report.periods[0].conflict_fields == ("fundamental.net_income",)
 
 
 def test_refresh_isolated_idempotent_and_fully_traceable(tmp_path: Path) -> None:

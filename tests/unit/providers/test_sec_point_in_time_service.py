@@ -31,7 +31,10 @@ from investment_analyst.providers.fundamentals.sec_point_in_time_service import 
     SecFundamentalQueryError,
     SecIssuerFundamentalPointInTimeService,
 )
-from investment_analyst.providers.fundamentals.sec_query_models import SecFundamentalQuery
+from investment_analyst.providers.fundamentals.sec_query_models import (
+    SecFundamentalAmbiguityPolicy,
+    SecFundamentalQuery,
+)
 
 
 class _ObservationRepository:
@@ -209,6 +212,7 @@ def _query(
     end: date | None = None,
     limit: int | None = None,
     asset_id: str = ASSET_ID,
+    ambiguity_policy: SecFundamentalAmbiguityPolicy = SecFundamentalAmbiguityPolicy.RAISE,
 ) -> SecFundamentalQuery:
     return SecFundamentalQuery(
         asset_id=asset_id,
@@ -217,6 +221,7 @@ def _query(
         start_period_end=start,
         end_period_end=end,
         limit=limit,
+        ambiguity_policy=ambiguity_policy,
     )
 
 
@@ -425,3 +430,271 @@ def test_configured_issuer_is_isolated_by_asset_source_and_transformation() -> N
 
     with pytest.raises(SecFundamentalQueryError, match="does not match"):
         service.query(_query(datetime(2026, 1, 1, tzinfo=UTC)))
+
+
+def test_report_mode_returns_conflict_without_selecting_or_fallback() -> None:
+    period_end = date(2025, 9, 27)
+    available = datetime(2025, 10, 31, 20, tzinfo=UTC)
+    revenue_a = _observation(
+        value="100",
+        period_end=period_end,
+        available_at=available,
+        accession="0000320193-25-000001",
+    )
+    revenue_b = _observation(
+        value="101",
+        period_end=period_end,
+        available_at=available,
+        accession="0000320193-25-000002",
+    )
+    assets = _observation(
+        field_name="fundamental.assets",
+        value="200",
+        period_end=period_end,
+        available_at=available,
+    )
+    service = SecAaplFundamentalPointInTimeService(_Storage([revenue_a, revenue_b, assets]))  # type: ignore[arg-type]
+
+    result = service.query(
+        _query(
+            datetime(2026, 1, 1, tzinfo=UTC),
+            ambiguity_policy=SecFundamentalAmbiguityPolicy.REPORT,
+        )
+    )
+
+    assert result.has_conflicts is True
+    assert len(result.conflicts) == 1
+    conflict = result.conflicts[0]
+    assert conflict.field_name == "fundamental.revenue"
+    assert conflict.reason == "equal_available_at_semantic_conflict"
+    assert conflict.tied_available_at == (available,)
+    assert {candidate.value for candidate in conflict.candidates} == {
+        Decimal("100"),
+        Decimal("101"),
+    }
+    assert all(candidate.superseded_count == 0 for candidate in conflict.candidates)
+    period = result.periods[0]
+    assert period.conflict_fields == ("fundamental.revenue",)
+    assert period.available_fields == ("fundamental.assets",)
+    assert [fact.field_name for fact in period.facts] == ["fundamental.assets"]
+    assert "fundamental.revenue" in period.missing_fields
+    assert period.is_complete is False
+    assert result.observations_eligible == 3
+    assert result.observations_selected == 1
+    assert result.observations_superseded == 0
+
+    payload = result.to_json_dict()
+    assert payload["query"]["ambiguity_policy"] == "report"
+    assert payload["has_conflicts"] is True
+    assert payload["conflicts"][0]["field_name"] == "fundamental.revenue"
+    assert payload["periods"][0]["conflict_fields"] == ["fundamental.revenue"]
+
+
+def test_report_mode_conflict_only_period_remains_explicit_and_empty() -> None:
+    period_end = date(2025, 9, 27)
+    available = datetime(2025, 10, 31, 20, tzinfo=UTC)
+    revenue_a = _observation(
+        value="100",
+        period_end=period_end,
+        available_at=available,
+        accession="0000320193-25-000001",
+    )
+    revenue_b = _observation(
+        value="101",
+        period_end=period_end,
+        available_at=available,
+        accession="0000320193-25-000002",
+    )
+    result = SecAaplFundamentalPointInTimeService(  # type: ignore[arg-type]
+        _Storage([revenue_a, revenue_b])
+    ).query(
+        _query(
+            datetime(2026, 1, 1, tzinfo=UTC),
+            ambiguity_policy=SecFundamentalAmbiguityPolicy.REPORT,
+        )
+    )
+
+    assert result.periods_returned == 1
+    period = result.periods[0]
+    assert period.facts == ()
+    assert period.available_fields == ()
+    assert period.conflict_fields == ("fundamental.revenue",)
+    assert period.missing_fields == (
+        "fundamental.assets",
+        "fundamental.liabilities",
+        "fundamental.net_income",
+        "fundamental.revenue",
+        "fundamental.stockholders_equity",
+    )
+    assert period.is_complete is False
+    assert period.latest_available_at == available
+    assert result.latest_period_complete is False
+    assert result.observations_selected == 0
+    assert len(result.conflicts) == 1
+
+
+def test_report_mode_keeps_unaffected_fields_and_periods() -> None:
+    conflict_period_end = date(2025, 9, 27)
+    prior_period_end = date(2024, 9, 28)
+    available = datetime(2025, 10, 31, 20, tzinfo=UTC)
+    prior_available = datetime(2024, 11, 1, 20, tzinfo=UTC)
+    observations = [
+        _observation(
+            value="100",
+            period_end=conflict_period_end,
+            available_at=available,
+            accession="0000320193-25-000001",
+        ),
+        _observation(
+            value="101",
+            period_end=conflict_period_end,
+            available_at=available,
+            accession="0000320193-25-000002",
+        ),
+        _observation(
+            field_name="fundamental.assets",
+            value="200",
+            period_end=conflict_period_end,
+            available_at=available,
+        ),
+        _observation(
+            value="50",
+            period_end=prior_period_end,
+            available_at=prior_available,
+        ),
+    ]
+    result = SecAaplFundamentalPointInTimeService(  # type: ignore[arg-type]
+        _Storage(observations)
+    ).query(
+        _query(
+            datetime(2026, 1, 1, tzinfo=UTC),
+            ambiguity_policy=SecFundamentalAmbiguityPolicy.REPORT,
+        )
+    )
+
+    periods = {period.period_end.date(): period for period in result.periods}
+    assert set(periods) == {prior_period_end, conflict_period_end}
+    assert periods[conflict_period_end].conflict_fields == ("fundamental.revenue",)
+    assert [fact.field_name for fact in periods[conflict_period_end].facts] == [
+        "fundamental.assets"
+    ]
+    assert [fact.field_name for fact in periods[prior_period_end].facts] == ["fundamental.revenue"]
+    assert periods[prior_period_end].facts[0].value == Decimal("50")
+    assert result.observations_selected == 2
+
+
+def test_report_mode_never_exposes_future_tie_candidates() -> None:
+    period_end = date(2025, 9, 27)
+    available = datetime(2025, 10, 31, 20, tzinfo=UTC)
+    revenue_a = _observation(
+        value="100",
+        period_end=period_end,
+        available_at=available,
+        accession="0000320193-25-000001",
+    )
+    revenue_b = _observation(
+        value="101",
+        period_end=period_end,
+        available_at=available,
+        accession="0000320193-25-000002",
+    )
+    future = _observation(
+        value="999",
+        period_end=period_end,
+        available_at=available + timedelta(days=10),
+        accession="0000320193-25-000003",
+    )
+    service = SecAaplFundamentalPointInTimeService(  # type: ignore[arg-type]
+        _Storage([revenue_a, revenue_b, future])
+    )
+
+    at_tie = service.query(_query(available, ambiguity_policy=SecFundamentalAmbiguityPolicy.REPORT))
+    before_tie = service.query(
+        _query(
+            available - timedelta(seconds=1),
+            ambiguity_policy=SecFundamentalAmbiguityPolicy.REPORT,
+        )
+    )
+
+    assert len(at_tie.conflicts) == 1
+    assert {candidate.value for candidate in at_tie.conflicts[0].candidates} == {
+        Decimal("100"),
+        Decimal("101"),
+    }
+    assert all(candidate.available_at <= available for candidate in at_tie.conflicts[0].candidates)
+    assert before_tie.conflicts == ()
+    assert before_tie.periods == ()
+    assert before_tie.has_conflicts is False
+
+
+def test_report_mode_excludes_later_revision_of_conflicted_group() -> None:
+    period_end = date(2025, 9, 27)
+    available = datetime(2025, 10, 31, 20, tzinfo=UTC)
+    observations = [
+        _observation(
+            value="100",
+            period_end=period_end,
+            available_at=available,
+            accession="0000320193-25-000001",
+        ),
+        _observation(
+            value="101",
+            period_end=period_end,
+            available_at=available,
+            accession="0000320193-25-000002",
+        ),
+        _observation(
+            value="110",
+            period_end=period_end,
+            available_at=available + timedelta(days=1),
+            accession="0000320193-25-000003",
+        ),
+    ]
+    result = SecAaplFundamentalPointInTimeService(  # type: ignore[arg-type]
+        _Storage(observations)
+    ).query(
+        _query(
+            datetime(2026, 1, 1, tzinfo=UTC),
+            ambiguity_policy=SecFundamentalAmbiguityPolicy.REPORT,
+        )
+    )
+
+    assert result.observations_selected == 0
+    assert result.observations_superseded == 0
+    assert len(result.conflicts) == 1
+    assert {candidate.value for candidate in result.conflicts[0].candidates} == {
+        Decimal("100"),
+        Decimal("101"),
+    }
+    assert result.conflicts[0].tied_available_at == (available,)
+
+
+def test_raise_mode_serialization_keeps_legacy_keys() -> None:
+    result = SecAaplFundamentalPointInTimeService(  # type: ignore[arg-type]
+        _Storage([_observation()])
+    ).query(_query(datetime(2026, 1, 1, tzinfo=UTC)))
+
+    payload = result.to_json_dict()
+
+    assert set(payload["query"]) == {
+        "asset_id",
+        "known_at",
+        "frequency",
+        "start_period_end",
+        "end_period_end",
+        "limit",
+    }
+    assert set(payload) == {
+        "query",
+        "periods",
+        "observations_examined",
+        "observations_eligible",
+        "observations_selected",
+        "observations_superseded",
+        "periods_returned",
+        "earliest_period_end",
+        "latest_period_end",
+        "latest_period_complete",
+        "traceability_verified",
+    }
+    assert "conflict_fields" not in payload["periods"][0]

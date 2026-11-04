@@ -12,9 +12,11 @@ from investment_analyst.providers.fundamentals.sec_companyfacts_normalizer impor
     sec_transformation_version,
 )
 from investment_analyst.providers.fundamentals.sec_query_models import (
+    SecFundamentalAmbiguityPolicy,
     SecFundamentalPeriodView,
     SecFundamentalPointInTimeResult,
     SecFundamentalQuery,
+    SecFundamentalRevisionConflict,
     SecSelectedFundamentalFact,
     allowed_sec_fundamental_fields,
 )
@@ -130,13 +132,15 @@ class SecIssuerFundamentalPointInTimeService:
             period_end_to=request.end_period_end,
         )
         candidates = self._eligible_candidates(observations, request)
-        selected, superseded = self._resolve_revisions(candidates, request)
-        periods = self._build_periods(selected, request)
+        selected, superseded, conflicts = self._resolve_revisions(candidates, request)
+        periods = self._build_periods(selected, conflicts, request)
         if request.limit is not None:
             periods = periods[-request.limit :]
         result = SecFundamentalPointInTimeResult(
             query=request,
             periods=tuple(periods),
+            conflicts=tuple(conflicts),
+            has_conflicts=bool(conflicts),
             observations_examined=len(observations),
             observations_eligible=len(candidates),
             observations_selected=sum(len(period.facts) for period in periods),
@@ -184,7 +188,11 @@ class SecIssuerFundamentalPointInTimeService:
         self,
         candidates: list[SecSelectedFundamentalFact],
         request: SecFundamentalQuery,
-    ) -> tuple[list[SecSelectedFundamentalFact], int]:
+    ) -> tuple[
+        list[SecSelectedFundamentalFact],
+        int,
+        list[SecFundamentalRevisionConflict],
+    ]:
         groups: dict[tuple[str, DataFrequency, datetime], list[SecSelectedFundamentalFact]] = (
             defaultdict(list)
         )
@@ -193,8 +201,15 @@ class SecIssuerFundamentalPointInTimeService:
 
         selected: list[SecSelectedFundamentalFact] = []
         superseded_total = 0
+        conflicts: list[SecFundamentalRevisionConflict] = []
         for key in sorted(groups, key=lambda item: (item[2], item[1].value, item[0])):
-            revisions = _collapse_equal_availability(groups[key])
+            if request.ambiguity_policy is SecFundamentalAmbiguityPolicy.REPORT:
+                revisions, tied = _partition_equal_availability(groups[key])
+                if tied:
+                    conflicts.append(_revision_conflict(tied, request))
+                    continue
+            else:
+                revisions = _collapse_equal_availability(groups[key])
             revisions.sort(key=lambda fact: fact.available_at)
             current = revisions[-1]
             superseded_count = len(revisions) - 1
@@ -202,32 +217,47 @@ class SecIssuerFundamentalPointInTimeService:
             selected.append(current.model_copy(update={"superseded_count": superseded_count}))
         if any(fact.available_at > request.known_at for fact in selected):
             raise SecFundamentalTraceabilityError("a selected fact is not known at query time")
-        return selected, superseded_total
+        return selected, superseded_total, conflicts
 
     def _build_periods(
         self,
         selected: list[SecSelectedFundamentalFact],
+        conflicts: list[SecFundamentalRevisionConflict],
         request: SecFundamentalQuery,
     ) -> list[SecFundamentalPeriodView]:
         grouped: dict[datetime, list[SecSelectedFundamentalFact]] = defaultdict(list)
         for fact in selected:
             grouped[fact.period_end].append(fact)
+        conflicts_by_period: dict[datetime, list[SecFundamentalRevisionConflict]] = defaultdict(
+            list
+        )
+        for conflict in conflicts:
+            conflicts_by_period[conflict.period_end].append(conflict)
 
         all_fields = set(allowed_sec_fundamental_fields())
         periods: list[SecFundamentalPeriodView] = []
-        for period_end in sorted(grouped):
-            facts = tuple(sorted(grouped[period_end], key=lambda fact: fact.field_name))
+        for period_end in sorted(set(grouped) | set(conflicts_by_period)):
+            facts = tuple(sorted(grouped.get(period_end, []), key=lambda fact: fact.field_name))
+            period_conflicts = conflicts_by_period.get(period_end, [])
+            conflict_fields = tuple(sorted({conflict.field_name for conflict in period_conflicts}))
             available = tuple(sorted(fact.field_name for fact in facts))
             missing = tuple(sorted(all_fields - set(available)))
+            eligibility_times = [fact.available_at for fact in facts]
+            eligibility_times.extend(
+                candidate.available_at
+                for conflict in period_conflicts
+                for candidate in conflict.candidates
+            )
             periods.append(
                 SecFundamentalPeriodView(
                     period_end=period_end,
                     frequency=request.frequency,
                     facts=facts,
+                    conflict_fields=conflict_fields,
                     missing_fields=missing,
                     available_fields=available,
                     is_complete=not missing,
-                    latest_available_at=max(fact.available_at for fact in facts),
+                    latest_available_at=max(eligibility_times),
                 )
             )
         return periods
@@ -239,6 +269,7 @@ class SecIssuerFundamentalPointInTimeService:
         superseded_total: int,
     ) -> None:
         candidate_ids = {fact.observation_id for fact in candidates}
+        selected_ids: set[UUID] = set()
         for period in result.periods:
             for fact in period.facts:
                 if fact.observation_id not in candidate_ids:
@@ -251,6 +282,28 @@ class SecIssuerFundamentalPointInTimeService:
                     raise SecFundamentalTraceabilityError("selected fact is not point-in-time safe")
                 if fact.period_end != period.period_end:
                     raise SecFundamentalTraceabilityError("selected fact period is inconsistent")
+                selected_ids.add(fact.observation_id)
+        conflict_ids: set[UUID] = set()
+        for conflict in result.conflicts:
+            if (
+                conflict.asset_id != result.query.asset_id
+                or conflict.frequency is not result.query.frequency
+            ):
+                raise SecFundamentalTraceabilityError("conflict does not match the query scope")
+            for candidate in conflict.candidates:
+                if candidate.observation_id not in candidate_ids:
+                    raise SecFundamentalTraceabilityError(
+                        "conflict candidate is not part of the eligible observation set"
+                    )
+                if candidate.source_id != self._configuration.companyfacts_source_id:
+                    raise SecFundamentalTraceabilityError("conflict candidate has the wrong source")
+                if candidate.available_at > result.query.known_at:
+                    raise SecFundamentalTraceabilityError(
+                        "conflict candidate is not point-in-time safe"
+                    )
+                conflict_ids.add(candidate.observation_id)
+        if conflict_ids & selected_ids:
+            raise SecFundamentalTraceabilityError("conflict candidate was selected as a fact")
         if result.observations_superseded > superseded_total:
             raise SecFundamentalTraceabilityError("superseded count is inconsistent")
 
@@ -371,36 +424,46 @@ def _selected_fact(
 def _collapse_equal_availability(
     revisions: list[SecSelectedFundamentalFact],
 ) -> list[SecSelectedFundamentalFact]:
+    collapsed, tied = _partition_equal_availability(revisions)
+    if tied:
+        raise AmbiguousSecFundamentalRevisionError(
+            "SEC revisions with equal available_at disagree semantically"
+        )
+    return collapsed
+
+
+def _partition_equal_availability(
+    revisions: list[SecSelectedFundamentalFact],
+) -> tuple[list[SecSelectedFundamentalFact], list[SecSelectedFundamentalFact]]:
     by_time: dict[datetime, list[SecSelectedFundamentalFact]] = defaultdict(list)
     for revision in revisions:
         by_time[revision.available_at].append(revision)
 
     collapsed: list[SecSelectedFundamentalFact] = []
+    tied_revisions: list[SecSelectedFundamentalFact] = []
     for available_at in sorted(by_time):
         tied = by_time[available_at]
-        identities = {_semantic_identity(item) for item in tied}
-        if len(identities) > 1:
-            raise AmbiguousSecFundamentalRevisionError(
-                "SEC revisions with equal available_at disagree semantically"
-            )
-        collapsed.append(tied[0])
-    return collapsed
+        if len({item.semantic_identity() for item in tied}) > 1:
+            tied_revisions.extend(tied)
+        else:
+            collapsed.append(tied[0])
+    return collapsed, tied_revisions
 
 
-def _semantic_identity(fact: SecSelectedFundamentalFact) -> tuple[object, ...]:
-    return (
-        fact.field_name,
-        fact.frequency,
-        fact.period_start,
-        fact.period_end,
-        fact.value,
-        fact.accession_number,
-        fact.form,
-        fact.fiscal_year,
-        fact.fiscal_period,
-        fact.taxonomy,
-        fact.tag,
-        fact.unit,
+def _revision_conflict(
+    tied: list[SecSelectedFundamentalFact],
+    request: SecFundamentalQuery,
+) -> SecFundamentalRevisionConflict:
+    ordered = tuple(sorted(tied, key=lambda item: (item.available_at, item.observation_id)))
+    anchor = ordered[0]
+    return SecFundamentalRevisionConflict(
+        asset_id=request.asset_id,
+        source_id=anchor.source_id,
+        frequency=anchor.frequency,
+        field_name=anchor.field_name,
+        period_end=anchor.period_end,
+        tied_available_at=tuple(sorted({item.available_at for item in ordered})),
+        candidates=tuple(item.model_copy(update={"superseded_count": 0}) for item in ordered),
     )
 
 

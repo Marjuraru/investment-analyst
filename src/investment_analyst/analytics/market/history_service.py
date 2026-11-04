@@ -16,6 +16,7 @@ from investment_analyst.analytics.market.bar_models import (
 from investment_analyst.analytics.market.bar_schemas import (
     MarketBarSchema,
     get_market_bar_schema,
+    missing_market_bar_fields,
 )
 from investment_analyst.core.models import NormalizedObservation, RawRecord
 from investment_analyst.storage import LocalStorage
@@ -206,7 +207,12 @@ class HistoricalMarketDataService:
                 )
             by_field[observation.field_name] = observation
 
-        missing = sorted(set(schema.required_fields) - set(by_field))
+        values = {field_name: observation.value for field_name, observation in by_field.items()}
+        missing = missing_market_bar_fields(
+            schema,
+            present_fields=by_field,
+            values=values,
+        )
         if missing:
             raise IncompleteMarketBarError(
                 f"raw record {raw_record_id} is missing required fields: {', '.join(missing)}"
@@ -215,7 +221,6 @@ class HistoricalMarketDataService:
         first = by_field[schema.required_fields[0]]
         self._verify_raw_record(raw_record, first, query)
 
-        values = {field_name: observation.value for field_name, observation in by_field.items()}
         observation_ids = {
             field_name: observation.observation_id for field_name, observation in by_field.items()
         }

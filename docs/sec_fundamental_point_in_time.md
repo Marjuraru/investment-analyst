@@ -19,6 +19,33 @@ naturally once their acceptance time is reached. Equal-time duplicates collapse 
 fundamental content is identical. Contradictory equal-time revisions are rejected rather than being
 resolved by UUID, storage order, raw-record ID, or normalization time.
 
+## Equal-availability conflicts and report mode
+
+`SecFundamentalQuery.ambiguity_policy` defaults to `raise`, preserving the strict legacy behavior:
+an equal-availability semantic disagreement raises `AmbiguousSecFundamentalRevisionError` and no
+result is returned. The explicit `report` policy uses exactly the same semantic detection, but
+returns a typed `conflicts` collection plus `has_conflicts` instead of choosing a revision.
+
+Each conflict identifies the asset, source, frequency, field, and period end; the fixed reason
+`equal_available_at_semantic_conflict`; every tied `available_at`; and typed candidates with their
+observation and raw-record IDs, timestamps, accession, taxonomy, tag, unit, and exact `Decimal`
+value. Candidates are eligible at `known_at`, are not selected facts, and are ordered by
+`available_at` and observation ID. Same value and accession do not prove the same interval: a
+different `period_start` remains a conflict, and no ±1-day tolerance is applied.
+
+If any tie in a field/frequency/period-end group would be rejected by `raise`, `report` excludes
+that whole group and never falls back to another candidate or an earlier revision. Other fields in
+the same period and other periods continue normally. A conflict-only period remains visible as an
+empty period view with all five fields missing, `is_complete=false`, its conflict fields explicit,
+and `latest_available_at` derived from eligible evidence; an empty period without facts or
+conflicts remains invalid. Future revisions are never shown.
+
+Legacy `raise` serialization keeps its existing keys. The `report` projection adds
+`ambiguity_policy`, `conflicts`, and `has_conflicts`, plus period-level `conflict_fields` when a
+conflict exists. Conflicts are read from the already-selected observation set; the service does not
+reopen raw records or documents, and no persistent conflict table or new financial identity is
+created.
+
 ## Period views
 
 The service supports annual and quarterly observations for exactly five fields: revenue, net income,
