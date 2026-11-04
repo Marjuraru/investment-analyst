@@ -385,4 +385,5 @@ def test_relative_output_and_future_range_are_rejected(tmp_path: Path) -> None:
             _client(handler=lambda url: (200, b"[]")),
             future,
             output_dir=tmp_path / "archives",
+            clock=lambda: _RETRIEVED,
         )

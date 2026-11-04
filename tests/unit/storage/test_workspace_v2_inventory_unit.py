@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+import duckdb
 import pytest
 
 import investment_analyst.storage.workspace_v2_inventory as inventory_module
@@ -1453,6 +1454,55 @@ def test_corrective_generation_reuses_native_w_and_validates_all_added_models(
                     (WorkspaceV2InventoryError, physical.WorkspaceV2PhysicalDeltaError)
                 ):
                     verify_generation_raw_files(service, **kwargs)
+
+
+def test_verification_attachment_rolls_back_before_store_close(tmp_path: Path) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    destination = service.initialize(tmp_path / "destination", format_version=2)
+    baseline = service.initialize(tmp_path / "baseline", format_version=2)
+    baseline_database = baseline.paths.root / "storage/v2/index.duckdb"
+    budget = MaintenanceResourceBudget(
+        operation_id=uuid4(),
+        profile="verification",
+        assignments=(
+            DatabaseResourceAssignment(
+                database=destination.paths.root / "storage/v2/index.duckdb",
+                policy=DuckDBResourcePolicy(
+                    memory_limit_bytes=1_000_000_000,
+                    threads=1,
+                    spill_limit_bytes=1_000_000_000,
+                    temp_directory=tmp_path / "temporary",
+                ),
+            ),
+        ),
+    )
+
+    def attached_metadata_count(connection: duckdb.DuckDBPyConnection) -> int:
+        return int(
+            connection.execute(
+                "SELECT count(*) FROM _verified_w.main.workspace_v2_metadata"
+            ).fetchone()[0]
+        )
+
+    with (
+        maintenance_resource_budget(budget),
+        maintenance_execution(MaintenanceExecution(budget, lambda *_: None)),
+    ):
+        for failure in (None, RuntimeError("verification failure")):
+            with service.open_storage(destination.paths, WorkspaceAccessMode.READ_ONLY) as storage:
+                connection = storage.store.connection
+                if failure is None:
+                    with inventory_module._verified_w_attachment(connection, baseline_database):
+                        assert attached_metadata_count(connection) > 0
+                else:
+                    with (
+                        pytest.raises(RuntimeError, match="verification failure"),
+                        inventory_module._verified_w_attachment(connection, baseline_database),
+                    ):
+                        assert attached_metadata_count(connection) > 0
+                        raise failure
+                with pytest.raises(duckdb.Error):
+                    attached_metadata_count(connection)
 
 
 def test_progress_recovery_is_not_baseline_or_successor(tmp_path: Path) -> None:

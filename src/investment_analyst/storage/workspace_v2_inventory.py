@@ -4595,6 +4595,26 @@ def verify_generation_raw_files(
     )
 
 
+@contextmanager
+def _verified_w_attachment(
+    connection: DuckDBPyConnection, baseline_database: Path
+) -> Iterator[None]:
+    """Attach preserved W and end the enclosing read-only snapshot on every exit.
+
+    The connection closes after verification. Leaving the transactional
+    attachment active until native teardown intermittently crashed DuckDB 1.5.4,
+    so rollback removes both the attachment and the snapshot before close.
+    """
+    from investment_analyst.storage.resource_policy import execute_bounded
+
+    escaped = baseline_database.as_posix().replace("'", "''")
+    execute_bounded(connection, f"ATTACH '{escaped}' AS _verified_w (READ_ONLY)")
+    try:
+        yield
+    finally:
+        connection.execute("ROLLBACK")
+
+
 def verify_generation_contents(
     service: WorkspaceService,
     *,
@@ -4661,14 +4681,13 @@ def verify_generation_contents(
         database_reference = reconciliation_file_reference(database, "database")
         preserved: list[tuple[str, int]] = []
         validated: list[tuple[str, int]] = []
-        with service.open_storage(
-            service.resolve(destination), WorkspaceAccessMode.READ_ONLY
-        ) as store:
+        with (
+            service.open_storage(
+                service.resolve(destination), WorkspaceAccessMode.READ_ONLY
+            ) as store,
+            _verified_w_attachment(store.store.connection, baseline_database),
+        ):
             connection = store.store.connection
-            # The attachment shares this one admitted native instance. It does
-            # not get another unbounded opener, thread pool or spill quota.
-            escaped = baseline_database.as_posix().replace("'", "''")
-            execute_bounded(connection, f"ATTACH '{escaped}' AS _verified_w (READ_ONLY)")
             tables = (
                 "raw_v2_index",
                 "workspace_raw_json_projections_v2",
