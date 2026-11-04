@@ -13,6 +13,7 @@ from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCD
 from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID
 from investment_analyst.providers.fundamentals.sec_query_models import (
     SecFundamentalPointInTimeResult,
+    SecFundamentalRevisionConflict,
 )
 
 _MAX_LIMIT = 100
@@ -283,6 +284,9 @@ class SecFundamentalMetricImportSummary(ContractModel):
     computed_at: UTCDateTime
     periods_examined: int = Field(ge=0)
     target_periods: int = Field(ge=0)
+    conflict_count: int = Field(default=0, ge=0)
+    conflicts: tuple[SecFundamentalRevisionConflict, ...] = ()
+    has_conflicts: bool = False
     complete_periods: int = Field(ge=0)
     incomplete_periods: int = Field(ge=0)
     metrics_generated: int = Field(ge=0)
@@ -302,6 +306,10 @@ class SecFundamentalMetricImportSummary(ContractModel):
         """Keep period, metric, and side-effect counts consistent."""
         if self.target_periods != self.complete_periods + self.incomplete_periods:
             raise ValueError("target periods must equal complete plus incomplete periods")
+        if self.has_conflicts != bool(self.conflicts):
+            raise ValueError("has_conflicts must match conflicts")
+        if self.conflict_count != len(self.conflicts):
+            raise ValueError("conflict_count must match conflicts")
         if self.metrics_generated != self.metrics_created + self.metrics_reused:
             raise ValueError("generated metrics must equal created plus reused metrics")
         if sum(self.metric_counts.values()) != self.metrics_generated:
@@ -335,6 +343,9 @@ class SecFundamentalMetricImportSummary(ContractModel):
             "computed_at": self.computed_at.isoformat(),
             "periods_examined": self.periods_examined,
             "target_periods": self.target_periods,
+            "conflict_count": self.conflict_count,
+            "conflicts": [conflict.to_json_dict() for conflict in self.conflicts],
+            "has_conflicts": self.has_conflicts,
             "complete_periods": self.complete_periods,
             "incomplete_periods": self.incomplete_periods,
             "metrics_generated": self.metrics_generated,

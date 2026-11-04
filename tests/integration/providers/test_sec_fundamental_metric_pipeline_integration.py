@@ -181,6 +181,63 @@ class _CountingService:
         return self._service.query(request)
 
 
+def test_pipeline_reports_conflicts_and_reuse_key_tracks_them(tmp_path) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        _seed_history(storage)
+        _save_annual_period(
+            storage,
+            fiscal_year=2025,
+            period_end=datetime(2025, 9, 27, tzinfo=UTC),
+            acceptance_at=datetime(2025, 10, 31, tzinfo=UTC),
+            values={"fundamental.revenue": "126"},
+        )
+        pipeline = SecAaplFundamentalMetricPipeline(
+            storage,
+            SecAaplFundamentalPointInTimeService(storage),
+            SecFundamentalMetricEngine(),
+            clock=lambda: datetime(2027, 1, 2, tzinfo=UTC),
+        )
+        request = SecFundamentalMetricRequest(
+            known_at=datetime(2026, 12, 31, tzinfo=UTC),
+            frequency=DataFrequency.ANNUAL,
+        )
+
+        first = pipeline.run(request)
+
+        assert first.has_conflicts is True
+        assert first.conflict_count == 1
+        assert first.conflicts[0].field_name == "fundamental.revenue"
+        assert first.skipped_counts["ambiguous_current_input"] == 2
+        conflict_ids = {candidate.observation_id for candidate in first.conflicts[0].candidates}
+        first_results = storage.metric_results.list(asset_id="equity:us:aapl")
+        assert first_results
+        assert all(not set(result.input_observation_ids) & conflict_ids for result in first_results)
+        assert first.to_json_dict()["has_conflicts"] is True
+        assert first.to_json_dict()["conflict_count"] == 1
+
+        second = pipeline.run(request)
+        assert second.metrics_created == 0
+        assert second.metrics_reused == first.metrics_generated
+        assert second.conflicts == first.conflicts
+        assert second.has_conflicts is True
+
+        _save_annual_period(
+            storage,
+            fiscal_year=2025,
+            period_end=datetime(2025, 9, 27, tzinfo=UTC),
+            acceptance_at=datetime(2025, 10, 31, tzinfo=UTC),
+            values={"fundamental.net_income": "31"},
+        )
+        third = pipeline.run(request)
+        assert third.conflict_count == 2
+        assert third.has_conflicts is True
+        assert {conflict.field_name for conflict in third.conflicts} == {
+            "fundamental.net_income",
+            "fundamental.revenue",
+        }
+        assert third.skipped_counts["ambiguous_current_input"] == 3
+
+
 def test_pipeline_persists_and_reuses_metrics_without_source_side_effects(tmp_path) -> None:
     with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
         _seed_history(storage)

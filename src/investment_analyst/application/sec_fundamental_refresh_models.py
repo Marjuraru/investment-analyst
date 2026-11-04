@@ -11,6 +11,9 @@ from investment_analyst.core.models import (
     DiagnosticVerdict,
 )
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
+from investment_analyst.providers.fundamentals.sec_query_models import (
+    SecFundamentalRevisionConflict,
+)
 
 _ALLOWED_FREQUENCIES = frozenset({DataFrequency.ANNUAL, DataFrequency.QUARTERLY})
 
@@ -83,6 +86,9 @@ class SecIssuerFundamentalRefreshSummary(ContractModel):
     observation_field_counts: dict[NonEmptyStr, int]
     observation_skipped_counts: dict[NonEmptyStr, int]
     target_periods: int = Field(ge=0)
+    conflict_count: int = Field(default=0, ge=0)
+    conflicts: tuple[SecFundamentalRevisionConflict, ...] = ()
+    has_conflicts: bool = False
     metric_results_created: int = Field(ge=0)
     metric_results_reused: int = Field(ge=0)
     valuation_metric_results_created: int = Field(default=0, ge=0)
@@ -116,6 +122,10 @@ class SecIssuerFundamentalRefreshSummary(ContractModel):
             raise ValueError("observation field counts must match generated observations")
         if self.annual_observations + self.quarterly_observations != self.observations_generated:
             raise ValueError("observation frequencies must partition generated observations")
+        if self.has_conflicts != bool(self.conflicts):
+            raise ValueError("has_conflicts must match conflicts")
+        if self.conflict_count != len(self.conflicts):
+            raise ValueError("conflict_count must match conflicts")
         generated_metrics = sum(self.metric_counts.values()) + (
             self.valuation_metric_results_created + self.valuation_metric_results_reused
         )

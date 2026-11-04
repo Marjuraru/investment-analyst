@@ -265,6 +265,9 @@ def test_malformed_responses_are_rejected(body: bytes, message: str) -> None:
         ({"n": 1.5}, "trade_count"),
         ({"o": 210.0}, "open must be within"),
         ({"vw": 210.0}, "vwap must be within"),
+        ({"v": 0, "n": 1, "vw": 0}, "may be zero only"),
+        ({"v": 1, "n": 0, "vw": 0}, "may be zero only"),
+        ({"v": 0, "n": 0, "vw": -1}, "must not be negative"),
     ],
 )
 def test_incoherent_bar_values_are_rejected(changes: dict[str, object], message: str) -> None:
@@ -272,6 +275,37 @@ def test_incoherent_bar_values_are_rejected(changes: dict[str, object], message:
         _client(QueueTransport([_document_with_bars([_bar(**changes)])])).fetch_daily_bars(
             "AAPL", START, END
         )
+
+
+def test_zero_vwap_with_zero_activity_is_admitted_with_exact_raw_values() -> None:
+    transport = QueueTransport([_document_with_bars([_bar(v=0, n=0, vw=0)])])
+
+    result = _client(transport).fetch_daily_bars("AAPL", START, END)
+
+    bar = result.bars[0]
+    assert bar.volume == Decimal("0")
+    assert bar.trade_count == Decimal("0")
+    assert bar.vwap == Decimal("0")
+    assert bar.vwap_is_unavailable is True
+    assert dict(bar.raw_values) == {
+        "t": "2026-07-08T04:00:00Z",
+        "o": "205.55",
+        "h": "208.1",
+        "l": "204.9",
+        "c": "207.35",
+        "v": "0",
+        "n": "0",
+        "vw": "0",
+    }
+
+
+def test_positive_vwap_with_zero_volume_preserves_previous_behavior() -> None:
+    result = _client(QueueTransport([_document_with_bars([_bar(v=0, n=0)])])).fetch_daily_bars(
+        "AAPL", START, END
+    )
+
+    assert result.bars[0].vwap == Decimal("206.74")
+    assert result.bars[0].vwap_is_unavailable is False
 
 
 def test_rejects_naive_and_invalid_ranges() -> None:

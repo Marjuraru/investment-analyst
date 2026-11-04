@@ -1,10 +1,10 @@
 """Import AAPL IEX daily bars into local auditable storage."""
 
 import json
-from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Literal
 from uuid import UUID, uuid5
 
@@ -222,6 +222,7 @@ class AlpacaImportSummary:
     coverage_receipts_created: int = 0
     coverage_receipts_reused: int = 0
     empty_intervals_completed: int = 0
+    vwap_unavailable_bars: int = 0
 
     def to_json_dict(self) -> dict[str, object]:
         """Return an explicit JSON-compatible representation."""
@@ -242,6 +243,7 @@ class AlpacaImportSummary:
             "coverage_receipts_created": self.coverage_receipts_created,
             "coverage_receipts_reused": self.coverage_receipts_reused,
             "empty_intervals_completed": self.empty_intervals_completed,
+            "vwap_unavailable_bars": self.vwap_unavailable_bars,
             "earliest_bar": self.earliest_bar.isoformat() if self.earliest_bar else None,
             "latest_bar": self.latest_bar.isoformat() if self.latest_bar else None,
             "traceability_verified": self.traceability_verified,
@@ -363,6 +365,7 @@ class AlpacaHistoricalPipeline:
         receipt_created, receipt_reused = self._persist_fetch_receipt(fetch)
         check_operation_cancelled()
         bar_times = tuple(bar.timestamp for bar in fetch.bars)
+        vwap_unavailable_bars = sum(1 for bar in fetch.bars if bar.vwap_is_unavailable)
         return AlpacaImportSummary(
             asset_id=self._configuration.asset_id,
             source_id=self._configuration.source_id,
@@ -383,6 +386,7 @@ class AlpacaHistoricalPipeline:
             coverage_receipts_created=receipt_created,
             coverage_receipts_reused=receipt_reused,
             empty_intervals_completed=int(not fetch.bars),
+            vwap_unavailable_bars=vwap_unavailable_bars,
         )
 
     def _persist_fetch_receipt(self, fetch) -> tuple[int, int]:
@@ -440,7 +444,11 @@ class AlpacaHistoricalPipeline:
         record_by_id = {record.record_id: record for record in records}
         if len(record_by_id) != len(records):
             raise StorageError("duplicate raw record identifiers appeared in one Alpaca import")
-        counts = Counter(observation.raw_record_id for observation in observations)
+        fields_by_record: dict[UUID, list[str]] = {}
+        for observation in observations:
+            fields_by_record.setdefault(observation.raw_record_id, []).append(
+                observation.field_name
+            )
 
         for record in records:
             if (
@@ -453,8 +461,18 @@ class AlpacaHistoricalPipeline:
                 or record.payload.get("symbol") != self._configuration.symbol
             ):
                 raise StorageError("Alpaca raw record payload does not represent the symbol")
-            if counts[record.record_id] != 7:
-                raise StorageError("each raw Alpaca bar must have seven observations")
+            expected_fields = _expected_bar_fields(record)
+            actual_fields = tuple(sorted(fields_by_record.get(record.record_id, ())))
+            if actual_fields != tuple(sorted(expected_fields)):
+                missing = sorted(set(expected_fields) - set(actual_fields))
+                unexpected = sorted(set(actual_fields) - set(expected_fields))
+                duplicates = sorted(
+                    field for field in set(actual_fields) if actual_fields.count(field) > 1
+                )
+                raise StorageError(
+                    "Alpaca raw bar observation fields do not match the raw condition: "
+                    f"missing={missing}, unexpected={unexpected}, duplicates={duplicates}"
+                )
             _require_utc(record.event_time, "raw event_time")
             _require_utc(record.available_at, "raw available_at")
             _require_utc(record.received_at, "raw received_at")
@@ -491,3 +509,29 @@ def _as_utc(value: datetime) -> datetime:
 def _require_utc(value: datetime | None, label: str) -> None:
     if value is None or value.tzinfo is None or value.utcoffset() != timedelta(0):
         raise StorageError(f"{label} must be UTC")
+
+
+def _expected_bar_fields(record: RawRecord) -> tuple[str, ...]:
+    raw_bar = record.payload.get("raw_bar")
+    if not isinstance(raw_bar, Mapping):
+        raise StorageError("Alpaca raw record payload must contain a raw bar")
+    volume = _raw_decimal(raw_bar, "v")
+    trade_count = _raw_decimal(raw_bar, "n")
+    vwap = _raw_decimal(raw_bar, "vw")
+    expected = ["open", "high", "low", "close", "volume", "trade_count"]
+    if not (vwap == 0 and volume == 0 and trade_count == 0):
+        expected.append("vwap")
+    return tuple(expected)
+
+
+def _raw_decimal(raw_bar: Mapping[object, object], field_name: str) -> Decimal:
+    value = raw_bar.get(field_name)
+    if not isinstance(value, str):
+        raise StorageError(f"Alpaca raw bar field {field_name} must be a string")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as error:
+        raise StorageError(f"Alpaca raw bar field {field_name} is not numeric") from error
+    if not parsed.is_finite():
+        raise StorageError(f"Alpaca raw bar field {field_name} must be finite")
+    return parsed

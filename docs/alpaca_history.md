@@ -23,9 +23,30 @@ floating point. The fixture used by tests is fictitious and does not represent r
 
 ## Traceability and storage
 
-Each provider bar becomes one immutable `RawRecord` containing the provider strings for timestamp,
-OHLC, volume, trade count, and VWAP. Seven `NormalizedObservation` objects reference that record.
-IEX observations use `PARTIAL` quality and no reporting period is invented.
+Each provider bar becomes one immutable `RawRecord` containing the eight provider strings for
+timestamp, OHLC, volume, trade count, and VWAP. Seven `NormalizedObservation` objects reference that
+record. When the provider reports `vw=0` together with `v=0` and `n=0`, VWAP is not calculable: the
+raw record still preserves `vw="0"` and exactly six observations are stored, without a zero-USD
+VWAP observation, imputation, or deletion of the bar. IEX observations use `PARTIAL` quality and no
+reporting period is invented.
+
+Admission is data-driven: `vw=0` is accepted only with zero volume and zero trades. Other
+non-positive VWAP values, non-finite values, invalid OHLC, and incoherent activity remain rejected;
+a positive VWAP keeps its previous treatment even when volume is zero. The import integrity check
+derives the exact expected field set from the raw values and rejects missing `close`, duplicate
+fields, or an absent VWAP in a normal bar.
+
+The import JSON summary adds `vwap_unavailable_bars`, counted only from bars inspected by that
+execution (including reused bars already inspected). It does not scan the stored corpus, and an
+`already_current` run reports zero for that execution rather than claiming historical absence.
+The source receipt still certifies a complete provider fetch, not completeness of seven fields.
+
+Legacy and v2 daily readers share the rule in `bar_schemas.missing_market_bar_fields`: an Alpaca
+IEX daily bar may omit VWAP only when the projected volume and trade count are zero. The resulting
+bar exposes `vwap=None` and no `vwap` key in its observation IDs; close, volume, timestamp, quality,
+and availability are unchanged. Chart and intraday aggregations preserve the missing VWAP instead
+of recomputing it from other days. A missing VWAP with positive volume or trades, or the absence of
+any other required field, still fails as an incomplete bar.
 
 The raw-bar checksum participates in a deterministic UUID5. Re-importing identical content reuses
 the same raw record and observations. A historical revision receives a new raw-record identifier,

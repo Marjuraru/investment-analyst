@@ -7,6 +7,7 @@ import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -30,6 +31,7 @@ from investment_analyst.providers.market.alpaca_stock import (
     AlpacaStockError,
 )
 from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.storage.errors import StorageError
 
 FIXTURE_PATH = Path("tests/fixtures/alpaca/aapl_daily.json")
 START = datetime(2026, 7, 7, tzinfo=UTC)
@@ -459,3 +461,140 @@ def test_script_fails_cleanly_without_credentials(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "ALPACA_API_KEY and ALPACA_API_SECRET are required" in result.stderr
+
+
+_EXCEPTIONAL_BAR = {
+    "t": "2026-07-07T04:00:00Z",
+    "o": "227.41",
+    "h": "228.00",
+    "l": "226.00",
+    "c": "227.00",
+    "v": "0",
+    "n": "0",
+    "vw": "0",
+}
+_NORMAL_BAR = {
+    "t": "2026-07-08T04:00:00Z",
+    "o": "205.55",
+    "h": "208.10",
+    "l": "204.90",
+    "c": "207.35",
+    "v": "36550125",
+    "n": "161775",
+    "vw": "206.74",
+}
+
+
+def _bars_document(bars: list[dict[str, object]]) -> bytes:
+    return json.dumps({"bars": bars, "symbol": "AAPL", "next_page_token": None}).encode()
+
+
+def test_unavailable_vwap_is_persisted_with_exact_fields_and_counted(tmp_path: Path) -> None:
+    body = _bars_document([_EXCEPTIONAL_BAR, _NORMAL_BAR])
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline, _ = _pipeline(storage, [body])
+        first = pipeline.run(START, END)
+
+        assert first.bars_received == 2
+        assert first.observations_created == 13
+        assert first.vwap_unavailable_bars == 1
+        assert first.traceability_verified is True
+
+        records = storage.raw_records.list(source_id=SOURCE_ID)
+        observations = storage.observations.list(asset_id=ASSET_ID)
+        bar_records = [
+            record for record in records if record.schema_version != ALPACA_FETCH_RECEIPT_SCHEMA
+        ]
+        receipt_records = [
+            record for record in records if record.schema_version == ALPACA_FETCH_RECEIPT_SCHEMA
+        ]
+        assert len(bar_records) == 2
+        assert len(receipt_records) == 1
+        record_by_time = {record.event_time: record for record in bar_records}
+        exceptional = record_by_time[datetime(2026, 7, 7, 4, tzinfo=UTC)]
+        normal = record_by_time[datetime(2026, 7, 8, 4, tzinfo=UTC)]
+        exceptional_fields = tuple(
+            sorted(
+                observation.field_name
+                for observation in observations
+                if observation.raw_record_id == exceptional.record_id
+            )
+        )
+        normal_fields = tuple(
+            sorted(
+                observation.field_name
+                for observation in observations
+                if observation.raw_record_id == normal.record_id
+            )
+        )
+        assert exceptional_fields == (
+            "close",
+            "high",
+            "low",
+            "open",
+            "trade_count",
+            "volume",
+        )
+        assert normal_fields == (
+            "close",
+            "high",
+            "low",
+            "open",
+            "trade_count",
+            "volume",
+            "vwap",
+        )
+        assert exceptional.payload["raw_bar"]["vw"] == "0"
+        assert all(observation.quality.value == "partial" for observation in observations)
+
+        receipt = alpaca_fetch_receipt_from_raw_record(receipt_records[0])
+        assert receipt is not None
+        assert receipt.bar_count == 2
+
+        second_pipeline, _ = _pipeline(storage, [body])
+        second = second_pipeline.run(START, END)
+        assert second.raw_records_created == 0
+        assert second.raw_records_reused == 2
+        assert second.observations_created == 0
+        assert second.observations_reused == 13
+        assert second.vwap_unavailable_bars == 1
+        assert json.loads(json.dumps(second.to_json_dict()))["vwap_unavailable_bars"] == 1
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("missing_close", r"missing=\['close'\]"),
+        ("duplicate_open", r"duplicates=\['open'\]"),
+        ("missing_vwap_normal", r"missing=\['vwap'\]"),
+    ],
+)
+def test_integrity_rejects_wrong_field_set_for_raw_condition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    expected: str,
+) -> None:
+    import investment_analyst.providers.market.alpaca_pipeline as pipeline_module
+
+    original = pipeline_module.bar_to_observations
+
+    def replacement(bar, raw_record, *, normalized_at, configuration=None):
+        observations = original(
+            bar,
+            raw_record,
+            normalized_at=normalized_at,
+            configuration=configuration,
+        )
+        if mutation == "missing_close":
+            return tuple(item for item in observations if item.field_name != "close")
+        if mutation == "duplicate_open":
+            return (*observations, observations[0].model_copy(update={"observation_id": uuid4()}))
+        return tuple(item for item in observations if item.field_name != "vwap")
+
+    monkeypatch.setattr(pipeline_module, "bar_to_observations", replacement)
+    body = _fixture() if mutation == "missing_vwap_normal" else _bars_document([_EXCEPTIONAL_BAR])
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        pipeline, _ = _pipeline(storage, [body])
+        with pytest.raises(StorageError, match=expected):
+            pipeline.run(START, END)

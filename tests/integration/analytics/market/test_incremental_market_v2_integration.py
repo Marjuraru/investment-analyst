@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import UUID
 
 import duckdb
+import pytest
 
 from investment_analyst.analytics.market.bar_models import (
     HistoricalBarQuery,
@@ -76,18 +77,22 @@ def _bar(
     *,
     close_delta: Decimal = Decimal("0"),
     symbol: str = "AAPL",
+    zero_activity: bool = False,
 ) -> AlpacaStockBar:
     timestamp = _BASE + timedelta(days=index)
     close = Decimal("200") + Decimal(index * 2) + close_delta
+    volume = Decimal("0") if zero_activity else Decimal("1000") + Decimal(index * 100)
+    trade_count = Decimal("0") if zero_activity else Decimal("100") + Decimal(index)
+    vwap = Decimal("0") if zero_activity else close
     raw_values = {
         "t": timestamp.isoformat().replace("+00:00", "Z"),
         "o": str(close - 1),
         "h": str(close + 2),
         "l": str(close - 2),
         "c": str(close),
-        "v": str(Decimal("1000") + Decimal(index * 100)),
-        "n": str(Decimal("100") + Decimal(index)),
-        "vw": str(close),
+        "v": str(volume),
+        "n": str(trade_count),
+        "vw": str(vwap),
     }
     return AlpacaStockBar(
         symbol=symbol,
@@ -96,9 +101,9 @@ def _bar(
         high=close + 2,
         low=close - 2,
         close=close,
-        volume=Decimal("1000") + Decimal(index * 100),
-        trade_count=Decimal("100") + Decimal(index),
-        vwap=close,
+        volume=volume,
+        trade_count=trade_count,
+        vwap=vwap,
         raw_values=raw_values,
     )
 
@@ -630,3 +635,53 @@ def test_incremental_daily_service_supports_etf_and_coinbase_sources(tmp_path: P
             }
             assert actual_values == expected_values
         staging.close()
+
+
+def test_v2_projection_reconstructs_missing_vwap_without_raw_hydration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging = _open_staging((tmp_path / "zero-activity").absolute())
+    with staging:
+        for index in range(2):
+            _stage_bar(
+                staging,
+                _bar(index, zero_activity=index == 1),
+                retrieved_at=_BASE + timedelta(days=index, hours=2),
+            )
+
+        def reject_raw_hydration(*args, **kwargs):
+            pytest.fail("v2 reader hydrated raw records")
+
+        monkeypatch.setattr(staging, "get_many", reject_raw_hydration)
+        query = HistoricalBarQuery(
+            asset_id=ASSET_ID,
+            source_id=ALPACA_SOURCE_ID,
+            start=_BASE,
+            end=_BASE + timedelta(days=3),
+            known_at=_KNOWN_AT,
+        )
+        projection = HistoricalMarketDataV2Service(staging).query(query)
+
+    assert projection.traceability_verified is True
+    assert len(projection.bars) == 2
+    normal, exceptional = projection.bars
+    assert "vwap" in normal.values
+    assert "vwap" in normal.observation_ids
+    assert "vwap" not in exceptional.values
+    assert "vwap" not in exceptional.observation_ids
+    assert set(exceptional.observation_ids) == {
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "trade_count",
+    }
+    assert exceptional.values["volume"] == Decimal("0")
+    assert exceptional.values["trade_count"] == Decimal("0")
+    materialized = exceptional.to_market_bar()
+    assert materialized.vwap is None
+    assert "vwap" not in materialized.observation_ids
+    assert materialized.close == Decimal("202")
+    assert materialized.available_at == _BASE + timedelta(days=1, hours=2)

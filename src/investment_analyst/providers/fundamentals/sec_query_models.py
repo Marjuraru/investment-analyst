@@ -2,6 +2,8 @@
 
 from datetime import date
 from decimal import Decimal
+from enum import StrEnum
+from typing import Literal
 from uuid import UUID
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -16,6 +18,14 @@ from investment_analyst.providers.fundamentals.sec_fact_models import (
 _ALLOWED_FIELDS = tuple(definition.field_name for definition in SEC_FACT_DEFINITIONS)
 _ALLOWED_FIELD_SET = frozenset(_ALLOWED_FIELDS)
 _ALLOWED_FREQUENCIES = frozenset({DataFrequency.ANNUAL, DataFrequency.QUARTERLY})
+_CONFLICT_REASON = "equal_available_at_semantic_conflict"
+
+
+class SecFundamentalAmbiguityPolicy(StrEnum):
+    """How an equal-availability semantic disagreement is handled."""
+
+    RAISE = "raise"
+    REPORT = "report"
 
 
 class SecFundamentalQuery(ContractModel):
@@ -29,6 +39,7 @@ class SecFundamentalQuery(ContractModel):
     start_period_end: date | None = None
     end_period_end: date | None = None
     limit: int | None = Field(default=None, ge=1, le=500)
+    ambiguity_policy: SecFundamentalAmbiguityPolicy = SecFundamentalAmbiguityPolicy.RAISE
 
     @field_validator("limit", mode="before")
     @classmethod
@@ -132,6 +143,93 @@ class SecSelectedFundamentalFact(ContractModel):
             "superseded_count": self.superseded_count,
         }
 
+    def semantic_identity(self) -> tuple[object, ...]:
+        """Return the exact fields that make two equally available facts distinct."""
+        return (
+            self.field_name,
+            self.frequency,
+            self.period_start,
+            self.period_end,
+            self.value,
+            self.accession_number,
+            self.form,
+            self.fiscal_year,
+            self.fiscal_period,
+            self.taxonomy,
+            self.tag,
+            self.unit,
+        )
+
+
+class SecFundamentalRevisionConflict(ContractModel):
+    """One SEC field-period tie that cannot be resolved without choosing."""
+
+    model_config = ConfigDict(frozen=True)
+
+    asset_id: NonEmptyStr
+    source_id: NonEmptyStr
+    frequency: DataFrequency
+    field_name: NonEmptyStr
+    period_end: UTCDateTime
+    reason: Literal["equal_available_at_semantic_conflict"] = _CONFLICT_REASON
+    tied_available_at: tuple[UTCDateTime, ...]
+    candidates: tuple[SecSelectedFundamentalFact, ...]
+
+    @model_validator(mode="after")
+    def validate_conflict(self) -> "SecFundamentalRevisionConflict":
+        """Validate deterministic candidates and a real equal-availability tie."""
+        if self.frequency not in _ALLOWED_FREQUENCIES:
+            raise ValueError("frequency must be annual or quarterly")
+        if self.field_name not in _ALLOWED_FIELD_SET:
+            raise ValueError("field_name is not an allowed SEC fundamental field")
+        if not self.tied_available_at:
+            raise ValueError("tied_available_at must not be empty")
+        if self.tied_available_at != tuple(sorted(set(self.tied_available_at))):
+            raise ValueError("tied_available_at must be sorted and unique")
+        if not self.candidates:
+            raise ValueError("conflict candidates must not be empty")
+        identifiers = tuple(item.observation_id for item in self.candidates)
+        if len(set(identifiers)) != len(identifiers):
+            raise ValueError("conflict candidates must have unique observation IDs")
+        expected_order = tuple(
+            sorted(self.candidates, key=lambda item: (item.available_at, item.observation_id))
+        )
+        if identifiers != tuple(item.observation_id for item in expected_order):
+            raise ValueError("conflict candidates must be ordered by available_at and ID")
+        for candidate in self.candidates:
+            if (
+                candidate.field_name != self.field_name
+                or candidate.frequency is not self.frequency
+                or candidate.period_end != self.period_end
+            ):
+                raise ValueError("conflict candidate does not match the conflict key")
+            if candidate.source_id != self.source_id:
+                raise ValueError("conflict candidate does not match the conflict source")
+            if candidate.unit != "USD":
+                raise ValueError("conflict candidate must use USD")
+            if candidate.superseded_count != 0:
+                raise ValueError("conflict candidates are not selected revisions")
+        if tuple(sorted({item.available_at for item in self.candidates})) != self.tied_available_at:
+            raise ValueError("tied_available_at must match candidate availability")
+        for instant in self.tied_available_at:
+            tied = tuple(item for item in self.candidates if item.available_at == instant)
+            if len(tied) < 2 or len({item.semantic_identity() for item in tied}) < 2:
+                raise ValueError("each tied instant must contain distinct semantic revisions")
+        return self
+
+    def to_json_dict(self) -> dict[str, object]:
+        """Return the explicit conflict projection without raw documents."""
+        return {
+            "asset_id": self.asset_id,
+            "source_id": self.source_id,
+            "frequency": self.frequency.value,
+            "field_name": self.field_name,
+            "period_end": self.period_end.isoformat(),
+            "reason": self.reason,
+            "tied_available_at": [item.isoformat() for item in self.tied_available_at],
+            "candidates": [item.to_json_dict() for item in self.candidates],
+        }
+
 
 class SecFundamentalPeriodView(ContractModel):
     """Selected facts for one reporting period without cross-period filling."""
@@ -141,6 +239,7 @@ class SecFundamentalPeriodView(ContractModel):
     period_end: UTCDateTime
     frequency: DataFrequency
     facts: tuple[SecSelectedFundamentalFact, ...]
+    conflict_fields: tuple[NonEmptyStr, ...] = ()
     missing_fields: tuple[NonEmptyStr, ...]
     available_fields: tuple[NonEmptyStr, ...]
     is_complete: bool
@@ -170,15 +269,33 @@ class SecFundamentalPeriodView(ContractModel):
             raise ValueError("all facts must match the period frequency")
         if any(fact.period_end != self.period_end for fact in self.facts):
             raise ValueError("all facts must match the period end")
+        conflict_fields = tuple(self.conflict_fields)
+        if conflict_fields != tuple(sorted(set(conflict_fields))):
+            raise ValueError("conflict_fields must be sorted and unique")
+        if not set(conflict_fields) <= _ALLOWED_FIELD_SET:
+            raise ValueError("conflict_fields contains an unsupported field")
+        if set(conflict_fields) & available:
+            raise ValueError("conflict_fields must not be available")
+        if not set(conflict_fields) <= missing:
+            raise ValueError("conflict_fields must be missing")
         if not self.facts:
-            raise ValueError("a returned period must contain at least one fact")
-        if self.latest_available_at != max(fact.available_at for fact in self.facts):
-            raise ValueError("latest_available_at must match the selected facts")
+            if not conflict_fields:
+                raise ValueError("a returned period must contain a fact or a conflict")
+            if available:
+                raise ValueError("a conflict-only period must not contain available fields")
+            if missing != _ALLOWED_FIELD_SET:
+                raise ValueError("a conflict-only period must miss every field")
+        else:
+            fact_latest = max(fact.available_at for fact in self.facts)
+            if not conflict_fields and self.latest_available_at != fact_latest:
+                raise ValueError("latest_available_at must match the selected facts")
+            if conflict_fields and self.latest_available_at < fact_latest:
+                raise ValueError("latest_available_at must cover the selected facts")
         return self
 
     def to_json_dict(self) -> dict[str, object]:
         """Return an explicit JSON-compatible representation."""
-        return {
+        payload: dict[str, object] = {
             "period_end": self.period_end.isoformat(),
             "frequency": self.frequency.value,
             "facts": [fact.to_json_dict() for fact in self.facts],
@@ -187,6 +304,9 @@ class SecFundamentalPeriodView(ContractModel):
             "is_complete": self.is_complete,
             "latest_available_at": self.latest_available_at.isoformat(),
         }
+        if self.conflict_fields:
+            payload["conflict_fields"] = list(self.conflict_fields)
+        return payload
 
 
 class SecFundamentalPointInTimeResult(ContractModel):
@@ -196,6 +316,8 @@ class SecFundamentalPointInTimeResult(ContractModel):
 
     query: SecFundamentalQuery
     periods: tuple[SecFundamentalPeriodView, ...]
+    conflicts: tuple[SecFundamentalRevisionConflict, ...] = ()
+    has_conflicts: bool = False
     observations_examined: int = Field(ge=0)
     observations_eligible: int = Field(ge=0)
     observations_selected: int = Field(ge=0)
@@ -227,27 +349,57 @@ class SecFundamentalPointInTimeResult(ContractModel):
             raise ValueError("latest_period_complete is inconsistent")
         if not self.traceability_verified:
             raise ValueError("point-in-time results must have verified traceability")
+        if self.has_conflicts != bool(self.conflicts):
+            raise ValueError("has_conflicts must match conflicts")
+        conflict_order = tuple(
+            (conflict.period_end, conflict.frequency.value, conflict.field_name)
+            for conflict in self.conflicts
+        )
+        if conflict_order != tuple(sorted(conflict_order)):
+            raise ValueError("conflicts must be ordered by period and field key")
+        if self.query.ambiguity_policy is SecFundamentalAmbiguityPolicy.RAISE and self.conflicts:
+            raise ValueError("raise queries must not return conflicts")
+        selected_ids = {fact.observation_id for period in self.periods for fact in period.facts}
+        periods_by_end = {period.period_end: period for period in self.periods}
+        for conflict in self.conflicts:
+            if (
+                conflict.asset_id != self.query.asset_id
+                or conflict.frequency is not self.query.frequency
+            ):
+                raise ValueError("conflict does not match the query scope")
+            period = periods_by_end.get(conflict.period_end)
+            if period is None:
+                raise ValueError("conflict period is absent from the result")
+            if conflict.field_name not in period.missing_fields:
+                raise ValueError("conflict field must be missing from the period")
+            if conflict.field_name not in period.conflict_fields:
+                raise ValueError("conflict field must be declared by the period")
+            if {candidate.observation_id for candidate in conflict.candidates} & selected_ids:
+                raise ValueError("conflict candidates must not be selected facts")
         return self
 
     def to_json_dict(self) -> dict[str, object]:
         """Return a deterministic JSON-compatible representation."""
-        return {
-            "query": {
-                "asset_id": self.query.asset_id,
-                "known_at": self.query.known_at.isoformat(),
-                "frequency": self.query.frequency.value,
-                "start_period_end": (
-                    self.query.start_period_end.isoformat()
-                    if self.query.start_period_end is not None
-                    else None
-                ),
-                "end_period_end": (
-                    self.query.end_period_end.isoformat()
-                    if self.query.end_period_end is not None
-                    else None
-                ),
-                "limit": self.query.limit,
-            },
+        query: dict[str, object] = {
+            "asset_id": self.query.asset_id,
+            "known_at": self.query.known_at.isoformat(),
+            "frequency": self.query.frequency.value,
+            "start_period_end": (
+                self.query.start_period_end.isoformat()
+                if self.query.start_period_end is not None
+                else None
+            ),
+            "end_period_end": (
+                self.query.end_period_end.isoformat()
+                if self.query.end_period_end is not None
+                else None
+            ),
+            "limit": self.query.limit,
+        }
+        if self.query.ambiguity_policy is SecFundamentalAmbiguityPolicy.REPORT:
+            query["ambiguity_policy"] = self.query.ambiguity_policy.value
+        payload: dict[str, object] = {
+            "query": query,
             "periods": [period.to_json_dict() for period in self.periods],
             "observations_examined": self.observations_examined,
             "observations_eligible": self.observations_eligible,
@@ -263,6 +415,10 @@ class SecFundamentalPointInTimeResult(ContractModel):
             "latest_period_complete": self.latest_period_complete,
             "traceability_verified": self.traceability_verified,
         }
+        if self.query.ambiguity_policy is SecFundamentalAmbiguityPolicy.REPORT:
+            payload["conflicts"] = [conflict.to_json_dict() for conflict in self.conflicts]
+            payload["has_conflicts"] = self.has_conflicts
+        return payload
 
 
 def allowed_sec_fundamental_fields() -> tuple[str, ...]:

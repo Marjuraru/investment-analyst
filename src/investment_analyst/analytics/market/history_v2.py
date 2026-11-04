@@ -18,6 +18,7 @@ from investment_analyst.analytics.market.bar_models import (
 from investment_analyst.analytics.market.bar_schemas import (
     MarketBarSchema,
     get_market_bar_schema,
+    missing_market_bar_fields,
 )
 from investment_analyst.analytics.market.daily_evidence import (
     DailyEvidenceFieldGroup,
@@ -349,7 +350,12 @@ class HistoricalMarketDataV2Service:
             raise ConflictingObservationError(
                 f"source {query.source_id!r} contains unsupported field {unexpected[0]!r}"
             )
-        missing = sorted(set(schema.required_fields) - set(by_field))
+        values = {key: value.value for key, value in by_field.items()}
+        missing = missing_market_bar_fields(
+            schema,
+            present_fields=by_field,
+            values=values,
+        )
         if missing:
             raise IncompleteMarketBarError(
                 f"raw record {group.raw_record_id} is missing required observations: "
@@ -388,7 +394,6 @@ class HistoricalMarketDataV2Service:
                     f"field {field_name!r} has quality {observation.quality.value!r}; "
                     f"expected {schema.expected_quality.value!r}"
                 )
-        values = {key: value.value for key, value in by_field.items()}
         if min(values["open"], values["high"], values["low"], values["close"]) <= 0:
             raise ConflictingObservationError("market bar prices must be positive")
         if values["low"] > values["high"]:

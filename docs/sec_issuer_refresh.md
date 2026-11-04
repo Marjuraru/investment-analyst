@@ -126,6 +126,15 @@ uno por orden de almacenamiento. Marca ambos contextos fiscales como inconsisten
 ratios que dependen solo del mismo cierre y omite únicamente los comparativos interanuales
 afectados. La omisión queda contabilizada como `inconsistent_fiscal_metadata`.
 
+Cuando la selección SEC encuentra revisiones de igual `available_at` semánticamente distintas, la
+etapa de métricas consulta en modo `report`. El resumen incluye `conflict_count`, la colección typed
+`conflicts` y `has_conflicts`; las métricas que dependen de un input conflictivo se omiten como
+`ambiguous_current_input` o `ambiguous_previous_input`, mientras las demás métricas, el diagnóstico
+y la valoración continúan con sus inputs válidos o declaran no evaluable. Una etapa exitosa no
+anuncia cobertura completa ni oculta el conflicto en JSON, CLI o recibo. La consulta estricta
+explícita sigue lanzando `AmbiguousSecFundamentalRevisionError`; no se crea una tabla persistente de
+conflictos ni se selecciona una revisión por orden, UUID, primero o último.
+
 El motor ampliado puede consultar después la tendencia de cinco hechos, las 40 métricas, su
 historial y las ocho secciones analíticas usando el mismo `asset_id`. El smoke real de AMD del
 28 de julio de 2026 confirmó idempotencia exacta y 25 métricas disponibles en el período más

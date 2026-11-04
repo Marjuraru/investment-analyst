@@ -76,6 +76,20 @@ def test_summary_preserves_exact_decimal_and_explicit_context() -> None:
     assert payload["request"]["requested_known_at"] == "2026-07-28T15:00:00Z"
 
 
+def test_summary_conflict_defaults_and_consistency() -> None:
+    summary = _summary()
+
+    assert summary.conflict_count == 0
+    assert summary.conflicts == ()
+    assert summary.has_conflicts is False
+    assert summary.to_json_dict()["conflict_count"] == 0
+    assert summary.to_json_dict()["has_conflicts"] is False
+    with pytest.raises(ValidationError, match="has_conflicts"):
+        _summary(has_conflicts=True)
+    with pytest.raises(ValidationError, match="conflict_count"):
+        _summary(conflict_count=1)
+
+
 def test_request_rejects_nonfundamental_frequency() -> None:
     with pytest.raises(ValidationError, match="annual or quarterly"):
         SecIssuerFundamentalRefreshRequest(

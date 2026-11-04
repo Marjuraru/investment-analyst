@@ -13,6 +13,7 @@ from investment_analyst.analytics.market.bar_schemas import (
     COINBASE_SOURCE_ID,
     SIMULATED_SOURCE_ID,
     get_market_bar_schema,
+    missing_market_bar_fields,
 )
 from investment_analyst.analytics.market.history_service import (
     AmbiguousRevisionError,
@@ -513,3 +514,93 @@ def test_source_filter_precedes_hydration_without_changing_pit(tmp_path) -> None
     assert first_result == second_result
     assert first_result.coverage == second_result.coverage
     assert first_result.traceability_verified is True
+
+
+def test_alpaca_zero_activity_bar_reconstructs_without_vwap(tmp_path) -> None:
+    timestamp = datetime(2026, 7, 2, tzinfo=UTC)
+    available = datetime(2026, 7, 3, tzinfo=UTC)
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        _, observations = _store_version(
+            storage,
+            asset_id="equity:us:aapl",
+            source_id=ALPACA_SOURCE_ID,
+            timestamp=timestamp,
+            available_at=available,
+            omit="vwap",
+            field_overrides={
+                "volume": {"value": Decimal("0")},
+                "trade_count": {"value": Decimal("0")},
+            },
+        )
+        result = HistoricalMarketDataService(storage).query(
+            _query(asset_id="equity:us:aapl", source_id=ALPACA_SOURCE_ID)
+        )
+
+    assert len(result.bars) == 1
+    bar = result.bars[0]
+    assert bar.vwap is None
+    assert "vwap" not in bar.observation_ids
+    assert bar.observation_ids == {
+        observation.field_name: observation.observation_id for observation in observations
+    }
+    assert bar.volume == Decimal("0")
+    assert bar.trade_count == Decimal("0")
+    assert bar.close == Decimal("105")
+    assert bar.timestamp == timestamp
+    assert bar.available_at == available
+    assert result.traceability_verified is True
+
+
+@pytest.mark.parametrize(
+    ("volume", "trade_count"),
+    [
+        (Decimal("1000"), Decimal("0")),
+        (Decimal("0"), Decimal("200")),
+        (Decimal("1000"), Decimal("200")),
+    ],
+)
+def test_alpaca_missing_vwap_with_activity_stays_incomplete(
+    tmp_path,
+    volume: Decimal,
+    trade_count: Decimal,
+) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        _store_version(
+            storage,
+            asset_id="equity:us:aapl",
+            source_id=ALPACA_SOURCE_ID,
+            timestamp=datetime(2026, 7, 2, tzinfo=UTC),
+            available_at=datetime(2026, 7, 3, tzinfo=UTC),
+            omit="vwap",
+            field_overrides={
+                "volume": {"value": volume},
+                "trade_count": {"value": trade_count},
+            },
+        )
+        with pytest.raises(IncompleteMarketBarError, match="vwap"):
+            HistoricalMarketDataService(storage).query(
+                _query(asset_id="equity:us:aapl", source_id=ALPACA_SOURCE_ID)
+            )
+
+
+def test_missing_market_bar_fields_waives_only_alpaca_zero_activity_vwap() -> None:
+    schema = get_market_bar_schema(ALPACA_SOURCE_ID)
+    present = set(schema.required_fields) - {"vwap"}
+    assert (
+        missing_market_bar_fields(
+            schema,
+            present_fields=present,
+            values={"volume": Decimal("0"), "trade_count": Decimal("0")},
+        )
+        == ()
+    )
+    assert missing_market_bar_fields(
+        schema,
+        present_fields=present,
+        values={"volume": Decimal("1"), "trade_count": Decimal("0")},
+    ) == ("vwap",)
+    assert missing_market_bar_fields(
+        schema,
+        present_fields=present,
+        values={"volume": Decimal("0"), "trade_count": Decimal("1")},
+    ) == ("vwap",)

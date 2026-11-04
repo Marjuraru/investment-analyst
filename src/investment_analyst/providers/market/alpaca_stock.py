@@ -108,8 +108,10 @@ class AlpacaStockBar:
             )
         object.__setattr__(self, "raw_values", MappingProxyType(raw_values))
 
-        prices = (self.open, self.high, self.low, self.close, self.vwap)
-        if not all(value.is_finite() for value in (*prices, self.volume, self.trade_count)):
+        prices = (self.open, self.high, self.low, self.close)
+        if not all(
+            value.is_finite() for value in (*prices, self.vwap, self.volume, self.trade_count)
+        ):
             raise AlpacaStockError(
                 "bar values must be finite",
                 reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
@@ -117,6 +119,16 @@ class AlpacaStockBar:
         if any(value <= 0 for value in prices):
             raise AlpacaStockError(
                 "bar prices must be positive",
+                reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+            )
+        if self.vwap < 0:
+            raise AlpacaStockError(
+                "bar vwap must not be negative",
+                reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+            )
+        if self.vwap == 0 and (self.volume != 0 or self.trade_count != 0):
+            raise AlpacaStockError(
+                "bar vwap may be zero only when volume and trade_count are zero",
                 reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
             )
         if self.volume < 0:
@@ -137,13 +149,22 @@ class AlpacaStockBar:
         for value, label in (
             (self.open, "open"),
             (self.close, "close"),
-            (self.vwap, "vwap"),
         ):
             if not self.low <= value <= self.high:
                 raise AlpacaStockError(
                     f"bar {label} must be within low and high",
                     reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
                 )
+        if self.vwap > 0 and not self.low <= self.vwap <= self.high:
+            raise AlpacaStockError(
+                "bar vwap must be within low and high",
+                reason_code=ProviderFailureReason.ALPACA_BAR_INVALID,
+            )
+
+    @property
+    def vwap_is_unavailable(self) -> bool:
+        """Return whether the provider reported an uncomputable VWAP."""
+        return self.vwap == 0 and self.volume == 0 and self.trade_count == 0
 
     def _decimal_values(
         self,
