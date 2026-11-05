@@ -366,3 +366,40 @@ def test_route_records_the_negative_funding_increment_without_promotion_or_holdo
     assert _route_status(items, "PREDICTIVE-RESEARCH") == "NEXT"
     assert _route_status(items, "FUNDAMENTALS-COVERAGE") == "PLANNED"
     assert "route_transition:PREDICTIVE-RESEARCH:ADVANCES" in release_plan
+
+
+def test_route_records_the_volatility_baseline_without_promotion() -> None:
+    release_plan = (ROOT / "docs/basic_functional_release_plan.md").read_text(encoding="utf-8")
+    roadmap = (ROOT / "docs/product_roadmap.md").read_text(encoding="utf-8")
+    predictive = (ROOT / "docs/predictive_foundation.md").read_text(encoding="utf-8")
+    strategy = (ROOT / "docs/research_information_strategy.md").read_text(encoding="utf-8")
+
+    for text in (release_plan, roadmap, predictive, strategy):
+        assert "VOLATILITY-BASELINE-RESEARCH" in text
+        assert "no_demonstrated_increment" in text
+        assert "44b61556-c34e-5778-9f7f-af081a6cc195" in text
+    assert "crypto-historical-log-variation-5d-v1" in predictive
+    assert "research-volatility-protocol-v1" in predictive
+    assert "research-volatility-report-v1" in predictive
+    assert "research-volatility-manifest-v1" in predictive
+    assert "1,3076747311778731" in predictive
+    assert "2,0585856516150556" in predictive
+    assert "1,429063481864044" in predictive
+    assert "1,6739505264739558" in predictive
+    assert "0,029798190116840068" in predictive
+    assert "1,6488321182713472" in predictive
+    assert "1,6297878184531283" in predictive
+    assert "fold 2" in predictive
+    assert "holdout" in predictive
+    assert "no se integra" in predictive.lower()
+    assert "1,3076747311778731" in release_plan
+    assert "fold 2" in release_plan
+    assert "route_transition:PREDICTIVE-RESEARCH:ADVANCES" in release_plan
+    assert "36,48 %" in roadmap
+    assert "0 fits" in strategy
+    items = _route_items(release_plan)
+    _validate(items)
+    assert _route_status(items, "PREDICTIVE-RESEARCH") == "NEXT"
+    assert _route_status(items, "FUNDAMENTALS-COVERAGE") == "PLANNED"
+    assert _route_status(items, "DATA-CHASSIS") == "DONE"
+    assert "V1-U4" in release_plan and "UNKNOWN" in release_plan

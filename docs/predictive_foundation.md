@@ -1063,6 +1063,99 @@ justificar con evidencia si otra hipótesis preregistrada o datos externos merec
 conservando los costes y el holdout cerrado. Este bloque no abre un estudio nuevo ni promueve un
 predictor.
 
+## Investigación de variación futura de BTC (2026-11-05)
+
+`VOLATILITY-BASELINE-RESEARCH`/#420 (`ADVANCES`) abre una hipótesis distinta de dirección: un proxy
+de variación futura de BTC. No continúa el tuning direccional detenido por #395/#405, no reabre sus
+datasets de clasificación ni usa el holdout. Corsi (2009,
+https://doi.org/10.1093/jjfinec/nbp001) motiva contrastar persistencia en escalas distintas; no se
+atribuye al artículo un edge BTC ni se denomina HAR-RV canónico. El resultado es retrospectivo y
+condicionado.
+
+### Entrada, contrato y protocolo
+
+- Archivo exclusivo y read-only: `67ec4e68-33f9-53ef-82bb-032258b57786`, manifest 3.237 B
+  `e1669871…`, `candles.jsonl` 712.767 B `6a6ecb12…`, semántico `a5e3b4dc…`, 2.557 barras diarias
+  2019-01-01..2025-12-31, `retrieved_at=2026-11-01T02:37:32.364526Z`. El comando verifica el archivo
+  completo por integridad; los bytes del período reservado no se usan para features ni targets.
+- Contrato aislado `crypto-historical-log-variation-5d-v1`; esquemas `research-volatility-protocol-v1`,
+  `research-volatility-report-v1` y `research-volatility-manifest-v1`. No se extienden los esquemas de
+  clasificación, funding, baseline o readiness.
+- Decisiones planificadas 2020-01-01..2025-12-25 (2.186). Se construyen sólo las 1.748 anteriores a
+  `d=2024-10-14`; las 438 restantes no se construyen. Folds `[1093,1311)`, `[1311,1529)` y
+  `[1529,1748)`; train expansivo `[0,inicio)`; embargo de labels `< fin_ventana − 5 d`; pisos 500
+  train, 100 validation y segmentos contiguos ≥20.
+- Features `X_k=ln(1e-12 + (1/k)Σ r_t²)` para `k∈{1,7,30}`, con `r_t=ln(C_t/C_(t−1))`; referencia
+  de persistencia `X_5` y `X_30`. Target `Y_D=ln(1e-12 + (1/5)Σ_(t=D+1..D+5) r_t²)`, con cierres
+  D..D+5. Decimal34 `ROUND_HALF_EVEN`, sin floats, sin forward-fill, sin interpolación y sin saltar
+  días. Decisión 12:00 UTC; disponibilidad asumida del feature `max(bar_end+1h) ≤ D 01:00`; madurez
+  del label `D+6 01:00`; `evidence_available_at=max(madurez,retrieved_at)`; corte del estudio
+  `retrieved_at`.
+- Único candidato: `StandardScaler` ajustado sólo en train + `Ridge(alpha=1.0, fit_intercept=True,
+  solver='svd')`, float64 en el adaptador, un hilo BLAS/OpenMP, exactamente 3 fits (uno por fold). Sin
+  CV interna, tuning, calibración, winsorización, selección de features, semillas ni otros modelos.
+  Referencias: `persistence_5d`, `persistence_30d` y media de `Ytrain`. La incertidumbre es un
+  bootstrap pareado de bloques móviles de 20, 2.000 réplicas, PCG64(1729), los mismos draws para
+  candidato y referencias, quantile unilateral 0,05/3 y límites inferiores.
+- Criterio: `development_evidence` sólo si la mejora pooled de MSE es ≥5 % frente a las tres
+  referencias, los tres límites inferiores son >0 y la mejora puntual es positiva frente a cada
+  referencia en cada fold. En otro caso, `no_demonstrated_increment`. Un fallo de pisos o de contrato
+  es `insufficient_sample`/error, nunca un negativo estadístico. El holdout queda `not_evaluated`, 0
+  fits y 0 evaluaciones de targets reservados; no se promueve nada.
+
+### Resultado real (2026-11-05)
+
+Run `44b61556-c34e-5778-9f7f-af081a6cc195`; protocolo `6c4ca709…`, reporte `7f2d30b5…`,
+predicciones `39091b1f…` y manifiesto `29630228…`. El artefacto ocupa 933.594 B (protocolo 3.243,
+predicciones 919.486, reporte 9.276 y manifiesto 1.589) y la raíz retiene un único run. La ejecución
+tardó 3,50 s con RSS pico 214.962.176 B y un solo hilo; el archivo fuente conservó sus hashes. Se
+construyeron 1.748 decisiones, 1.748 con features y 1.737 con target; 622 filas OOS, 2.488
+predicciones y 3 fits. No se abrió el workspace, no hubo red y no se escribió fuera de la raíz.
+
+| Modelo pooled | MSE | MAE |
+| --- | --- | --- |
+| `ridge` | 1,3076747311778731 | 0,9124603170735622 |
+| `persistence_5d` | 2,0585856516150556 | 1,150328648997028 |
+| `persistence_30d` | 1,429063481864044 | 0,9598422263402294 |
+| `training_mean` | 1,6739505264739558 | 1,004404422200344 |
+
+Frente a `persistence_5d`, la mejora relativa pooled es 36,48 % (delta 0,7509109204371825; límite
+inferior 0,4189972919873506). Frente a `persistence_30d`, 8,49 % (delta 0,1213887506861709; límite
+inferior 0,029798190116840068). Frente a `training_mean`, 21,88 % (delta 0,3662757952960827; límite
+inferior 0,09439052714273738). Los tres límites son positivos y las tres mejoras pooled superan el
+5 %. Sin embargo, el fold 2 no mejora a `persistence_30d`: MSE 1,6488321182713472 frente a
+1,6297878184531283 (delta −0,0190442998182189; relativo −1,17 %). El criterio preregistrado exige
+mejora positiva en cada fold, de modo que la decisión final es `no_demonstrated_increment`. No se
+ajusta el criterio, no se elimina el fold, no se prueban otras ventanas, otro activo ni otra semilla.
+
+### Lectura, límites y siguiente decisión
+
+- El pooled sí muestra una mejora amplia y con límites positivos, pero la estabilidad por fold frente
+  a la persistencia de 30 días no se cumple. La decisión conservadora es negativa; no se presenta como
+  un predictor útil ni como una señal.
+- Sólo hay cierres diarios: el target es un log de media de retornos logarítmicos al cuadrado, no una
+  varianza realizada intradía ni una volatilidad anualizada. No se invierte `exp(Y)` ni se interpreta
+  como esperanza condicional de varianza o PnL.
+- La disponibilidad sigue siendo `historical_reconstruction_assumed`, `strict_pit_verified=false`; no
+  satisface el gate PIT observado. El período reservado no se evaluó y no se autoriza abrirlo.
+- La familia no se integra en el listado UI de baseline/funding ni en readiness; una superficie de
+  lectura exige un contrato explícito posterior. El siguiente PLAN decide si esta hipótesis se detiene
+  o si una validación confirmatoria separada merece un bloque propio; no se entrena por inercia.
+
+### Comandos exactos
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/evaluate_volatility_baseline.py \
+  --archive-dir /home/marjuraru/.local/share/investment-analyst/research/predictive-historical-data/67ec4e68-33f9-53ef-82bb-032258b57786 \
+  --output-dir /home/marjuraru/.local/share/investment-analyst/research/volatility-baseline-research \
+  --json
+```
+
+No existen flags de parámetros, modelo, semilla ni holdout. Una segunda ejecución idéntica reutiliza
+el run sin fits ni reescritura. `--help` y el lector del artefacto no requieren `sklearn`, `numpy`,
+`scipy` ni `threadpoolctl`; el destino debe ser absoluto, fuera del repositorio, workspace, runtime y
+ops, sin symlinks ni solapamiento con la entrada u otro experimento.
+
 ## Limitaciones y siguiente decisión
 
 - Sólo existe 1 muestra con features PIT disponibles; 0 muestras elegibles. No se puede entrenar,

@@ -247,6 +247,23 @@ holdout. El siguiente PLAN decide si esta hipótesis se detiene y si existe otra
 investigativa; la interpretación LLM sigue siendo una capa posterior e independiente sobre resultados
 estructurados.
 
+## Investigación de variación futura (2026-11-05)
+
+`VOLATILITY-BASELINE-RESEARCH`/#420 (`ADVANCES`) elige una hipótesis distinta de dirección: anticipar
+un proxy de variación futura de BTC en lugar de la probabilidad de retorno positivo. Usa el mismo
+archivo Coinbase sellado, ventanas de retornos logarítmicos cuadráticos 1/7/30, referencias de
+persistencia 5/30 y media de train, un único `StandardScaler`+`Ridge` con 3 fits, folds con embargo y
+un bootstrap pareado de bloques. No reabre #395/#405, no ajusta sus datasets y no usa el holdout.
+
+El run real `44b61556-c34e-5778-9f7f-af081a6cc195` produce `no_demonstrated_increment`. El pooled sí
+mejora a las tres referencias (36,48 %, 8,49 % y 21,88 %) con límites inferiores positivos, pero el
+fold 2 no supera a `persistence_30d`: 1,6488321182713472 frente a 1,6297878184531283 (−1,17 %). El
+criterio preregistrado exige mejora positiva en cada fold, así que no se declara evidencia de
+desarrollo. No se ajusta el criterio, no se prueban otras ventanas, activo o semilla, el holdout
+permanece `not_evaluated` con 0 fits y no se promueve un predictor. La familia no se integra aún en el
+listado UI de baseline/funding ni en readiness. `PREDICTIVE-RESEARCH` permanece `NEXT`,
+`FUNDAMENTALS-COVERAGE` sigue `PLANNED` y V1-U4 sigue `UNKNOWN`.
+
 ## Descubrimiento y contraste de estudios (2026-11-03)
 
 `RESEARCH-EXPERIMENTS-DELIVERY`/#407 (`ADVANCES`) cierra el recorrido de consulta: el usuario ya no

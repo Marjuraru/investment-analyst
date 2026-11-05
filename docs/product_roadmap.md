@@ -1,6 +1,6 @@
 # Hoja de ruta estratégica del producto
 
-> Estado vigente 2026-11-03: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
+> Estado vigente 2026-11-05: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
 > `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` conservando su deuda y evidencia, sin declararse `DONE`.
 > La readiness operativa v2 se registra en
 > [`v2_operational_readiness.md`](v2_operational_readiness.md): avanza prerrequisitos de interfaz,
@@ -137,6 +137,17 @@ reproduce la misma carencia con `b05e9853…`. El bloque no entrena, no requiere
 el workspace y no abre el holdout. `PREDICTIVE-RESEARCH` permanece `NEXT`, `FUNDAMENTALS-COVERAGE`
 sigue `PLANNED` y V1-U4 sigue `UNKNOWN`; acumular PIT depende del calendario y el contrato admite
 hasta 366 fechas, sin que esperar garantice alcanzar los pisos.
+
+`VOLATILITY-BASELINE-RESEARCH`/#420 (`ADVANCES`) abre una hipótesis distinta de dirección sobre el
+mismo archivo Coinbase: un proxy de variación futura `Y_D=ln(1e-12+(1/5)Σ r_t²)` con features de
+ventanas 1/7/30, referencias de persistencia 5/30 y media de train, y un único
+`StandardScaler`+`Ridge(alpha=1.0, svd)` con 3 fits y bootstrap pareado. El run real
+`44b61556-c34e-5778-9f7f-af081a6cc195` sella 1.748 decisiones construidas (1.737 con target), 622
+filas OOS y 2.488 predicciones. El pooled mejora a las tres referencias (36,48 %, 8,49 % y 21,88 %)
+con límites inferiores positivos, pero el fold 2 no supera a `persistence_30d` (1,6488321182713472
+frente a 1,6297878184531283; −1,17 %), por lo que el criterio preregistrado devuelve
+`no_demonstrated_increment`. No se ajusta nada, el holdout permanece cerrado, no se promueve un
+predictor y V1-U4 sigue `UNKNOWN`.
 
 La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de crecimiento viven en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md).
