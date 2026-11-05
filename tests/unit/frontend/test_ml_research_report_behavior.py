@@ -716,7 +716,11 @@ function fundingView() {
 function createExplorerContext() {
   const technical = fs.readFileSync(process.argv[2], "utf8");
   const core = fs.readFileSync(process.argv[3], "utf8");
-  const explorer = technical.slice(technical.indexOf("const EXPERIMENT_LIST_SCHEMA"));
+  // The readiness panel owns its own harness; slice this explorer only.
+  const explorer = technical.slice(
+    technical.indexOf("const EXPERIMENT_LIST_SCHEMA"),
+    technical.indexOf("const READINESS_VIEW_SCHEMA"),
+  );
   if (!explorer.includes("function initializeExperimentsExplorer")) {
     throw new Error("explorer block was not found");
   }

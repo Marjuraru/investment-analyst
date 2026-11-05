@@ -1023,6 +1023,46 @@ archivo. Los runs de candidatos anteriores permanecen sin reescribir y la raíz 
 168.622 B. No hay pesos, pickles ni copias de inputs. El artefacto se conserva hasta una decisión
 explícita de descarte y ausencia de consumidor; los resultados negativos no se borran.
 
+## Preparación PIT explicable (2026-11-04)
+
+`PIT-READINESS-DELIVERY`/#418 (`ADVANCES`) publica `research-pit-readiness-view-v1`, una proyección
+tipada, inmutable y `extra=forbid` sobre el mismo `PredictiveDatasetSummary` que ya emite el
+constructor preregistrado. La vista añade sólo agregados de admisión: por cada columna de feature,
+una partición exacta de las decisiones solicitadas entre `available`, `missing`,
+`not_yet_available`, `incompatible` y `ambiguous`, más la incidencia de cada código de razón.
+`reason_scope=column_reason_occurrences` declara explícitamente que una decisión puede emitir varias
+razones para la misma columna y que, por tanto, las incidencias pueden superar el número de
+decisiones y no son una partición. La vista no publica filas, precios, valores de feature por fila,
+retornos ni clases de validation/holdout; los conteos `positive`/`negative` fuera de train siguen
+siendo `null` porque el summary los limita a train.
+
+La consulta es explícita (`asset_id`, `start_date`, `end_date`, `known_at`) y se sirve por
+`GET /api/v1/research/readiness` y por el panel de preparación del tablero `tecnico`. El endpoint
+valida duplicados, parámetros desconocidos, fechas y el límite de 366 decisiones, y traduce el corte a
+`dataset_known_at`; un activo fuera del perfil cripto spot USD responde 422 `asset_incompatible` con
+su motivo, nunca una respuesta vacía o un 500. La lectura abre un único `ApplicationRuntime` en modo
+READ_ONLY y reutiliza la firma compuesta y la caché acotada existentes con las consultas
+`MARKET_BARS` (`close`) y `METRICS` (RSI y MACD) sobre los rangos exactos que lee el constructor,
+incluidos D-2..D+6 y los períodos de métricas, filtrados por `available_at <= known_at`. La firma
+incluye endpoint, parámetros, versiones del experimento, workspace/catálogo y las dependencias de
+observaciones y métricas.
+
+Evidencia viva contra el workspace `active-v2-20261021`, corte `2026-11-04T19:51:37Z` y rango
+inclusivo 2026-08-03..2026-11-03: BTC produce 93 decisiones, 1 feature disponible y 92
+`not_yet_available`, 88 labels disponibles y 5 pendientes, 22 purgadas, 1 elegible antes del split
+(train 0, validation 0, holdout 1), `insufficient_pit_sample` y dataset `dbb83880…`; SOL reproduce
+las mismas cifras y dataset `b05e9853…`. El summary coincide exactamente con el `--json` del CLI
+vigente, la respuesta mide 4.361 B (≤256 KiB) y el workspace conserva tamaño, `mtime` y ausencia de
+WAL de `index.duckdb` y el SHA-256 de `manifest.json` antes y después. No se adquiere ningún
+proveedor, no se abre ningún artefacto ML y no se ejecuta entrenamiento.
+
+El contrato admite hasta 366 fechas por consulta y el PIT observado crece al ritmo del calendario:
+esperar no garantiza alcanzar los pisos de 300 elegibles, 150 de train, 40 de validation y 40 de
+holdout. `PREDICTIVE-RESEARCH` permanece `NEXT` y V1-U4 sigue `UNKNOWN`; la siguiente decisión debe
+justificar con evidencia si otra hipótesis preregistrada o datos externos merecen un experimento,
+conservando los costes y el holdout cerrado. Este bloque no abre un estudio nuevo ni promueve un
+predictor.
+
 ## Limitaciones y siguiente decisión
 
 - Sólo existe 1 muestra con features PIT disponibles; 0 muestras elegibles. No se puede entrenar,

@@ -576,6 +576,10 @@ const ERROR_MESSAGES = Object.freeze({
     "No se encontró un run sellado con ese identificador en la raíz de investigación configurada.",
   ml_report_conflict:
     "El artefacto ML no es compatible, está incompleto o cambió durante la lectura.",
+  asset_incompatible:
+    "El experimento registrado no admite este activo: sólo cubre el perfil cripto spot USD.",
+  readiness_unavailable:
+    "La preparación PIT no pudo proyectarse desde la evidencia local de este corte.",
   unexpected_error: "La interfaz local encontró un error inesperado.",
 });
 
@@ -831,6 +835,7 @@ async function loadMarketAssets() {
     applyChartSettings();
     if (typeof resetMlResearchReport === "function") resetMlResearchReport();
     if (typeof resetExperimentsExplorer === "function") resetExperimentsExplorer();
+    if (typeof resetReadinessPanel === "function") resetReadinessPanel();
 
     // The former asset-specific fan-out (`presentation.hasFundamentals`,
     // `queryReport()`, and its companion queries) is intentionally centralized
