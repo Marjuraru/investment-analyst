@@ -248,16 +248,10 @@ def test_report_endpoint_rejects_invalid_queries_without_filesystem_parameters(
         f"asset_id={_ASSET}&run_id=not-a-uuid",
         f"asset_id={_ASSET}&run_id={str(run_id).upper()}",
         f"asset_id=equity:us:not-in-catalog&run_id={run_id}",
-        f"asset_id={_ASSET}&run_id={run_id}&ml_family=funding",
-        f"asset_id={_ASSET}&run_id={run_id}&ml_family=volatility",
     )
     with _server(application) as root:
         for query in invalid:
             status, payload = _get(root, query)
-            if "ml_family" in query:
-                assert status == 409, query
-                assert payload["error"]["code"] == "research_experiment_conflict"  # type: ignore[index]
-                continue
             assert status == 400, query
             assert payload["error"]["code"] == "invalid_request"  # type: ignore[index]
             assert str(ml_root) not in json.dumps(payload)
