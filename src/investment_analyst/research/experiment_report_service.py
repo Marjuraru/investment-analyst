@@ -1,10 +1,11 @@
 """Bounded discovery and verification of sealed research experiments.
 
-The service enumerates only direct children of the two configured roots, reads
+The service enumerates only direct children of the three configured roots, reads
 just the manifest and protocol headers of the candidates on the requested page,
 filters by catalog asset before hydrating anything else and delegates every
-baseline detail to the existing sealed-run projection. Funding detail is copied
-from one fully verified artifact without recomputing an evaluation.
+baseline detail to the existing sealed-run projection. Funding and volatility
+detail are copied from one fully verified artifact without recomputing an
+evaluation.
 
 Nothing here trains a model, opens the operational workspace, acquires a provider
 or writes domain data.
@@ -38,6 +39,8 @@ from investment_analyst.research.experiment_report_models import (
     MAX_EXPERIMENT_REPORT_BYTES,
     MAX_FUNDING_CACHE_BYTES,
     MAX_FUNDING_CACHE_ENTRIES,
+    MAX_VOLATILITY_CACHE_BYTES,
+    MAX_VOLATILITY_CACHE_ENTRIES,
     MIN_EXPERIMENT_PAGE_LIMIT,
     BaselineExperimentPayload,
     ExperimentArtifactStatus,
@@ -54,6 +57,8 @@ from investment_analyst.research.experiment_report_models import (
     ExperimentWarningCode,
     FundingExperimentPayload,
     FundingProvenanceView,
+    VolatilityExperimentPayload,
+    VolatilityProvenanceView,
 )
 from investment_analyst.research.ml_export import peak_rss_bytes
 from investment_analyst.research.ml_funding_export import (
@@ -90,10 +95,44 @@ from investment_analyst.research.ml_report_service import (
     MlReportNotFoundError,
     MlResearchReportService,
 )
+from investment_analyst.research.volatility_export import (
+    VolatilityExportCapError,
+    VolatilityExportConflictError,
+    read_volatility_artifact,
+)
+from investment_analyst.research.volatility_models import (
+    MANIFEST_FILE_NAME as VOLATILITY_MANIFEST_FILE_NAME,
+)
+from investment_analyst.research.volatility_models import (
+    PREDICTIONS_FILE_NAME as VOLATILITY_PREDICTIONS_FILE_NAME,
+)
+from investment_analyst.research.volatility_models import (
+    PROTOCOL_FILE_NAME as VOLATILITY_PROTOCOL_FILE_NAME,
+)
+from investment_analyst.research.volatility_models import (
+    REPORT_FILE_NAME as VOLATILITY_REPORT_FILE_NAME,
+)
+from investment_analyst.research.volatility_models import (
+    VolatilityArtifactStatus as SealedVolatilityStatus,
+)
+from investment_analyst.research.volatility_models import (
+    VolatilityHoldoutPolicy,
+    VolatilityManifest,
+    VolatilityProtocol,
+)
 
 _READ_CHUNK_BYTES = 1024 * 1024
 _PENDING_TIMEOUT_SECONDS = 30.0
 _MAX_CURSOR_LENGTH = 4096
+
+_VOLATILITY_READ_CAPS: dict[str, int] = {
+    VOLATILITY_MANIFEST_FILE_NAME: MAX_EXPERIMENT_HEADER_BYTES,
+    VOLATILITY_PROTOCOL_FILE_NAME: MAX_EXPERIMENT_HEADER_BYTES,
+    VOLATILITY_REPORT_FILE_NAME: MAX_EXPERIMENT_REPORT_BYTES,
+    VOLATILITY_PREDICTIONS_FILE_NAME: MAX_EXPERIMENT_PREDICTIONS_BYTES,
+}
+_VOLATILITY_ALLOWED_NAMES = frozenset(_VOLATILITY_READ_CAPS)
+_VOLATILITY_HEADERS = (VOLATILITY_MANIFEST_FILE_NAME, VOLATILITY_PROTOCOL_FILE_NAME)
 
 _FUNDING_READ_CAPS: dict[str, int] = {
     FUNDING_MANIFEST_FILE_NAME: MAX_EXPERIMENT_HEADER_BYTES,
@@ -201,14 +240,20 @@ class ExperimentReportService:
         *,
         baseline_reports: MlResearchReportService,
         funding_root: Path,
+        volatility_root: Path,
     ) -> None:
         if not funding_root.is_absolute():
             raise ValueError("ml funding results root must be an absolute path")
+        if not volatility_root.is_absolute():
+            raise ValueError("ml volatility results root must be an absolute path")
         self._baseline = baseline_reports
         self._funding_root = funding_root
+        self._volatility_root = volatility_root
         self._lock = threading.Lock()
         self._cache: OrderedDict[tuple[str, str], _CacheEntry] = OrderedDict()
         self._cache_bytes = 0
+        self._volatility_cache: OrderedDict[tuple[str, str], _CacheEntry] = OrderedDict()
+        self._volatility_cache_bytes = 0
         self._pending: dict[tuple[str, str], _PendingRead] = {}
         self._cache_hits = 0
         self._cache_misses = 0
@@ -231,12 +276,19 @@ class ExperimentReportService:
         """Return the configured funding root; no existence check is performed."""
         return self._funding_root
 
+    @property
+    def volatility_root(self) -> Path:
+        """Return the configured volatility root; no existence check is performed."""
+        return self._volatility_root
+
     def performance(self) -> dict[str, object]:
         """Return bounded observed cost; absent values remain ``None``, never zero."""
         with self._lock:
             return {
                 "cache_entries": len(self._cache),
                 "cache_bytes": self._cache_bytes,
+                "volatility_cache_entries": len(self._volatility_cache),
+                "volatility_cache_bytes": self._volatility_cache_bytes,
                 "cache_hits": self._cache_hits,
                 "cache_misses": self._cache_misses,
                 "full_verifications": self._full_verifications,
@@ -265,7 +317,7 @@ class ExperimentReportService:
         try:
             family_filter = ExperimentFamilyFilter(family)
         except ValueError as error:
-            raise ValueError("family must be all, baseline or funding") from error
+            raise ValueError("family must be all, baseline, funding or volatility") from error
         if not MIN_EXPERIMENT_PAGE_LIMIT <= limit <= MAX_EXPERIMENT_PAGE_LIMIT:
             raise ValueError(
                 f"limit must be between {MIN_EXPERIMENT_PAGE_LIMIT} and {MAX_EXPERIMENT_PAGE_LIMIT}"
@@ -321,9 +373,11 @@ class ExperimentReportService:
         try:
             resolved_family = ExperimentFamily(family)
         except ValueError as error:
-            raise ValueError("family must be baseline or funding") from error
+            raise ValueError("family must be baseline, funding or volatility") from error
         if resolved_family is ExperimentFamily.BASELINE:
             return self._baseline_view(asset_id=asset_id, run_id=run_id)
+        if resolved_family is ExperimentFamily.VOLATILITY:
+            return self._volatility_view(asset_id=asset_id, run_id=run_id)
         return self._funding_view(asset_id=asset_id, run_id=run_id)
 
     def _baseline_view(self, *, asset_id: str, run_id: UUID) -> ExperimentReportView:
@@ -345,6 +399,214 @@ class ExperimentReportService:
                 created_at=view.artifact.created_at,
             ),
             payload=BaselineExperimentPayload(report=view),
+        )
+
+    def _volatility_view(self, *, asset_id: str, run_id: UUID) -> ExperimentReportView:
+        root = self._resolved_volatility_root()
+        run_dir = self._run_directory(root, run_id)
+        key = (asset_id, str(run_id))
+
+        with self._lock:
+            pending = self._pending.get(key)
+            leader = pending is None
+            if pending is None:
+                pending = _PendingRead()
+                self._pending[key] = pending
+        if not leader:
+            if not pending.event.wait(timeout=_PENDING_TIMEOUT_SECONDS):
+                raise ExperimentReportConflictError("timed out waiting for an identical read")
+            if pending.result is not None:
+                return pending.result
+            return self._load_volatility_with_retry(key, run_dir, asset_id, run_id)
+
+        try:
+            result = self._load_volatility_with_retry(key, run_dir, asset_id, run_id)
+            pending.result = result
+            return result
+        except Exception as error:
+            pending.error = error
+            raise
+        finally:
+            with self._lock:
+                self._pending.pop(key, None)
+            pending.event.set()
+
+    def _load_volatility_with_retry(
+        self,
+        key: tuple[str, str],
+        run_dir: Path,
+        asset_id: str,
+        run_id: UUID,
+    ) -> ExperimentReportView:
+        for attempt in range(2):
+            started = time.perf_counter()
+            signature, payloads = self._scan_volatility(
+                run_dir, retain=frozenset(_VOLATILITY_HEADERS)
+            )
+            entry = self._cached_volatility_entry(key, signature)
+            if entry is not None:
+                with self._lock:
+                    self._cache_hits += 1
+                    self._warm_load_ms = (time.perf_counter() - started) * 1000.0
+                return entry.projection
+            try:
+                projection = self._build_volatility_projection(
+                    run_dir=run_dir,
+                    run_id=run_id,
+                    asset_id=asset_id,
+                    signature=signature,
+                    payloads=payloads,
+                )
+            except ExperimentReportConflictError:
+                current, _ = self._scan_volatility(run_dir, retain=frozenset())
+                if attempt == 0 and current != signature:
+                    continue
+                raise
+            current, _ = self._scan_volatility(run_dir, retain=frozenset())
+            if current != signature:
+                if attempt == 0:
+                    continue
+                raise ExperimentReportConflictError("artifact changed during read")
+            self._store_volatility_cache(key, signature, projection)
+            with self._lock:
+                self._cache_misses += 1
+                self._cold_load_ms = (time.perf_counter() - started) * 1000.0
+            return projection
+        raise ExperimentReportConflictError("artifact changed during read")
+
+    def _cached_volatility_entry(
+        self, key: tuple[str, str], signature: _ArtifactSignature
+    ) -> _CacheEntry | None:
+        with self._lock:
+            entry = self._volatility_cache.get(key)
+            if entry is None:
+                return None
+            if entry.signature != signature or entry.bytes > MAX_VOLATILITY_CACHE_BYTES:
+                self._volatility_cache.pop(key, None)
+                self._volatility_cache_bytes -= entry.bytes
+                return None
+            self._volatility_cache.move_to_end(key)
+            return entry
+
+    def _store_volatility_cache(
+        self,
+        key: tuple[str, str],
+        signature: _ArtifactSignature,
+        projection: ExperimentReportView,
+    ) -> None:
+        size = len(canonical_analytical_json(projection.model_dump(mode="json")))
+        if size > MAX_VOLATILITY_CACHE_BYTES:
+            return
+        with self._lock:
+            previous = self._volatility_cache.pop(key, None)
+            if previous is not None:
+                self._volatility_cache_bytes -= previous.bytes
+            self._volatility_cache[key] = _CacheEntry(
+                signature=signature,
+                projection=projection,
+                bytes=size,
+            )
+            self._volatility_cache_bytes += size
+            while (
+                len(self._volatility_cache) > MAX_VOLATILITY_CACHE_ENTRIES
+                or self._volatility_cache_bytes > MAX_VOLATILITY_CACHE_BYTES
+            ):
+                _, evicted = self._volatility_cache.popitem(last=False)
+                self._volatility_cache_bytes -= evicted.bytes
+
+    def _build_volatility_projection(
+        self,
+        *,
+        run_dir: Path,
+        run_id: UUID,
+        asset_id: str,
+        signature: _ArtifactSignature,
+        payloads: dict[str, bytes],
+    ) -> ExperimentReportView:
+        manifest_bytes = payloads.get(VOLATILITY_MANIFEST_FILE_NAME)
+        protocol_bytes = payloads.get(VOLATILITY_PROTOCOL_FILE_NAME)
+        if manifest_bytes is None or protocol_bytes is None:
+            raise ExperimentReportConflictError("sealed volatility run is incomplete")
+        manifest = self._parse_canonical(
+            VolatilityManifest, manifest_bytes, "sealed volatility manifest"
+        )
+        protocol = self._parse_canonical(
+            VolatilityProtocol, protocol_bytes, "sealed volatility protocol"
+        )
+        protocol_sha256 = hashlib.sha256(protocol_bytes).hexdigest()
+        if manifest.run_id != run_id:
+            raise ExperimentReportConflictError("sealed volatility manifest belongs to another run")
+        if (
+            manifest.protocol.name != VOLATILITY_PROTOCOL_FILE_NAME
+            or manifest.protocol.sha256 != protocol_sha256
+            or manifest.protocol.bytes != len(protocol_bytes)
+        ):
+            raise ExperimentReportConflictError(
+                "sealed volatility protocol differs from its manifest"
+            )
+        if protocol.asset_id != asset_id:
+            raise ExperimentReportConflictError("sealed artifact belongs to a different asset")
+
+        with self._lock:
+            self._full_verifications += 1
+        try:
+            loaded = read_volatility_artifact(run_dir)
+        except (VolatilityExportCapError, VolatilityExportConflictError) as error:
+            raise ExperimentReportConflictError(
+                "sealed volatility artifact is incompatible or corrupt"
+            ) from error
+        if loaded.manifest is None:
+            raise ExperimentReportConflictError("sealed volatility run has no manifest")
+        report = loaded.report
+        if (
+            loaded.manifest != manifest
+            or loaded.protocol != protocol
+            or report.run_id != run_id
+            or report.status is not SealedVolatilityStatus.COMPLETED
+            or report.decision is None
+            or report.decision_reason is None
+        ):
+            raise ExperimentReportConflictError(
+                "sealed volatility artifact changed during verification"
+            )
+
+        return ExperimentReportView(
+            context=ExperimentReportContext(
+                asset_id=protocol.asset_id,
+                family=ExperimentFamily.VOLATILITY,
+                run_id=manifest.run_id,
+                manifest_sha256=(
+                    signature.manifest_sha256 or hashlib.sha256(manifest_bytes).hexdigest()
+                ),
+                protocol_sha256=protocol_sha256,
+                report_sha256=manifest.report.sha256,
+                artifact_bytes=manifest.root_bytes,
+                created_at=manifest.created_at,
+            ),
+            payload=VolatilityExperimentPayload(
+                protocol=protocol,
+                provenance=VolatilityProvenanceView(
+                    archive_id=report.archive_id,
+                    archive_semantic_sha256=report.archive_semantic_sha256,
+                    archive_candles_sha256=report.archive_candles_sha256,
+                    code_material_sha256=report.code_material_sha256,
+                    code_material_files=report.code_material_files,
+                    source_id=protocol.source_id,
+                ),
+                environment=report.environment,
+                decision=report.decision,
+                decision_reason=report.decision_reason,
+                decision_rows=protocol.decision_count,
+                prediction_rows=report.prediction_rows,
+                development_fits=report.development_fits,
+                folds=report.folds,
+                pooled_scores=report.pooled_scores,
+                pooled_comparisons=report.pooled_comparisons,
+                holdout=VolatilityHoldoutPolicy(),
+                timings=report.timings,
+                counts=report.counts,
+                peak_rss_bytes=report.peak_rss_bytes,
+            ),
         )
 
     def _funding_view(self, *, asset_id: str, run_id: UUID) -> ExperimentReportView:
@@ -521,6 +783,7 @@ class ExperimentReportService:
         for family, root in (
             (ExperimentFamily.BASELINE, self.baseline_root),
             (ExperimentFamily.FUNDING, self._funding_root),
+            (ExperimentFamily.VOLATILITY, self._volatility_root),
         ):
             names = self._root_entries(root)
             if names is None:
@@ -605,6 +868,8 @@ class ExperimentReportService:
         try:
             if candidate.family is ExperimentFamily.BASELINE:
                 return self._list_baseline(candidate, asset_id=asset_id), None
+            if candidate.family is ExperimentFamily.VOLATILITY:
+                return self._list_volatility(candidate, asset_id=asset_id), None
             return self._list_funding(candidate, asset_id=asset_id), None
         except _IncompleteArtifact:
             return (
@@ -670,6 +935,56 @@ class ExperimentReportService:
             artifact_bytes=manifest.root_bytes,
         )
 
+    def _list_volatility(
+        self, candidate: _Candidate, *, asset_id: str
+    ) -> ExperimentListItem | None:
+        root = self._resolved_header_root(self._volatility_root)
+        run_dir = self._run_directory(root, candidate.run_id)
+        try:
+            manifest_bytes = self._read_header(
+                run_dir / VOLATILITY_MANIFEST_FILE_NAME, cap=MAX_EXPERIMENT_HEADER_BYTES
+            )
+        except ExperimentReportConflictError as error:
+            raise _IncompleteArtifact("volatility run has no sealed manifest") from error
+        protocol_bytes = self._read_header(
+            run_dir / VOLATILITY_PROTOCOL_FILE_NAME, cap=MAX_EXPERIMENT_HEADER_BYTES
+        )
+        manifest = self._parse_canonical(
+            VolatilityManifest, manifest_bytes, "sealed volatility manifest"
+        )
+        protocol = self._parse_canonical(
+            VolatilityProtocol, protocol_bytes, "sealed volatility protocol"
+        )
+        protocol_sha256 = hashlib.sha256(protocol_bytes).hexdigest()
+        if manifest.run_id != candidate.run_id:
+            raise ExperimentReportConflictError("sealed volatility manifest belongs to another run")
+        if (
+            manifest.protocol.name != VOLATILITY_PROTOCOL_FILE_NAME
+            or manifest.protocol.sha256 != protocol_sha256
+            or manifest.protocol.bytes != len(protocol_bytes)
+            or manifest.archive_id != protocol.archive_id
+            or manifest.archive_semantic_sha256 != protocol.archive_semantic_sha256
+            or manifest.archive_candles_sha256 != protocol.archive_candles_sha256
+            or manifest.criteria != protocol.criteria
+        ):
+            raise ExperimentReportConflictError(
+                "sealed volatility manifest disagrees with its protocol"
+            )
+        if protocol.asset_id != asset_id:
+            return None
+        return ExperimentListItem(
+            family=ExperimentFamily.VOLATILITY,
+            run_id=manifest.run_id,
+            asset_id=protocol.asset_id,
+            protocol_id=manifest.protocol_id,
+            artifact_status=self._volatility_status(manifest.status),
+            created_at=manifest.created_at,
+            manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+            protocol_sha256=protocol_sha256,
+            report_sha256=manifest.report.sha256,
+            artifact_bytes=manifest.root_bytes,
+        )
+
     def _list_funding(self, candidate: _Candidate, *, asset_id: str) -> ExperimentListItem | None:
         root = self._resolved_header_root(self._funding_root)
         run_dir = self._run_directory(root, candidate.run_id)
@@ -716,11 +1031,72 @@ class ExperimentReportService:
         )
 
     @staticmethod
+    def _volatility_status(status: SealedVolatilityStatus) -> ExperimentArtifactStatus:
+        resolved = _STATUS_BY_SEALED_VALUE.get(status.value)
+        if resolved is None:
+            raise ExperimentReportConflictError("sealed status is not recognized")
+        return resolved
+
+    @staticmethod
     def _baseline_status(status: MlArtifactStatus) -> ExperimentArtifactStatus:
         resolved = _STATUS_BY_SEALED_VALUE.get(status.value)
         if resolved is None:
             raise ExperimentReportConflictError("sealed status is not recognized")
         return resolved
+
+    def _scan_volatility(
+        self,
+        run_dir: Path,
+        *,
+        retain: frozenset[str],
+    ) -> tuple[_ArtifactSignature, dict[str, bytes]]:
+        try:
+            entries = tuple(run_dir.iterdir())
+        except OSError as error:
+            raise ExperimentReportConflictError("sealed run is not readable") from error
+        files: dict[str, Path] = {}
+        for entry in entries:
+            name = entry.name
+            if name not in _VOLATILITY_ALLOWED_NAMES:
+                raise ExperimentReportConflictError("sealed run contains unexpected entries")
+            try:
+                info = os.lstat(entry)
+            except OSError as error:
+                raise ExperimentReportConflictError("sealed file is not readable") from error
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                raise ExperimentReportConflictError("sealed entry must be a regular file")
+            files[name] = entry
+        if VOLATILITY_PROTOCOL_FILE_NAME not in files:
+            raise ExperimentReportConflictError("sealed volatility run is incomplete")
+        digests: list[_FileDigest] = []
+        payloads: dict[str, bytes] = {}
+        total_bytes = 0
+        for name in sorted(files):
+            payload, digest = self._read_file(
+                files[name],
+                name=name,
+                cap=_VOLATILITY_READ_CAPS[name],
+                retain=name in retain,
+            )
+            total_bytes += digest.size
+            if total_bytes > MAX_EXPERIMENT_ARTIFACT_BYTES:
+                raise ExperimentReportConflictError("sealed run exceeds the aggregate read cap")
+            if payload is not None:
+                payloads[name] = payload
+            digests.append(digest)
+        manifest = next(
+            (digest for digest in digests if digest.name == VOLATILITY_MANIFEST_FILE_NAME),
+            None,
+        )
+        signature = _ArtifactSignature(
+            files=tuple(digests),
+            manifest_sha256=manifest.sha256 if manifest is not None else None,
+            total_bytes=total_bytes,
+        )
+        with self._lock:
+            self._scans += 1
+            self._bytes_read += total_bytes
+        return signature, payloads
 
     def _scan_funding(
         self,
@@ -905,6 +1281,14 @@ class ExperimentReportService:
         if resolved.parent != root or not resolved.is_relative_to(root):
             raise ExperimentReportConflictError("sealed run escapes its configured root")
         return resolved
+
+    def _resolved_volatility_root(self) -> Path:
+        try:
+            return self._resolved_header_root(self._volatility_root)
+        except ExperimentReportNotFoundError as error:
+            raise ExperimentReportNotFoundError(
+                "ML volatility research results root is not available"
+            ) from error
 
     def _resolved_funding_root(self) -> Path:
         try:

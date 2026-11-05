@@ -260,22 +260,24 @@ mejora a las tres referencias (36,48 %, 8,49 % y 21,88 %) con límites inferiore
 fold 2 no supera a `persistence_30d`: 1,6488321182713472 frente a 1,6297878184531283 (−1,17 %). El
 criterio preregistrado exige mejora positiva en cada fold, así que no se declara evidencia de
 desarrollo. No se ajusta el criterio, no se prueban otras ventanas, activo o semilla, el holdout
-permanece `not_evaluated` con 0 fits y no se promueve un predictor. La familia no se integra aún en el
-listado UI de baseline/funding ni en readiness. `PREDICTIVE-RESEARCH` permanece `NEXT`,
+permanece `not_evaluated` con 0 fits y no se promueve un predictor. La familia vive en el recorrido
+local de investigación como tercer miembro cerrado (`family=volatility`), con el mismo listado,
+detalle verificado, contraste descriptivo y descarga que baseline/funding y sin comparación pareada
+entre familias. `PREDICTIVE-RESEARCH` permanece `NEXT`,
 `FUNDAMENTALS-COVERAGE` sigue `PLANNED` y V1-U4 sigue `UNKNOWN`.
 
 ## Descubrimiento y contraste de estudios (2026-11-03)
 
 `RESEARCH-EXPERIMENTS-DELIVERY`/#407 (`ADVANCES`) cierra el recorrido de consulta: el usuario ya no
 necesita copiar un UUID para encontrar sus estudios. El panel de investigación carga el listado del
-activo, permite elegir familia, página y run, abre el detalle verificado de ambas familias, contrasta
-hasta dos condiciones lado a lado y descarga exactamente la proyección consultada. No se crea un
-segundo dashboard, un endpoint de comparación ni un artefacto persistente, y la consulta legacy
+activo, permite elegir familia, página y run, abre el detalle verificado de las tres familias,
+contrasta hasta dos condiciones lado a lado y descarga exactamente la proyección consultada. No se crea
+un segundo dashboard, un endpoint de comparación ni un artefacto persistente, y la consulta legacy
 continúa disponible para baseline.
 
-La honestidad del contraste es explícita: baseline y funding no comparten máscara de entrenamiento, de
-modo que sus métricas no son una comparación pareada entre estudios y la evidencia incremental válida
-sigue estando dentro del run de funding. Dos runs de la misma familia tampoco se comparan como pares:
+La honestidad del contraste es explícita: baseline, funding y volatility no comparten target, máscara
+ni protocolo, de modo que sus métricas no son una comparación pareada entre estudios y la evidencia
+válida sigue estando dentro de cada run. Dos runs de la misma familia tampoco se comparan como pares:
 la vista describe condiciones, diferencias y campos desconocidos, sin delta, significancia cruzada,
 ranking ni «mejor estudio». El resultado negativo de #405 no se reabre, no se ajusta y no se promueve.
 
@@ -285,6 +287,15 @@ ocultar los adicionales. Una raíz ausente es un estado vacío explícito, nunca
 abre reportes, predicciones, datasets ni lineage: sólo verifica cabeceras de la página solicitada.
 `FUNDAMENTALS-COVERAGE` permanece `PLANNED`, `PREDICTIVE-RESEARCH` sigue `NEXT` y V1-U4 permanece
 `UNKNOWN`.
+
+## Entrega local de la variación futura (planificada en este bloque)
+
+Este bloque integra la variación futura sellada por #420 al recorrido anterior sin entrenar, sin
+promover y sin abrir el holdout: `family=volatility` descubre el run `44b61556…`, detalla su
+`no_demonstrated_increment` con folds, MSE/MAE, comparaciones pareadas y el motivo del fold 2, y
+descarga `volatility-44b61556….json`. El contraste con baseline/funding es descriptivo lado a lado,
+nunca pareado entre familias. La readiness sigue cubriendo sólo el experimento direccional cripto: se
+declara explícitamente que readiness no evalúa volatility.
 
 ## Evidencia histórica de funding (2026-11-02)
 

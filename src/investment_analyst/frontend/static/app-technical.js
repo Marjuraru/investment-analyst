@@ -1064,6 +1064,19 @@ const EXPERIMENT_EXPORT_LIMIT_BYTES = 1024 * 1024;
 const EXPERIMENT_FAMILY_LABELS = Object.freeze({
   baseline: "Baseline técnico",
   funding: "Incremento de funding",
+  volatility: "Variación futura (log de media cuadrática)",
+});
+const EXPERIMENT_MODEL_LABELS = Object.freeze({
+  ridge: "Ridge",
+  persistence_5d: "Persistencia 5d",
+  persistence_30d: "Persistencia 30d",
+  training_mean: "Media de train",
+  technical_logistic: "Logística técnica",
+  funding_logistic: "Funding",
+  logistic_regression: "Logística",
+  hist_gradient_boosting: "HGB",
+  half_probability: "p = 0.5",
+  training_class_prior: "Prior",
 });
 const EXPERIMENT_STATUS_LABELS = Object.freeze({
   completed: "Completado",
@@ -1078,10 +1091,9 @@ const EXPERIMENT_WARNING_LABELS = Object.freeze({
 });
 const EXPERIMENT_COMPARISON_NOTE = Object.freeze({
   mixed:
-    "No es una comparación pareada: el baseline no usa la máscara de funding y el"
-    + " estudio de funding entrena con las filas de funding disponibles. Sus métricas"
-    + " no se comparan entre estudios; la evidencia incremental válida está dentro del"
-    + " run de funding.",
+    "No es una comparación pareada entre familias: las familias usan targets, máscaras"
+    + " y protocolos distintos. Sus métricas no se comparan entre estudios; la evidencia"
+    + " incremental válida está dentro de cada run.",
   same:
     "Dos estudios de la misma familia pueden diferir en datos, código o ventana; sus"
     + " métricas no se comparan como pares. Esta vista sólo describe condiciones y no"
@@ -1131,6 +1143,19 @@ function experimentsDefinition(rows) {
 }
 
 function experimentsScoresTable(scores) {
+  const first = (scores || [])[0] || {};
+  if ("mse" in first && !("brier" in first)) {
+    const rows = (scores || []).map((item) => [
+      EXPERIMENT_MODEL_LABELS[item.model] || item.model,
+      experimentsFigureOrAbsent(item.mse),
+      experimentsFigureOrAbsent(item.mae),
+      formatInteger(item.rows),
+    ]);
+    return mlResearchTable(
+      ["Modelo", "MSE", "MAE", "Filas"],
+      rows,
+    );
+  }
   const ordered = ["technical_logistic", "funding_logistic", "logistic_regression",
     "hist_gradient_boosting", "half_probability", "training_class_prior"];
   const byScorer = new Map((scores || []).map((item) => [item.scorer, item]));
@@ -1152,7 +1177,38 @@ function experimentsScoresTable(scores) {
   );
 }
 
+function experimentsVolatilityScoresTable(scores) {
+  const rows = (scores || []).map((item) => [
+    EXPERIMENT_MODEL_LABELS[item.model] || item.model,
+    experimentsFigureOrAbsent(item.mse),
+    experimentsFigureOrAbsent(item.mae),
+    formatInteger(item.rows),
+  ]);
+  return mlResearchTable(["Modelo", "MSE", "MAE", "Filas"], rows);
+}
+
 function experimentsFoldsTable(family, folds) {
+  if (family === "volatility") {
+    const headers = ["Fold", "Train", "Eval", "Segmentos", "MSE Ridge", "MSE Pers. 5d", "MSE Pers. 30d", "MSE Media"];
+    const rows = (folds || []).slice(0, 3).map((fold) => {
+      const scores = new Map((fold.scores || []).map((item) => [item.model, item]));
+      const mse = (model) => {
+        const item = scores.get(model);
+        return item ? item.mse : "—";
+      };
+      return [
+        formatInteger(fold.fold),
+        formatInteger(fold.train_rows),
+        formatInteger(fold.validation_rows),
+        formatInteger(fold.segments),
+        experimentsFigureOrAbsent(mse("ridge")),
+        experimentsFigureOrAbsent(mse("persistence_5d")),
+        experimentsFigureOrAbsent(mse("persistence_30d")),
+        experimentsFigureOrAbsent(mse("training_mean")),
+      ];
+    });
+    return mlResearchTable(headers, rows);
+  }
   const brierColumns = family === "funding"
     ? [
       ["technical_logistic", "Control técnico"],
@@ -1200,6 +1256,21 @@ function experimentsFoldsTable(family, folds) {
 }
 
 function experimentsComparisonsTable(comparisons) {
+  const first = (comparisons || [])[0] || {};
+  if ("reference_mse" in first && !("reference_brier" in first)) {
+    const rows = (comparisons || []).slice(0, 3).map((item) => [
+      EXPERIMENT_MODEL_LABELS[item.reference] || item.reference,
+      experimentsFigureOrAbsent(item.model_mse),
+      experimentsFigureOrAbsent(item.reference_mse),
+      experimentsFigureOrAbsent(item.mean_paired_difference),
+      experimentsFigureOrAbsent(item.lower_bound),
+      item.lower_bound_positive === true ? "Sí" : (item.lower_bound_positive === false ? "No" : "—"),
+    ]);
+    return mlResearchTable(
+      ["Referencia", "MSE Ridge", "MSE referencia", "Diferencia pareada", "Límite inferior", "¿Límite > 0?"],
+      rows,
+    );
+  }
   const rows = (comparisons || []).slice(0, 3).map((item) => [
     mlResearchScorerLabel(item.model),
     mlResearchScorerLabel(item.reference),
@@ -1249,6 +1320,15 @@ function experimentsDecision(payload) {
     return { label: "Estado no reconocido", tone: "bad" };
   }
   const detail = payload.payload;
+  if (detail.family === "volatility") {
+    if (detail.decision === "no_demonstrated_increment") {
+      return { label: "No se demostró incremento", tone: "neutral" };
+    }
+    if (detail.decision === "development_evidence") {
+      return { label: "Evidencia de desarrollo; no promovida", tone: "warn" };
+    }
+    return { label: "Estado no reconocido", tone: "bad" };
+  }
   if (detail.decision === "no_demonstrated_increment") {
     return { label: "No se demostró incremento", tone: "neutral" };
   }
@@ -1259,6 +1339,11 @@ function experimentsDecision(payload) {
 }
 
 function experimentsReading(payload) {
+  if (payload.payload.family === "volatility") {
+    return "Evaluación retrospectiva de variación futura con el período reservado no"
+      + " evaluado; no se abre el holdout. Es evidencia del experimento declarado, no una"
+      + " señal utilizable, una recomendación ni una varianza realizada.";
+  }
   if (payload.payload.family === "funding") {
     return "Evaluación retrospectiva de desarrollo con el holdout cerrado"
       + ` (${payload.payload.holdout.accesses} accesos, ${payload.payload.holdout.fits} fits).`
@@ -1270,13 +1355,14 @@ function experimentsReading(payload) {
 
 function experimentsDetailRows(payload) {
   const context = payload.context;
+  const familyStatus = context.family === "funding" || context.family === "volatility"
+    ? "completed"
+    : payload.payload.report.artifact.status;
   const rows = [
     ["Familia y protocolo", `${EXPERIMENT_FAMILY_LABELS[context.family]} · ${context.family}`],
     ["Activo de catálogo", context.asset_id],
     ["Run", context.run_id],
-    ["Estado del artefacto", EXPERIMENT_STATUS_LABELS[context.family === "funding"
-      ? "completed"
-      : payload.payload.report.artifact.status] || "—"],
+    ["Estado del artefacto", EXPERIMENT_STATUS_LABELS[familyStatus] || "—"],
     ["Creado", formatInstant(context.created_at)],
     ["Artefacto", `${formatInteger(context.artifact_bytes)} B`],
     ["Manifiesto SHA-256", context.manifest_sha256],
@@ -1345,6 +1431,35 @@ function experimentsDetailRows(payload) {
       + ` · scikit-learn ${detail.environment.scikit_learn_version}`
       + ` · numpy ${detail.environment.numpy_version}`],
   );
+  if (detail.family === "volatility") {
+    rows.push(
+      ["Objetivo", detail.protocol.hypothesis],
+      ["Ventana de decisión",
+        `${detail.protocol.decision_start} a ${detail.protocol.decision_end}`
+        + ` · ${formatInteger(detail.decision_rows)} decisiones`],
+      ["Target", `log de media cuadrática · horizonte ${formatInteger(detail.protocol.target_horizon)}`],
+      ["Features", `ventanas ${detail.protocol.feature_windows.join(", ")}`],
+      ["Referencias", detail.protocol.references.join(", ")],
+      ["Archivo", `${detail.protocol.archive_id}`],
+      ["Archivo semántico", detail.protocol.archive_semantic_sha256],
+      ["Archivo velas", detail.protocol.archive_candles_sha256],
+      ["Código", detail.provenance.code_material_sha256],
+      ["Archivos de código", detail.provenance.code_material_files.join(", ")],
+      ["Disponibilidad", `${detail.protocol.availability_basis}`
+        + ` · strict_pit_verified=${String(detail.protocol.strict_pit_verified)}`],
+      ["Criterio", `mejora relativa de MSE ≥ ${mlResearchPercent(
+        detail.protocol.criteria.minimum_relative_improvement,
+      )} frente a las tres referencias, límites > 0 y mejora en cada fold`],
+      ["Reservado", `${detail.protocol.reserved_start_date} · no evaluado`],
+      ["Predicciones OOS", formatInteger(detail.prediction_rows)],
+      ["Fits de desarrollo", formatInteger(detail.development_fits)],
+      ["Decisión sellada", `${detail.decision} · ${detail.decision_reason}`],
+      ["Entorno", `Python ${detail.environment.python_version}`
+        + ` · scikit-learn ${detail.environment.scikit_learn_version}`
+        + ` · numpy ${detail.environment.numpy_version}`],
+    );
+    return rows;
+  }
   return rows;
 }
 
@@ -1381,6 +1496,17 @@ function experimentsEvidence(payload) {
     return container;
   }
   const detail = payload.payload;
+  if (detail.family === "volatility") {
+    container.append(
+      createElement("p", "patterns-event-title", "Métricas pooled (MSE/MAE)"),
+      experimentsVolatilityScoresTable(detail.pooled_scores),
+      createElement("p", "patterns-event-title", "Comparaciones pareadas del run"),
+      experimentsComparisonsTable(detail.pooled_comparisons),
+      createElement("p", "patterns-event-title", "Folds"),
+      experimentsFoldsTable("volatility", detail.folds),
+    );
+    return container;
+  }
   container.append(
     createElement("p", "patterns-event-title", "Métricas pooled"),
     experimentsScoresTable(detail.pooled_scores),
@@ -1769,6 +1895,13 @@ function experimentsComparisonRow(label, left, right) {
   ];
 }
 
+function experimentsVolatilityFeatures(item) {
+  const protocol = item.payload.protocol;
+  if (!protocol || item.payload.family !== "volatility") return null;
+  return `ventanas ${(protocol.feature_windows || []).join(", ")}`
+    + ` · refs ${(protocol.references || []).join(", ")}`;
+}
+
 function experimentsComparisonRows(payload) {
   return {
     family: payload.context.family,
@@ -1781,7 +1914,8 @@ function experimentsComparisonRows(payload) {
       ["Horizonte del target", experimentsComparisonValue(
         payload,
         (item) => item.payload.protocol?.target?.horizon_intervals
-          ?? item.payload.report?.protocol?.target?.horizon_intervals,
+          ?? item.payload.report?.protocol?.target?.horizon_intervals
+          ?? item.payload.protocol?.target_horizon,
       )],
       ["Ventana de decisión", experimentsComparisonValue(
         payload,
@@ -1796,8 +1930,12 @@ function experimentsComparisonRows(payload) {
       )],
       ["Features", experimentsComparisonValue(
         payload,
-        (item) => (item.payload.protocol?.feature_columns
-          || item.payload.report?.protocol?.feature_columns || []).join(", "),
+        (item) => {
+          const features = experimentsVolatilityFeatures(item);
+          if (features) return features;
+          return (item.payload.protocol?.feature_columns
+            || item.payload.report?.protocol?.feature_columns || []).join(", ");
+        },
       )],
       ["Dataset", experimentsComparisonValue(
         payload,
@@ -1814,12 +1952,21 @@ function experimentsComparisonRows(payload) {
       )],
       ["Elegibilidad declarada", experimentsComparisonValue(
         payload,
-        (item) => (item.payload.folds || item.payload.report?.development?.folds || [])
-          .map((fold) => `fold ${fold.fold}: purge ${fold.purged_excluded},`
-            + ` embargo ${fold.embargo_excluded},`
-            + ` inelegibles ${fold.ineligible_excluded ?? "—"},`
-            + ` funding no disp. ${fold.funding_unavailable_excluded ?? "—"}`)
-          .join("; "),
+        (item) => {
+          const folds = item.payload.folds || item.payload.report?.development?.folds || [];
+          return folds.map((fold) => {
+            const parts = [`fold ${fold.fold}: train ${fold.train_rows ?? "—"}`,
+              `eval ${fold.evaluation_rows ?? fold.validation_rows ?? "—"}`];
+            if (fold.purged_excluded !== undefined) parts.push(`purge ${fold.purged_excluded}`);
+            if (fold.embargo_excluded !== undefined) parts.push(`embargo ${fold.embargo_excluded}`);
+            if (fold.ineligible_excluded !== undefined) parts.push(`inelegibles ${fold.ineligible_excluded}`);
+            if (fold.funding_unavailable_excluded !== undefined) {
+              parts.push(`funding no disp. ${fold.funding_unavailable_excluded}`);
+            }
+            if (fold.segments !== undefined) parts.push(`segmentos ${fold.segments}`);
+            return parts.join(", ");
+          }).join("; ");
+        },
       )],
       ["Train por fold", experimentsComparisonValue(
         payload,
@@ -1830,7 +1977,7 @@ function experimentsComparisonRows(payload) {
       ["Eval por fold", experimentsComparisonValue(
         payload,
         (item) => (item.payload.folds || item.payload.report?.development?.folds || [])
-          .map((fold) => `fold ${fold.fold}: ${fold.evaluation_rows}`)
+          .map((fold) => `fold ${fold.fold}: ${fold.evaluation_rows ?? fold.validation_rows}`)
           .join("; "),
       )],
       ["Disponibilidad / PIT", experimentsComparisonValue(
@@ -1849,14 +1996,20 @@ function experimentsComparisonRows(payload) {
         (item) => {
           const criteria = item.payload.protocol?.criteria
             || item.payload.report?.protocol?.criteria;
-          return criteria
-            ? `mejora relativa ≥ ${criteria.min_relative_brier_improvement}`
-            : "—";
+          if (!criteria) return "—";
+          if (criteria.minimum_relative_improvement !== undefined) {
+            return `mejora relativa de MSE ≥ ${criteria.minimum_relative_improvement}`
+              + ` · ${criteria.require_positive_lower_bounds ?? 3} límites > 0`;
+          }
+          return `mejora relativa ≥ ${criteria.min_relative_brier_improvement}`;
         },
       )],
       ["Holdout", experimentsComparisonValue(
         payload,
         (item) => {
+          if (item.payload.family === "volatility") {
+            return "not_evaluated · fits 0 · período reservado no evaluado";
+          }
           if (item.payload.holdout) {
             return `${item.payload.holdout.status} · ${item.payload.holdout.accesses} accesos`
               + ` · ${item.payload.holdout.fits} fits`;

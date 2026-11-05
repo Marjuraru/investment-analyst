@@ -846,12 +846,24 @@ async function scenarioDecisionLiterals() {
     },
   };
   const funding = { payload: { family: "funding", decision: "no_demonstrated_increment" } };
+  const volatility = { payload: { family: "volatility", decision: "no_demonstrated_increment" } };
+  const volatilityEvidence = {
+    payload: { family: "volatility", decision: "development_evidence" },
+  };
   const unknown = { payload: { family: "funding", decision: null } };
   assertEquals(
     ctx.context.experimentsDecision(baseline).label, "No se demostró ventaja", "baseline",
   );
   assertEquals(
     ctx.context.experimentsDecision(funding).label, "No se demostró incremento", "funding",
+  );
+  assertEquals(
+    ctx.context.experimentsDecision(volatility).label, "No se demostró incremento", "volatility",
+  );
+  assertEquals(
+    ctx.context.experimentsDecision(volatilityEvidence).label,
+    "Evidencia de desarrollo; no promovida",
+    "volatility evidence is not promoted",
   );
   assertEquals(ctx.context.experimentsDecision(unknown).tone, "bad", "unknown is explicit");
   return "decision_literals";
@@ -952,7 +964,6 @@ def test_experiment_explorer_has_no_html_injection_and_no_aggregate_scoring() ->
     assert block.count("/api/v1/research/experiments?") == 1
     assert block.count("/api/v1/research/experiment-report?") == 2
     assert "initializeExperimentsExplorer();" in block
-    assert "máscara de funding" in block
-    assert "No es una comparación pareada" in block
+    assert "No es una comparación pareada entre familias" in block
     assert "no se calcula delta, significancia cruzada," in block
     assert block.count("mejor estudio") <= 2

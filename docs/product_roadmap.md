@@ -118,11 +118,11 @@ no se promueve un predictor; V1-U4 permanece `UNKNOWN`. `PREDICTIVE-RESEARCH` si
 
 `RESEARCH-EXPERIMENTS-DELIVERY`/#407 (`ADVANCES`) convierte los artefactos ya sellados en un recorrido
 local completo: el panel de investigación descubre los estudios del activo por familia y páginas,
-abre el detalle verificado de baseline o funding y contrasta hasta dos condiciones lado a lado con
-exportación de la proyección consultada. No se crea un dashboard paralelo, un endpoint de comparación
-ni un artefacto persistente; no hay delta entre estudios, ranking, significancia cruzada ni «mejor
-estudio», y se declara que baseline y funding no son una comparación pareada porque el entrenamiento
-difiere por la máscara de funding. No se entrena, no se adquiere nada y el holdout sigue cerrado.
+abre el detalle verificado de baseline, funding o volatility y contrasta hasta dos condiciones lado
+a lado con exportación de la proyección consultada. No se crea un dashboard paralelo, un endpoint de
+comparación ni un artefacto persistente; no hay delta entre estudios, ranking, significancia cruzada
+ni «mejor estudio», y se declara que las familias no son una comparación pareada porque targets,
+máscaras y protocolos difieren. No se entrena, no se adquiere nada y el holdout sigue cerrado.
 `PREDICTIVE-RESEARCH` permanece `NEXT`, `FUNDAMENTALS-COVERAGE` sigue `PLANNED` y V1-U4 sigue
 `UNKNOWN`.
 
@@ -148,6 +148,13 @@ con límites inferiores positivos, pero el fold 2 no supera a `persistence_30d` 
 frente a 1,6297878184531283; −1,17 %), por lo que el criterio preregistrado devuelve
 `no_demonstrated_increment`. No se ajusta nada, el holdout permanece cerrado, no se promueve un
 predictor y V1-U4 sigue `UNKNOWN`.
+
+`VOLATILITY-EXPERIMENTS-DELIVERY`/#422 (`ADVANCES`) expone ese run sellado como tercer miembro
+cerrado del recorrido local (`family=volatility`): listado paginado por activo, detalle verificado
+con folds, MSE/MAE, comparaciones pareadas y el motivo del fold 2, y descarga
+`volatility-44b61556….json`. Sin entrenar, sin promover, sin abrir el holdout ni el dataset y sin
+reabrir el experimento. La readiness sigue cubriendo sólo el experimento direccional cripto.
+`PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`.
 
 La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de crecimiento viven en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md).
