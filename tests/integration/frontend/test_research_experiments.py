@@ -78,6 +78,29 @@ from investment_analyst.research.ml_models import (
     MlTimings,
 )
 from investment_analyst.research.ml_report_service import MlResearchReportService
+from investment_analyst.research.volatility_models import (
+    MANIFEST_FILE_NAME as VOLATILITY_MANIFEST_FILE_NAME,
+)
+from investment_analyst.research.volatility_models import (
+    PREDICTIONS_FILE_NAME as VOLATILITY_PREDICTIONS_FILE_NAME,
+)
+from investment_analyst.research.volatility_models import (
+    PROTOCOL_FILE_NAME as VOLATILITY_PROTOCOL_FILE_NAME,
+)
+from investment_analyst.research.volatility_models import (
+    REPORT_FILE_NAME as VOLATILITY_REPORT_FILE_NAME,
+)
+from investment_analyst.research.volatility_models import (
+    VolatilityArtifactFile,
+    VolatilityComparison,
+    VolatilityCriteria,
+    VolatilityFoldResult,
+    VolatilityManifest,
+    VolatilityMetric,
+    VolatilityModel,
+    VolatilityProtocol,
+    VolatilityReport,
+)
 
 _ASSET = "crypto:btc-usd"
 _OTHER_ASSET = "equity:us:aapl"
@@ -440,6 +463,313 @@ def _funding_run(root: Path, *, asset_id: str = _ASSET, run_id: UUID | None = No
     return resolved
 
 
+def _volatility_descriptor(path: Path) -> VolatilityArtifactFile:
+    payload = path.read_bytes()
+    return VolatilityArtifactFile(name=path.name, sha256=_sha(payload), bytes=len(payload))
+
+
+def _volatility_protocol(*, asset_id: str = _ASSET) -> VolatilityProtocol:
+    from investment_analyst.research.volatility_models import (
+        PREREGISTERED_FOLDS,
+        REFERENCE_MODELS,
+        VolatilityHoldoutPolicy,
+        VolatilityModelParameters,
+        VolatilityResampling,
+    )
+
+    return VolatilityProtocol(
+        asset_id=asset_id,
+        source_id="coinbase-exchange:btc-usd:daily-candles",
+        archive_id=_DATASET_ID,
+        archive_semantic_sha256=_MANIFEST_DATASET,
+        archive_candles_sha256=_CONTENT,
+        archive_retrieved_at=_CREATED_AT,
+        archive_request_start=date(2019, 1, 1),
+        archive_request_end=date(2025, 12, 31),
+        study_cut_at=_CREATED_AT,
+        decision_start=date(2020, 1, 1),
+        decision_end=date(2025, 12, 25),
+        decision_count=2186,
+        reserved_start_index=1748,
+        reserved_start_date=date(2024, 10, 14),
+        folds=PREREGISTERED_FOLDS,
+        feature_windows=(1, 7, 30),
+        reference_window=5,
+        target_horizon=5,
+        epsilon=Decimal("1E-12"),
+        model=VolatilityModelParameters(),
+        references=REFERENCE_MODELS,
+        criteria=VolatilityCriteria(),
+        resampling=VolatilityResampling(),
+        holdout=VolatilityHoldoutPolicy(),
+        hypothesis="Synthetic volatility hypothesis for the sealed reader test.",
+        limitations=("Retrospectiva sintética.",),
+    )
+
+
+def _volatility_run(root: Path, *, asset_id: str = _ASSET, run_id: UUID | None = None) -> UUID:
+    from investment_analyst.research.volatility_models import (
+        VolatilityArtifactStatus,
+        VolatilityPredictionRecord,
+        VolatilityReportCounts,
+        decision_instant,
+        volatility_row_id,
+        volatility_sample_key,
+    )
+
+    resolved = run_id or uuid4()
+    run_dir = root / str(resolved)
+    run_dir.mkdir(parents=True)
+    protocol = _volatility_protocol(asset_id=asset_id)
+    (run_dir / VOLATILITY_PROTOCOL_FILE_NAME).write_bytes(_canonical(protocol))
+    protocol_descriptor = _volatility_descriptor(run_dir / VOLATILITY_PROTOCOL_FILE_NAME)
+    errors = {
+        1: {
+            "ridge": "0.2",
+            "persistence_5d": "0.5",
+            "persistence_30d": "0.5",
+            "training_mean": "0.5",
+        },
+        2: {
+            "ridge": "0.5",
+            "persistence_5d": "0.6",
+            "persistence_30d": "0.2",
+            "training_mean": "0.6",
+        },
+        3: {
+            "ridge": "0.2",
+            "persistence_5d": "0.5",
+            "persistence_30d": "0.5",
+            "training_mean": "0.5",
+        },
+    }
+    records = []
+    for fold in (1, 2, 3):
+        for offset in range(6):
+            day = date(2020, 1, 1 + ((fold - 1) * 6 + offset))
+            sample_key = volatility_sample_key(
+                asset_id=_ASSET,
+                source_id="coinbase-exchange:btc-usd:daily-candles",
+                decision_at=decision_instant(day),
+            )
+            target = Decimal("-8.5")
+            for model in (
+                VolatilityModel.RIDGE,
+                VolatilityModel.PERSISTENCE_5D,
+                VolatilityModel.PERSISTENCE_30D,
+                VolatilityModel.TRAINING_MEAN,
+            ):
+                estimate = target + Decimal(errors[fold][model.value])
+                records.append(
+                    VolatilityPredictionRecord(
+                        sample_key=sample_key,
+                        row_id=volatility_row_id(
+                            sample_key=sample_key,
+                            feature_hash=_CONTENT,
+                            target_hash=_MANIFEST_DATASET,
+                            feature_bar_ids=(_DATASET_ID,),
+                            target_bar_ids=(_BUNDLE_ID,),
+                        ),
+                        decision_at=decision_instant(day),
+                        fold=fold,
+                        model=model,
+                        target=target,
+                        estimate=estimate,
+                        squared_error=(estimate - target) ** 2,
+                        absolute_error=abs(estimate - target),
+                    )
+                )
+    from investment_analyst.research.volatility_models import ALL_MODELS
+
+    records.sort(
+        key=lambda item: (
+            item.fold,
+            item.decision_at,
+            str(item.sample_key),
+            [model for model in ALL_MODELS].index(item.model),
+        )
+    )
+    lines = b"".join(
+        canonical_analytical_json(record.model_dump(mode="json")) + b"\n" for record in records
+    )
+    metric_rows = {1: 6, 2: 6, 3: 6}
+    del metric_rows
+    from decimal import localcontext
+
+    from investment_analyst.research.ml_models import metric_decimal
+    from investment_analyst.research.volatility_models import (
+        DECIMAL34,
+        MIN_RELATIVE_IMPROVEMENT,
+        REFERENCE_MODELS,
+    )
+
+    def _scores(fold: int | None) -> tuple[VolatilityMetric, ...]:
+        selected = [r for r in records if fold is None or r.fold == fold]
+        return tuple(
+            VolatilityMetric(
+                model=model,
+                rows=len([r for r in selected if r.model is model]),
+                mse=metric_decimal(
+                    sum(float(r.squared_error) for r in selected if r.model is model)
+                    / len([r for r in selected if r.model is model])
+                ),
+                mae=metric_decimal(
+                    sum(float(r.absolute_error) for r in selected if r.model is model)
+                    / len([r for r in selected if r.model is model])
+                ),
+            )
+            for model in ALL_MODELS
+        )
+
+    def _relative(model_mse: Decimal, reference_mse: Decimal) -> Decimal:
+        with localcontext(DECIMAL34):
+            return (reference_mse - model_mse) / reference_mse  # type: ignore[operator]
+
+    def _fold(fold: int) -> VolatilityFoldResult:
+        scores = _scores(fold)
+        mapping = {metric.model: metric for metric in scores}
+        return VolatilityFoldResult(
+            fold=fold,
+            train_rows=6 * fold,
+            validation_rows=6,
+            train_embargo_excluded=0,
+            train_ineligible_excluded=0,
+            validation_embargo_excluded=5,
+            validation_ineligible_excluded=0,
+            segments=1,
+            segment_lengths=(6,),
+            scores=scores,
+            comparisons=tuple(
+                VolatilityComparison(
+                    reference=reference,
+                    fold=fold,
+                    model_mse=mapping[VolatilityModel.RIDGE].mse,
+                    reference_mse=mapping[reference].mse,
+                    absolute_improvement=mapping[reference].mse
+                    - mapping[VolatilityModel.RIDGE].mse,
+                    relative_improvement=_relative(
+                        mapping[VolatilityModel.RIDGE].mse, mapping[reference].mse
+                    ),
+                    mean_paired_difference=None,
+                    lower_bound=None,
+                    lower_bound_positive=None,
+                    admissible=True,
+                    improved_at_least_five_percent=(
+                        _relative(mapping[VolatilityModel.RIDGE].mse, mapping[reference].mse)
+                        >= MIN_RELATIVE_IMPROVEMENT
+                    ),
+                )
+                for reference in REFERENCE_MODELS
+            ),
+            diagnostics=(f"fold-{fold}-ridge-svd",),
+        )
+
+    folds = (_fold(1), _fold(2), _fold(3))
+    pooled_scores = _scores(None)
+    pooled_mapping = {metric.model: metric for metric in pooled_scores}
+    ridge = sorted(
+        [r for r in records if r.model is VolatilityModel.RIDGE],
+        key=lambda item: (item.fold, str(item.sample_key)),
+    )
+    pooled_comparisons = tuple(
+        VolatilityComparison(
+            reference=reference,
+            model_mse=pooled_mapping[VolatilityModel.RIDGE].mse,
+            reference_mse=pooled_mapping[reference].mse,
+            absolute_improvement=pooled_mapping[reference].mse
+            - pooled_mapping[VolatilityModel.RIDGE].mse,
+            relative_improvement=_relative(
+                pooled_mapping[VolatilityModel.RIDGE].mse, pooled_mapping[reference].mse
+            ),
+            mean_paired_difference=metric_decimal(
+                sum(
+                    float(other.squared_error) - float(first.squared_error)
+                    for first, other in zip(
+                        ridge,
+                        sorted(
+                            [r for r in records if r.model is reference],
+                            key=lambda item: (item.fold, str(item.sample_key)),
+                        ),
+                        strict=True,
+                    )
+                )
+                / len(ridge)
+            ),
+            lower_bound=Decimal("0.01"),
+            lower_bound_positive=True,
+            admissible=True,
+            improved_at_least_five_percent=(
+                _relative(pooled_mapping[VolatilityModel.RIDGE].mse, pooled_mapping[reference].mse)
+                >= MIN_RELATIVE_IMPROVEMENT
+            ),
+        )
+        for reference in REFERENCE_MODELS
+    )
+    from investment_analyst.research.volatility_evaluation import decide
+
+    decision, reason = decide(folds, pooled_comparisons)
+    report = VolatilityReport(
+        run_id=resolved,
+        status=VolatilityArtifactStatus.COMPLETED,
+        protocol_sha256=protocol_descriptor.sha256,
+        archive_id=protocol.archive_id,
+        archive_semantic_sha256=protocol.archive_semantic_sha256,
+        archive_candles_sha256=protocol.archive_candles_sha256,
+        archive_retrieved_at=protocol.archive_retrieved_at,
+        code_material_sha256=_CODE,
+        code_material_files=("volatility_models.py", "volatility_export.py"),
+        environment=_ENVIRONMENT,
+        criteria=VolatilityCriteria(),
+        decision=decision,
+        decision_reason=reason,
+        folds=folds,
+        pooled_scores=pooled_scores,
+        pooled_comparisons=pooled_comparisons,
+        counts=VolatilityReportCounts(
+            planned_decisions=2186,
+            constructed_decisions=1748,
+            reserved_decisions_not_constructed=438,
+            feature_ready=1748,
+            target_ready=1737,
+            candles_read=2557,
+        ),
+        prediction_rows=len(records),
+        development_fits=3,
+        fits_executed_this_invocation=3,
+        resumed_from_progress=False,
+        timings=MlTimings(
+            read_seconds=Decimal("0.5"),
+            fit_seconds=Decimal("2.5"),
+            evaluation_seconds=Decimal("0.5"),
+            total_seconds=Decimal("3.5"),
+        ),
+        peak_rss_bytes=214_962_176,
+    )
+    (run_dir / VOLATILITY_REPORT_FILE_NAME).write_bytes(_canonical(report))
+    report_descriptor = _volatility_descriptor(run_dir / VOLATILITY_REPORT_FILE_NAME)
+    (run_dir / VOLATILITY_PREDICTIONS_FILE_NAME).write_bytes(lines)
+    predictions_descriptor = _volatility_descriptor(run_dir / VOLATILITY_PREDICTIONS_FILE_NAME)
+    manifest = VolatilityManifest(
+        run_id=resolved,
+        archive_id=protocol.archive_id,
+        archive_semantic_sha256=protocol.archive_semantic_sha256,
+        archive_candles_sha256=protocol.archive_candles_sha256,
+        code_material_sha256=_CODE,
+        code_material_files=report.code_material_files,
+        environment=_ENVIRONMENT,
+        criteria=protocol.criteria,
+        protocol=protocol_descriptor,
+        predictions=predictions_descriptor,
+        report=report_descriptor,
+        root_bytes=(
+            protocol_descriptor.bytes + predictions_descriptor.bytes + report_descriptor.bytes
+        ),
+        created_at=_CREATED_AT,
+    )
+    (run_dir / VOLATILITY_MANIFEST_FILE_NAME).write_bytes(_canonical(manifest))
+    return resolved
+
+
 @contextmanager
 def _server(application: AaplLocalWebApplication) -> Iterator[str]:
     server = AaplLocalHttpServer(("127.0.0.1", 0), cast(AaplLocalWebApplication, application))
@@ -477,33 +807,41 @@ def _post(root: str, path: str, query: str) -> tuple[int, dict[str, object]]:
 
 
 @pytest.fixture()
-def roots(tmp_path: Path) -> tuple[Path, Path]:
+def roots(tmp_path: Path) -> tuple[Path, Path, Path]:
     baseline = tmp_path / "ml-baseline-validation"
     funding = tmp_path / "ml-funding-validation"
+    volatility = tmp_path / "ml-volatility-validation"
     baseline.mkdir()
     funding.mkdir()
-    return baseline, funding
+    volatility.mkdir()
+    return baseline, funding, volatility
 
 
-def _application(roots: tuple[Path, Path], *, configured: bool = True) -> AaplLocalWebApplication:
-    baseline, funding = roots
+def _application(roots: tuple[Path, ...], *, configured: bool = True) -> AaplLocalWebApplication:
+    baseline, funding, *rest = roots
+    volatility = rest[0] if rest else funding.parent / "ml-volatility-validation"
     reports = MlResearchReportService(baseline)
     return AaplLocalWebApplication(
         cast(object, _CatalogController()),
         None,
         ml_reports=reports,
         experiment_reports=(
-            ExperimentReportService(baseline_reports=reports, funding_root=funding)
+            ExperimentReportService(
+                baseline_reports=reports,
+                funding_root=funding,
+                volatility_root=volatility,
+            )
             if configured
             else None
         ),
     )
 
 
-def test_listing_endpoint_pages_through_both_families(roots: tuple[Path, Path]) -> None:
-    baseline, funding = roots
+def test_listing_endpoint_pages_through_both_families(roots: tuple[Path, ...]) -> None:
+    baseline, funding, volatility = roots[0], roots[1], roots[2]
     baseline_id = _baseline_run(baseline)
     funding_id = _funding_run(funding)
+    volatility_id = _volatility_run(volatility)
     with _server(_application(roots)) as root:
         first_status, first = _get(
             root, "/api/v1/research/experiments", f"asset_id={_ASSET}&limit=1"
@@ -513,27 +851,42 @@ def test_listing_endpoint_pages_through_both_families(roots: tuple[Path, Path]) 
             "/api/v1/research/experiments",
             f"asset_id={_ASSET}&limit=1&cursor={first['next_cursor']}",
         )
+        third_status, third = _get(
+            root,
+            "/api/v1/research/experiments",
+            f"asset_id={_ASSET}&limit=1&cursor={second['next_cursor']}",
+        )
 
-    assert (first_status, second_status) == (200, 200)
+    assert (first_status, second_status, third_status) == (200, 200, 200)
     assert first["schema_version"] == "research-experiment-list-v1"
     assert first["context"] == {"asset_id": _ASSET, "family": "all", "limit": 1}
     first_items = cast(list[dict[str, object]], first["items"])
     second_items = cast(list[dict[str, object]], second["items"])
-    assert len(first_items) == 1 and len(second_items) == 1
-    assert {(item["family"], item["run_id"]) for item in first_items + second_items} == {
+    third_items = cast(list[dict[str, object]], third["items"])
+    assert len(first_items) == 1 and len(second_items) == 1 and len(third_items) == 1
+    assert {
+        (item["family"], item["run_id"]) for item in first_items + second_items + third_items
+    } == {
         ("baseline", str(baseline_id)),
         ("funding", str(funding_id)),
+        ("volatility", str(volatility_id)),
     }
-    assert second["next_cursor"] is None
+    assert third["next_cursor"] is None
     assert {root_state["status"] for root_state in first["roots"]} == {"available"}
+    assert [root_state["family"] for root_state in first["roots"]] == [
+        "baseline",
+        "funding",
+        "volatility",
+    ]
 
 
 def test_report_endpoint_serves_both_families_and_preserves_decimal_text(
-    roots: tuple[Path, Path],
+    roots: tuple[Path, ...],
 ) -> None:
-    baseline, funding = roots
+    baseline, funding, volatility = roots[0], roots[1], roots[2]
     baseline_id = _baseline_run(baseline)
     funding_id = _funding_run(funding)
+    volatility_id = _volatility_run(volatility)
     with _server(_application(roots)) as root:
         baseline_status, baseline_payload = _get(
             root,
@@ -545,8 +898,13 @@ def test_report_endpoint_serves_both_families_and_preserves_decimal_text(
             "/api/v1/research/experiment-report",
             f"asset_id={_ASSET}&family=funding&run_id={funding_id}",
         )
+        volatility_status, volatility_payload = _get(
+            root,
+            "/api/v1/research/experiment-report",
+            f"asset_id={_ASSET}&family=volatility&run_id={volatility_id}",
+        )
 
-    assert (baseline_status, funding_status) == (200, 200)
+    assert (baseline_status, funding_status, volatility_status) == (200, 200, 200)
     assert baseline_payload["schema_version"] == "research-experiment-report-view-v1"
     assert baseline_payload["payload"]["family"] == "baseline"  # type: ignore[index]
     assert baseline_payload["payload"]["report"]["schema_version"] == (  # type: ignore[index]
@@ -558,9 +916,21 @@ def test_report_endpoint_serves_both_families_and_preserves_decimal_text(
     encoded = json.dumps(funding_payload)
     assert "0.25094407714874845" in encoded
     assert str(funding) not in encoded
+    assert volatility_payload["payload"]["family"] == "volatility"  # type: ignore[index]
+    assert volatility_payload["payload"]["decision"] == (  # type: ignore[index]
+        "no_demonstrated_increment"
+    )
+    assert volatility_payload["payload"]["decision_reason"] == (  # type: ignore[index]
+        "fold 2: no positive improvement against persistence_30d"
+    )
+    assert volatility_payload["context"]["run_id"] == str(volatility_id)  # type: ignore[index]
+    assert volatility_payload["payload"]["holdout"]["status"] == "not_evaluated"  # type: ignore[index]
+    volatility_encoded = json.dumps(volatility_payload)
+    assert "predictions.jsonl" not in volatility_encoded
+    assert str(volatility) not in volatility_encoded
 
 
-def test_listing_endpoint_rejects_invalid_queries_and_methods(roots: tuple[Path, Path]) -> None:
+def test_listing_endpoint_rejects_invalid_queries_and_methods(roots: tuple[Path, ...]) -> None:
     _baseline_run(roots[0])
     with _server(_application(roots)) as root:
         post_status, post = _post(root, "/api/v1/research/experiments", f"asset_id={_ASSET}")
@@ -584,7 +954,7 @@ def test_listing_endpoint_rejects_invalid_queries_and_methods(roots: tuple[Path,
     assert cast(dict[str, object], post["error"])["code"] == "not_found"
 
 
-def test_report_endpoint_rejects_invalid_queries_and_methods(roots: tuple[Path, Path]) -> None:
+def test_report_endpoint_rejects_invalid_queries_and_methods(roots: tuple[Path, ...]) -> None:
     _funding_run(roots[1])
     run_id = uuid4()
     with _server(_application(roots)) as root:
@@ -610,10 +980,11 @@ def test_report_endpoint_rejects_invalid_queries_and_methods(roots: tuple[Path, 
     assert cast(dict[str, object], post["error"])["code"] == "not_found"
 
 
-def test_endpoints_map_missing_conflict_cursor_and_capacity(roots: tuple[Path, Path]) -> None:
-    baseline, funding = roots
+def test_endpoints_map_missing_conflict_cursor_and_capacity(roots: tuple[Path, ...]) -> None:
+    baseline, funding, volatility = roots[0], roots[1], roots[2]
     baseline_id = _baseline_run(baseline)
     funding_id = _funding_run(funding)
+    volatility_id = _volatility_run(volatility)
     with _server(_application(roots)) as root:
         missing_status, missing = _get(
             root,
@@ -630,6 +1001,11 @@ def test_endpoints_map_missing_conflict_cursor_and_capacity(roots: tuple[Path, P
             "/api/v1/research/experiment-report",
             f"asset_id={_ASSET}&family=funding&run_id={baseline_id}",
         )
+        volatility_family_status, volatility_family = _get(
+            root,
+            "/api/v1/research/experiment-report",
+            f"asset_id={_ASSET}&family=funding&run_id={volatility_id}",
+        )
         list_status, listing = _get(
             root, "/api/v1/research/experiments", f"asset_id={_ASSET}&limit=1"
         )
@@ -639,6 +1015,7 @@ def test_endpoints_map_missing_conflict_cursor_and_capacity(roots: tuple[Path, P
     assert mismatch_status == 409
     assert cast(dict[str, object], mismatch["error"])["code"] == "research_experiment_conflict"
     assert family_status == 404
+    assert volatility_family_status == 404
     assert list_status == 200
 
     cursor = listing["next_cursor"]
@@ -660,6 +1037,7 @@ def test_endpoints_map_missing_conflict_cursor_and_capacity(roots: tuple[Path, P
     capacity_service = ExperimentReportService(
         baseline_reports=MlResearchReportService(baseline),
         funding_root=crowded,
+        volatility_root=roots[2],
     )
     application = AaplLocalWebApplication(
         cast(object, _CatalogController()),
@@ -673,7 +1051,7 @@ def test_endpoints_map_missing_conflict_cursor_and_capacity(roots: tuple[Path, P
     del baseline_id
 
 
-def test_endpoints_report_conflict_when_not_configured(roots: tuple[Path, Path]) -> None:
+def test_endpoints_report_conflict_when_not_configured(roots: tuple[Path, ...]) -> None:
     with _server(_application(roots, configured=False)) as root:
         list_status, listing = _get(root, "/api/v1/research/experiments", f"asset_id={_ASSET}")
         report_status, report = _get(
@@ -687,7 +1065,7 @@ def test_endpoints_report_conflict_when_not_configured(roots: tuple[Path, Path])
         assert cast(dict[str, object], payload["error"])["code"] == ("research_experiment_conflict")
 
 
-def test_legacy_baseline_report_route_is_unchanged(roots: tuple[Path, Path]) -> None:
+def test_legacy_baseline_report_route_is_unchanged(roots: tuple[Path, ...]) -> None:
     baseline_id = _baseline_run(roots[0])
     with _server(_application(roots)) as root:
         status, payload = _get(

@@ -391,12 +391,19 @@ def test_route_records_the_volatility_baseline_without_promotion() -> None:
     assert "1,6297878184531283" in predictive
     assert "fold 2" in predictive
     assert "holdout" in predictive
-    assert "no se integra" in predictive.lower()
+    assert "recorrido local de investigación" in predictive
+    assert "family=volatility" in predictive
     assert "1,3076747311778731" in release_plan
     assert "fold 2" in release_plan
+    assert "VOLATILITY-EXPERIMENTS-DELIVERY" in release_plan
+    assert "family=volatility" in release_plan
     assert "route_transition:PREDICTIVE-RESEARCH:ADVANCES" in release_plan
     assert "36,48 %" in roadmap
+    assert "VOLATILITY-EXPERIMENTS-DELIVERY" in roadmap
+    assert "family=volatility" in roadmap
     assert "0 fits" in strategy
+    assert "Entrega local de la variación futura" in strategy
+    assert "family=volatility" in strategy
     items = _route_items(release_plan)
     _validate(items)
     assert _route_status(items, "PREDICTIVE-RESEARCH") == "NEXT"

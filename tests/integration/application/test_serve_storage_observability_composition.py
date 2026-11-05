@@ -64,6 +64,7 @@ _EXPECTED_OPTIONS = (
     "--workspace",
     "--ml-results-root",
     "--ml-funding-results-root",
+    "--ml-volatility-results-root",
     "--port",
     "--no-scheduler",
     "--schedule-at",
@@ -87,6 +88,7 @@ _EXPECTED_DESTINATIONS = (
     "memory_ceiling_mb",
     "ml_funding_results_root",
     "ml_results_root",
+    "ml_volatility_results_root",
     "no_schedule_intraday",
     "no_schedule_macro",
     "no_schedule_smv",
@@ -531,6 +533,10 @@ def test_public_cli_arguments_are_unchanged() -> None:
         Path.home() / ".local/share/investment-analyst/research/ml-funding-validation"
     )
     assert parser.parse_args([]).ml_funding_results_root.is_absolute()
+    assert parser.parse_args([]).ml_volatility_results_root == (
+        Path.home() / ".local/share/investment-analyst/research/volatility-baseline-research"
+    )
+    assert parser.parse_args([]).ml_volatility_results_root.is_absolute()
 
 
 def test_ml_results_root_rejects_a_relative_path() -> None:
@@ -538,6 +544,8 @@ def test_ml_results_root_rejects_a_relative_path() -> None:
         _script_module()._parser().parse_args(["--ml-results-root", "relative"])
     with pytest.raises(SystemExit):
         _script_module()._parser().parse_args(["--ml-funding-results-root", "relative"])
+    with pytest.raises(SystemExit):
+        _script_module()._parser().parse_args(["--ml-volatility-results-root", "relative"])
 
 
 def test_collector_uses_read_only_engine_and_a_single_writer(

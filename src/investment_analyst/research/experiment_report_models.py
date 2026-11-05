@@ -30,6 +30,17 @@ from investment_analyst.research.ml_funding_models import (
 )
 from investment_analyst.research.ml_models import MlEnvironment, MlTimings
 from investment_analyst.research.ml_report_models import MlResearchReportView
+from investment_analyst.research.volatility_models import (
+    ALL_MODELS,
+    REFERENCE_MODELS,
+    VolatilityComparison,
+    VolatilityDecision,
+    VolatilityFoldResult,
+    VolatilityHoldoutPolicy,
+    VolatilityMetric,
+    VolatilityProtocol,
+    VolatilityReportCounts,
+)
 
 EXPERIMENT_LIST_SCHEMA_VERSION = "research-experiment-list-v1"
 EXPERIMENT_REPORT_VIEW_SCHEMA_VERSION = "research-experiment-report-view-v1"
@@ -45,6 +56,8 @@ MAX_EXPERIMENT_PREDICTIONS_BYTES = 8 * 1024 * 1024
 MAX_EXPERIMENT_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_FUNDING_CACHE_ENTRIES = 4
 MAX_FUNDING_CACHE_BYTES = 2 * 1024 * 1024
+MAX_VOLATILITY_CACHE_ENTRIES = 4
+MAX_VOLATILITY_CACHE_BYTES = 2 * 1024 * 1024
 MAX_EXPORT_VIEW_BYTES = 1024 * 1024
 
 SOURCE_ID_NOTE = (
@@ -60,6 +73,17 @@ FUNDING_SOURCE_ID_NOTE = (
 FAMILY_LABELS: tuple[tuple[str, str], ...] = (
     ("baseline", "Baseline técnico (crypto-historical-5d-baselines-v1)"),
     ("funding", "Incremento de funding (crypto-historical-5d-funding-increment-v1)"),
+    ("volatility", "Variación futura (crypto-historical-log-variation-5d-v1)"),
+)
+
+VOLATILITY_SOURCE_ID_NOTE = (
+    "El protocolo de variación identifica asset_id y fuente Coinbase, pero la"
+    " vista no infiere venue ni abre el archivo histórico."
+)
+
+VOLATILITY_DECISION_LABELS: tuple[tuple[str, str], ...] = (
+    ("development_evidence", "Evidencia de desarrollo; no promovida"),
+    ("no_demonstrated_increment", "No se demostró incremento"),
 )
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -77,10 +101,11 @@ def experiment_export_file_name(family: ExperimentFamily, run_id: UUID) -> str:
 
 
 class ExperimentFamily(StrEnum):
-    """Closed discriminator for the two sealed study families."""
+    """Closed discriminator for the three sealed study families."""
 
     BASELINE = "baseline"
     FUNDING = "funding"
+    VOLATILITY = "volatility"
 
 
 class ExperimentFamilyFilter(StrEnum):
@@ -89,6 +114,7 @@ class ExperimentFamilyFilter(StrEnum):
     ALL = "all"
     BASELINE = "baseline"
     FUNDING = "funding"
+    VOLATILITY = "volatility"
 
 
 class ExperimentArtifactStatus(StrEnum):
@@ -283,8 +309,67 @@ class FundingExperimentPayload(ContractModel):
         return self
 
 
+class VolatilityProvenanceView(ContractModel):
+    """Exact archive and material references sealed inside one volatility run."""
+
+    archive_id: UUID
+    archive_semantic_sha256: str
+    archive_candles_sha256: str
+    code_material_sha256: str
+    code_material_files: tuple[NonEmptyStr, ...]
+    source_id: NonEmptyStr | None = None
+    source_id_note: NonEmptyStr = VOLATILITY_SOURCE_ID_NOTE
+
+    @model_validator(mode="after")
+    def validate_provenance(self) -> VolatilityProvenanceView:
+        for value, label in (
+            (self.archive_semantic_sha256, "archive_semantic_sha256"),
+            (self.archive_candles_sha256, "archive_candles_sha256"),
+            (self.code_material_sha256, "code_material_sha256"),
+        ):
+            _require_sha256(value, label)
+        if not self.code_material_files:
+            raise ValueError("provenance must name the hashed material files")
+        return self
+
+
+class VolatilityExperimentPayload(ContractModel):
+    """Variation detail copied from one fully verified sealed artifact."""
+
+    family: Literal[ExperimentFamily.VOLATILITY] = ExperimentFamily.VOLATILITY
+    protocol: VolatilityProtocol
+    provenance: VolatilityProvenanceView
+    environment: MlEnvironment
+    decision: VolatilityDecision
+    decision_reason: NonEmptyStr
+    decision_rows: int = Field(gt=0)
+    prediction_rows: int = Field(gt=0)
+    development_fits: int = Field(ge=0)
+    folds: tuple[VolatilityFoldResult, ...]
+    pooled_scores: tuple[VolatilityMetric, ...]
+    pooled_comparisons: tuple[VolatilityComparison, ...]
+    holdout: VolatilityHoldoutPolicy
+    timings: MlTimings
+    counts: VolatilityReportCounts
+    peak_rss_bytes: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> VolatilityExperimentPayload:
+        if len(self.folds) != 3 or tuple(item.fold for item in self.folds) != (1, 2, 3):
+            raise ValueError("volatility detail exposes the three sealed folds")
+        if tuple(metric.model for metric in self.pooled_scores) != ALL_MODELS:
+            raise ValueError("volatility detail exposes the candidate and three references")
+        if tuple(item.reference for item in self.pooled_comparisons) != REFERENCE_MODELS:
+            raise ValueError("volatility detail exposes the three sealed comparisons")
+        if any(item.fold is not None for item in self.pooled_comparisons):
+            raise ValueError("volatility pooled comparisons must not carry a fold")
+        if self.decision_rows != self.protocol.decision_count:
+            raise ValueError("decision rows must match the sealed protocol")
+        return self
+
+
 ExperimentPayload = Annotated[
-    BaselineExperimentPayload | FundingExperimentPayload,
+    BaselineExperimentPayload | FundingExperimentPayload | VolatilityExperimentPayload,
     Field(discriminator="family"),
 ]
 
@@ -314,6 +399,10 @@ class ExperimentReportView(ContractModel):
                 or report.artifact.created_at != self.context.created_at
             ):
                 raise ValueError("baseline payload disagrees with the query identity")
+            return self
+        if isinstance(self.payload, VolatilityExperimentPayload):
+            if self.payload.protocol.asset_id != self.context.asset_id:
+                raise ValueError("volatility protocol belongs to a different catalog asset")
             return self
         if self.payload.protocol.asset_id != self.context.asset_id:
             raise ValueError("funding protocol belongs to a different catalog asset")
@@ -360,7 +449,13 @@ __all__ = [
     "MAX_EXPORT_VIEW_BYTES",
     "MAX_FUNDING_CACHE_BYTES",
     "MAX_FUNDING_CACHE_ENTRIES",
+    "MAX_VOLATILITY_CACHE_BYTES",
+    "MAX_VOLATILITY_CACHE_ENTRIES",
     "MIN_EXPERIMENT_PAGE_LIMIT",
     "SOURCE_ID_NOTE",
+    "VOLATILITY_DECISION_LABELS",
+    "VOLATILITY_SOURCE_ID_NOTE",
+    "VolatilityExperimentPayload",
+    "VolatilityProvenanceView",
     "experiment_export_file_name",
 ]

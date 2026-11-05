@@ -2528,17 +2528,22 @@ class AaplLocalWebApplication:
 
     def ml_research_report(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate one explicit sealed-run query without provider or storage access."""
-        allowed = {"asset_id", "run_id"}
+        allowed = {"asset_id", "run_id", "ml_family"}
         if set(parameters) - allowed:
             raise ValueError("ML research report query contains unsupported parameters")
         descriptor = self._market_asset(_one_parameter(parameters, "asset_id", required=True))
         raw_run_id = _one_parameter(parameters, "run_id", required=True)
+        ml_family = _one_parameter(parameters, "ml_family", required=False)
         try:
             run_id = UUID(raw_run_id)
         except ValueError as error:
             raise ValueError("run_id must be a canonical UUID") from error
         if str(run_id) != raw_run_id:
             raise ValueError("run_id must be a canonical UUID")
+        if ml_family is not None and ml_family != "baseline":
+            raise ExperimentReportConflictError(
+                "the legacy report route only serves the baseline family"
+            )
         if self._ml_reports is None:
             raise MlReportConflictError("ML research reports are not configured")
         projection: MlResearchReportView = self._ml_reports.report(
@@ -3491,7 +3496,7 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             if parsed.path == "/api/v1/research/ml-report":
-                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=2)
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=3)
                 parameters = {key: tuple(values) for key, values in raw.items()}
                 self._send_json(
                     HTTPStatus.OK,

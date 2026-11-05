@@ -1138,9 +1138,10 @@ ajusta el criterio, no se elimina el fold, no se prueban otras ventanas, otro ac
   como esperanza condicional de varianza o PnL.
 - La disponibilidad sigue siendo `historical_reconstruction_assumed`, `strict_pit_verified=false`; no
   satisface el gate PIT observado. El período reservado no se evaluó y no se autoriza abrirlo.
-- La familia no se integra en el listado UI de baseline/funding ni en readiness; una superficie de
-  lectura exige un contrato explícito posterior. El siguiente PLAN decide si esta hipótesis se detiene
-  o si una validación confirmatoria separada merece un bloque propio; no se entrena por inercia.
+- El run vive verificado en el recorrido local de investigación (`research-experiment-list-v1` y
+  `research-experiment-report-view-v1` con `family=volatility`), sin entrenar, sin promover y sin abrir
+  el holdout. El siguiente PLAN decide si esta hipótesis se detiene o si una validación confirmatoria
+  separada merece un bloque propio; no se entrena por inercia.
 
 ### Comandos exactos
 
@@ -1172,6 +1173,26 @@ ops, sin symlinks ni solapamiento con la entrada u otro experimento.
   y protocolo preregistrado: no demostró ventaja y no abrió el holdout. El resultado no satisface el
   gate PIT observado ni autoriza promoción; el siguiente PLAN decide una hipótesis distinta o el
   cierre del experimento, sin tuning ni nuevos activos.
+
+## Contrato del lector local de variación
+
+El lector local de variación es read-only y verificado: descubre el run sellado por raíz
+`--ml-volatility-results-root` (default
+`~/.local/share/investment-analyst/research/volatility-baseline-research`), enumera sólo hijos
+directos con tope 256 por raíz y sin symlinks, lista sólo manifest/protocolo de la página con
+`research-experiment-list-v1` y filtra por activo de catálogo antes de hidratar. El detalle
+`research-experiment-report-view-v1` con `family=volatility` copia protocolo, resultados, folds,
+calibración Bootstrap, proveniencia y limitaciones sin recomputar evaluación, sin exponer
+predicciones por fila y sin abrir el archivo histórico. La descarga `volatility-<run_id>.json`
+reproduce exactamente la proyección verificada con límite 1 MiB.
+
+La caché nueva de volatility conserva 4 proyecciones / 2 MiB (baseline 8/2 MiB, funding 4/2 MiB;
+combinado 16/6 MiB); un cambio de contenido invalida aunque se preserven tamaño y mtime. La raíz
+ausente es `missing` explícito; capacidad excedida, cursor stale y artefacto incompatible fallan
+cerrados sin fallback. La composición inyecta el servicio extendido junto a las mismas instancias
+baseline/funding, sin duplicar caché de storage. `GET /api/v1/research/ml-report` conserva el
+contrato baseline por defecto: `ml_family` sólo admite `baseline` y cualquier otra familia responde
+409 sin consultar el artefacto.
 
 ## Contrato del consumidor futuro
 

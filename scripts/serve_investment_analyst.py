@@ -108,6 +108,9 @@ _DEFAULT_ML_RESULTS_ROOT = (
 _DEFAULT_ML_FUNDING_RESULTS_ROOT = (
     Path.home() / ".local/share/investment-analyst/research/ml-funding-validation"
 )
+_DEFAULT_ML_VOLATILITY_RESULTS_ROOT = (
+    Path.home() / ".local/share/investment-analyst/research/volatility-baseline-research"
+)
 
 
 class _DerivativesLocalController(AaplLocalController):
@@ -208,6 +211,11 @@ def _parser() -> argparse.ArgumentParser:
         "--ml-funding-results-root",
         type=_absolute_path,
         default=_DEFAULT_ML_FUNDING_RESULTS_ROOT,
+    )
+    parser.add_argument(
+        "--ml-volatility-results-root",
+        type=_absolute_path,
+        default=_DEFAULT_ML_VOLATILITY_RESULTS_ROOT,
     )
     parser.add_argument("--port", type=_port, default=8765)
     parser.add_argument("--no-scheduler", action="store_true")
@@ -437,6 +445,7 @@ def _serve_after_lock(
     experiment_reports = ExperimentReportService(
         baseline_reports=ml_reports,
         funding_root=arguments.ml_funding_results_root,
+        volatility_root=arguments.ml_volatility_results_root,
     )
     web_application = AaplLocalWebApplication(
         controller,
