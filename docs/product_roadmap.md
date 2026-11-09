@@ -192,6 +192,15 @@ restituyó a deshabilitado, sin entrega financiera ni lectura humana observada. 
 descriptiva: no crea señales, recomendaciones ni ejecución. `PREDICTIVE-RESEARCH` es el único
 `NEXT`; `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` sin declararse `DONE`, `MET` ni cobertura completa.
 
+`SCREENING-DESCRIPTIVE-OUTCOMES`/#428 (`ADVANCES`, sin cierre) añade una lectura descriptiva de
+resultados posteriores para las dos reglas incrementales RSI y MACD: condiciones trivaluadas,
+horizonte explícito `forward_observed_close_intervals_5-v1` de seis cierres observados, grupos
+`matched`/`not_matched`/`not_evaluable`, ausencias tipadas y media/mediana sólo sobre resultados
+disponibles. No entrena, no busca parámetros, no abre el holdout, no genera señales ni
+recomendaciones y no persiste resultados. `V1-U3` y `V1-U4` permanecen `UNKNOWN`;
+`PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`, `FUNDAMENTALS-COVERAGE` y `ASSET-EXPANSION`
+siguen `PLANNED` y `DATA-CHASSIS` permanece `DONE`.
+
 > `COVERAGE-AND-ASSET-EXPANSION`/#385 (`ADVANCES`, sin cierre) amplía el screening fundamental y el
 > piloto operacional sin cerrar `FUNDAMENTALS-COVERAGE`. El catálogo pasa a cinco plantillas
 > `SILENT`: la nueva revisión anual comparte condiciones, umbrales, versiones y unidades con la
@@ -362,7 +371,7 @@ código en `main` con evidencia; no acredita `MET`, cobertura completa ni capaci
 | Función | Integrado | Por construir | Aceptación / límite actual |
 | --- | --- | --- | --- |
 | Evidencia PIT, runtime, catálogo, `available_at` y lineage | Sí: fuentes oficiales, almacenamiento append-only y lectura acotada. | Nuevas fuentes sólo si la pregunta demuestra la carencia y hay licencia/PIT/coste verificados. | Una fuente ausente no se sustituye ni se retrofecha. |
-| Métricas deterministas, screening y reconstrucción descriptiva de ciclos/patrones | Sí: RSI/MACD diarios persistidos, siete plantillas `SILENT` y estados/tramos/cruces reconstructivos al corte. | Resultados posteriores por detección/horizonte, sólo cuando exista el módulo autorizado. | La reconstrucción es descriptiva: no es señal, no se notificó en sus fechas históricas y no demuestra anticipación. |
+| Métricas deterministas, screening y reconstrucción descriptiva de ciclos/patrones | Sí: RSI/MACD diarios persistidos, siete plantillas `SILENT` y estados/tramos/cruces reconstructivos al corte. | Resultados posteriores por detección/horizonte, sólo cuando exista el módulo autorizado. | La reconstrucción es descriptiva: no es señal, no se notificó en sus fechas históricas y no demuestra anticipación. `SCREENING-DESCRIPTIVE-OUTCOMES`/#428 añade seis cierres observados y R descriptivo para las dos reglas incrementales, con n/ausencias y sin inferencia, ranking ni recomendación. |
 | `FeatureSetSpec`/`FeatureSetResult`/`extract_features` | Sí: proyección por dominio de métricas persistidas. | Selección histórica explícita, label y `label_available_at`. | No es matriz de entrenamiento ni dataset predictivo; preserva series y revisiones. |
 | Label/target y dataset PIT | Sí, parcial: constructor PIT read-only (#391), constructor reconstruido con archivo Coinbase (#393) y evaluación temporal aislada sobre esa muestra (#395). La muestra PIT observada sigue siendo insuficiente. | `PREDICTION-SHADOW-DELIVERY`: shadow, drift y promoción. Cualquier hipótesis nueva de datos/features requiere PLAN. | Un resultado ML no sustituye el gate PIT observado ni autoriza promoción. El dataset reconstruido es investigación retrospectiva condicional y conserva sus hashes y ausencias. |
 | Motor ML y validación fuera de muestra | Sí, evaluación aislada: `ml-baseline-evaluation-v1` con tres folds walk-forward, embargo de cinco días, bootstrap pareado y holdout cerrado. `ML-RESEARCH-RESULTS-DELIVERY`/#397 añade la consulta local read-only `ml-research-report-view-v1` sobre el run sellado. | `PREDICTION-SHADOW-DELIVERY`: shadow, drift, latencia/memoria, promoción y rollback. Cualquier hipótesis nueva requiere PLAN. | Ningún predictor fue promovido: la evaluación real fue `no_demonstrated_edge` con 0 accesos al holdout. La consulta verifica y presenta el artefacto; no reejecuta la investigación ni certifica ventaja. |

@@ -180,6 +180,49 @@ identidades de inputs. Un dato ausente no se convierte en cero ni en incumplimie
 - identidad reproducible;
 - timestamp de cálculo separado de disponibilidad.
 
+### Resultados posteriores descriptivos
+
+`descriptive-condition-outcomes-v1` es una lectura efímera, determinista y de solo lectura para las dos
+reglas incrementales `market.technical.rsi-incremental-low-review` y
+`market.technical.macd-incremental-positive-histogram-review`. No es un backtest de estrategia, no
+persiste resultados y no crea señales, candidatos, notificaciones ni recomendaciones.
+
+- **Entrada.** `asset_id`, `rule_id`, `expected_rule_fingerprint`, `start_date` y `end_date`
+  inclusivos y `known_at` UTC. El rango admite como máximo 90 días calendario y exige
+  `end_date 00:00 ≤ known_at < (end_date + 91 días) 00:00`.
+- **Condición.** Para cada período diario del índice se elige la primera revisión compatible
+  observada: contrato exacto de métrica, algoritmo, unidad, parámetros y calidad admitida, con
+  `available_at ≥ as_of` y `available_at ≤ known_at`. Un empate semánticamente distinto es
+  `ambiguous_metric`; una fila inválida es `invalid_metric`; la ausencia es `no_compatible_metric`.
+  La condición se evalúa retrospectivamente con la configuración actual congelada por fingerprint; no
+  se afirma que esa política existiera en cada fecha histórica.
+- **Horizonte.** `forward_observed_close_intervals_5-v1` elige las primeras seis barras diarias
+  publicadas cuyo `period_start ≥ eval_at`, `period_end ≤ known_at` y
+  `period_end ≤ eval_at + 30 días`, con el mismo activo, fuente, frecuencia y moneda. El resultado
+  `R = C5/C0 − 1` usa `Decimal` de 34 dígitos y `ROUND_HALF_EVEN`. Son cinco intervalos entre seis
+  cierres observados; no son cinco días naturales ni cinco sesiones garantizadas. Los huecos,
+  fines de semana y ausencias del proveedor se conservan y se declaran. Las barras Alpaca IEX no
+  exponen `period_start`/`period_end` nativos: la proyección usa `observed_at` como inicio y un
+  intervalo declarado de 24 h como fin.
+- **Estados.** `available`, `pending_window` (faltan barras y `known_at < eval_at + 30 días`),
+  `insufficient_observed_bars` (la ventana ya terminó), `ambiguous_close`, `invalid_close` y
+  `condition_not_evaluable`. Una barra ambigua o inválida no se salta para buscar otra. La falta de
+  barras no demuestra que el mercado no ocurrió.
+- **Grupos.** `matched`, `not_matched` y `not_evaluable` particionan exactamente los períodos
+  observados. Para los dos primeros se publican `n`, disponibles, ausencias por causa,
+  positivos/negativos/ceros y media/mediana de R sólo sobre `available`; un grupo vacío produce
+  `null`, nunca cero. No se calculan deltas, rankings, `p-values`, hit-rate, Sharpe, PnL ni señales;
+  las ventanas pueden solaparse y las muestras no son independientes.
+- **Identidad y límites.** UUID5 determinista sobre namespace
+  `investment-analyst/descriptive-condition-outcomes-v1`, `workspace_uuid`, request, fingerprint,
+  fuente/binding, versión del horizonte y evidencia material; no depende de rutas ni del reloj. La
+  respuesta se limita a 262 144 bytes y falla sin truncar. La lectura usa una apertura `READ_ONLY`,
+  índices paginados de hasta 256 entradas, como máximo 4 096 métricas relevantes, un único lote de
+  cierres filtrado con un máximo de 4 096 observaciones y cero escrituras de dominio. Las métricas
+  técnicas persistidas no incluyen un parámetro `frequency`; el lector exige una fuente diaria
+  registrada y rechaza cualquier frecuencia declarada distinta de `day_1`. Los precios
+  `adjustment-all` no son precios ejecutables y no incluyen dividendos, costes ni impuestos.
+
 ### Evento de alerta
 
 - resultado que lo originó;

@@ -982,6 +982,25 @@ evaluables. No consulta proveedores, no modifica resultados operativos y no esti
 precisión predictiva. Una regla modificada se utiliza automáticamente en el siguiente intento con
 evidencia nueva; los intentos ya recibidos permanecen intactos.
 
+Las tarjetas de las dos reglas incrementales ofrecen además **Resultados posteriores**. El panel
+muestra un rango inicial de 30 días (máximo 90), las fechas y el corte global visibles y el
+fingerprint de la configuración guardada. Sólo entonces consulta, bajo demanda,
+`GET /api/v1/screening/outcomes` con `asset_id`, `rule_id`, `expected_rule_fingerprint`,
+`start_date`, `end_date` y `known_at`. La consulta es de solo lectura, usa `READ_ONLY`, no escribe
+archivos en el servidor y devuelve `descriptive-condition-outcomes-v1` con
+`forward_observed_close_intervals_5-v1`: condiciones `matched`/`not_matched`/`not_evaluable`,
+`n` y ausencias por causa, tabla ordenada de período/condición/resultado/R/duración y divulgación de
+evidencia. La tabla se acota a 90 filas. La advertencia visible es «Revisión descriptiva de
+condiciones; no mide rentabilidad ejecutable ni valida predicción».
+
+La respuesta se rechaza con 400 si la solicitud es inválida, 409 si el fingerprint guardado cambió o
+se excede el presupuesto de 90 días/4 096 métricas/256 KiB y 422 si la regla, el activo o el perfil
+no están soportados. Un informe vacío es una ausencia explícita, no un error. Cambiar el activo, el
+corte, la regla o guardar una revisión invalida el resultado y la descarga, aborta la consulta en
+curso y descarta respuestas tardías; no se solicita automáticamente al abrir el panel ni por polling.
+**Descargar JSON** entrega únicamente el cuerpo JSON recibido (≤256 KiB) con `objectURL` revocado; el
+servidor no crea archivos. El replay anterior permanece separado e intacto.
+
 El panel **Notificaciones locales** consulta `GET /api/v1/candidate-notifications` bajo demanda.
 Muestra sólo el identificador del candidato, regla, activo y hora de la recepción local; no carga
 condiciones completas ni evidencia financiera. `POST /api/v1/candidate-notifications/acknowledge`

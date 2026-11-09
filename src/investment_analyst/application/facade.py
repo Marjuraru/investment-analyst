@@ -7,6 +7,15 @@ from uuid import UUID
 
 from pydantic import ConfigDict, model_validator
 
+from investment_analyst.alerts.analytical_models import AnalyticalScreeningRule
+from investment_analyst.alerts.descriptive_outcome_models import (
+    DescriptiveConditionOutcomeReport,
+    DescriptiveOutcomeRequest,
+)
+from investment_analyst.alerts.descriptive_outcomes import (
+    DescriptiveConditionOutcomeService,
+    DescriptiveOutcomeUnsupportedError,
+)
 from investment_analyst.analytics.aapl_daily_report_models import AaplDailyDiagnosticReport
 from investment_analyst.analytics.aapl_daily_report_service import AaplDailyReportService
 from investment_analyst.analytics.analytical_access_service import (
@@ -970,6 +979,22 @@ class InvestmentAnalystApplication:
             query=query,
             location=location,
         )
+
+    def query_descriptive_condition_outcomes(
+        self,
+        request: DescriptiveOutcomeRequest,
+        rule: AnalyticalScreeningRule,
+        *,
+        location: StorageLocationRequest,
+    ) -> DescriptiveConditionOutcomeReport:
+        """Return one read-only descriptive forward-outcome review."""
+        if location.workspace is None:
+            raise DescriptiveOutcomeUnsupportedError("descriptive outcomes require a workspace")
+        return DescriptiveConditionOutcomeService(
+            self._runtime,
+            location.workspace,
+            rule,
+        ).run(request)
 
     def query_universe_coverage(
         self,

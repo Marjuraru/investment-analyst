@@ -483,6 +483,461 @@ const SCREENING_OPERATOR_LABELS = Object.freeze({
   eq: "=",
 });
 
+const DESCRIPTIVE_OUTCOME_RULE_IDS = new Set([
+  "market.technical.rsi-incremental-low-review",
+  "market.technical.macd-incremental-positive-histogram-review",
+]);
+const DESCRIPTIVE_OUTCOME_MAX_BYTES = 262144;
+const DESCRIPTIVE_OUTCOME_DEFAULT_DAYS = 30;
+const DESCRIPTIVE_OUTCOME_MAX_DAYS = 90;
+const DESCRIPTIVE_OUTCOME_WARNING =
+  "Revisión descriptiva de condiciones; no mide rentabilidad ejecutable ni valida predicción.";
+const DESCRIPTIVE_OUTCOME_GROUP_LABELS = Object.freeze({
+  matched: "Cumplen",
+  not_matched: "No cumplen",
+  not_evaluable: "No evaluables",
+});
+const DESCRIPTIVE_OUTCOME_STATUS_LABELS = Object.freeze({
+  available: "Disponible",
+  pending_window: "Ventana abierta",
+  insufficient_observed_bars: "Barras insuficientes",
+  ambiguous_close: "Cierre ambiguo",
+  invalid_close: "Cierre inválido",
+  condition_not_evaluable: "Condición no evaluable",
+});
+const DESCRIPTIVE_OUTCOME_ERROR_MESSAGES = Object.freeze({
+  screening_outcome_fingerprint_changed:
+    "La configuración guardada cambió. Recarga las reglas antes de consultar.",
+  screening_outcome_budget_exceeded:
+    "La consulta excede el límite de 90 días, 4096 métricas o 256 KiB.",
+  screening_outcome_unsupported:
+    "Esta regla o activo no admite resultados posteriores.",
+  screening_outcome_unavailable:
+    "La evidencia disponible no permite construir la revisión descriptiva.",
+});
+const descriptiveOutcomeStates = new Map();
+
+function descriptiveOutcomeState(ruleId) {
+  let state = descriptiveOutcomeStates.get(ruleId);
+  if (!state) {
+    state = {
+      generation: 0,
+      controller: null,
+      requestKey: null,
+      payload: null,
+      text: null,
+      container: null,
+      download: null,
+    };
+    descriptiveOutcomeStates.set(ruleId, state);
+  }
+  return state;
+}
+
+function invalidateDescriptiveOutcome(ruleId) {
+  const state = descriptiveOutcomeStates.get(ruleId);
+  if (!state) return;
+  state.generation += 1;
+  state.requestKey = null;
+  state.payload = null;
+  state.text = null;
+  if (state.controller) {
+    state.controller.abort();
+    state.controller = null;
+  }
+  if (state.download) state.download.disabled = true;
+  if (state.container) {
+    state.container.replaceChildren(
+      createElement(
+        "p",
+        "screening-rule-error",
+        "Consulta invalidada por un cambio de activo, corte o regla.",
+      ),
+    );
+  }
+}
+
+function invalidateScreeningOutcomes() {
+  for (const ruleId of descriptiveOutcomeStates.keys()) {
+    invalidateDescriptiveOutcome(ruleId);
+  }
+}
+
+function descriptiveOutcomeDateFromCut(cut) {
+  const parsed = Date.parse(String(cut || "").trim());
+  if (Number.isNaN(parsed)) return null;
+  return new Date(parsed).toISOString().slice(0, 10);
+}
+
+function descriptiveOutcomeShiftDate(value, days) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+}
+
+function descriptiveOutcomeCalendarDays(start, end) {
+  const startMs = Date.parse(`${start}T00:00:00Z`);
+  const endMs = Date.parse(`${end}T00:00:00Z`);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return null;
+  return Math.floor((endMs - startMs) / 86400000) + 1;
+}
+
+function formatDescriptiveOutcomeReturn(value) {
+  const parsed = numericValue(value);
+  if (parsed === null) return "—";
+  const prefix = parsed > 0 ? "+" : "";
+  return `${prefix}${formatNumber(parsed, {
+    style: "percent",
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function formatDescriptiveOutcomeDuration(seconds) {
+  const parsed = numericValue(seconds);
+  if (parsed === null) return "—";
+  if (parsed >= 86400) {
+    return `${formatNumber(parsed / 86400, { maximumFractionDigits: 1 })} d`;
+  }
+  if (parsed >= 3600) {
+    return `${formatNumber(parsed / 3600, { maximumFractionDigits: 1 })} h`;
+  }
+  return `${formatNumber(parsed / 60, { maximumFractionDigits: 0 })} min`;
+}
+
+function descriptiveOutcomeConditionLabel(condition) {
+  if (condition.state === "not_evaluable") {
+    return `No evaluable · ${condition.reason || "sin evidencia"}`;
+  }
+  return condition.state === "met" ? "Cumple" : "No cumple";
+}
+
+function renderDescriptiveOutcomeEvidence(row, currency) {
+  const details = document.createElement("details");
+  details.append(createElement("summary", "", "Evidencia"));
+  const condition = row.condition;
+  details.append(
+    createElement(
+      "small",
+      "",
+      `Condición: ${condition.metric_key} · ${condition.state} · valor ${condition.observed_value ?? "—"} · as_of ${formatInstant(row.period_as_of)}`,
+    ),
+    createElement(
+      "small",
+      "",
+      `Métrica ${condition.metric_result_id ?? "—"} · disponible ${condition.available_at ? formatInstant(condition.available_at) : "—"} · calculada ${condition.computed_at ? formatInstant(condition.computed_at) : "—"}`,
+    ),
+  );
+  if (condition.explanation_es) {
+    details.append(createElement("small", "", condition.explanation_es));
+  }
+  if (row.outcome.reason) {
+    details.append(createElement("small", "", `Resultado: ${row.outcome.reason}`));
+  }
+  for (const close of row.outcome.closes || []) {
+    details.append(
+      createElement(
+        "small",
+        "",
+        `Cierre ${formatInstant(close.period_start)}–${formatInstant(close.period_end)} · ${close.close} ${currency} · disponible ${formatInstant(close.available_at)} · ${close.quality}`,
+      ),
+    );
+  }
+  return details;
+}
+
+function renderDescriptiveOutcomeReport(container, payload) {
+  container.replaceChildren();
+  if (!payload || payload.schema_version !== "descriptive-condition-outcomes-v1") {
+    container.append(
+      createElement("p", "screening-rule-error", "La revisión descriptiva no tiene el contrato esperado."),
+    );
+    return;
+  }
+  const summary = createElement("div", "screening-backtest-grid");
+  const metrics = [
+    [
+      "Períodos observados",
+      `${formatInteger(payload.observed_periods)} de ${formatInteger(payload.requested_calendar_days)}`,
+    ],
+    ["Cumplen", formatInteger(payload.matched_count)],
+    ["No cumplen", formatInteger(payload.not_matched_count)],
+    ["No evaluables", formatInteger(payload.not_evaluable_count)],
+  ];
+  for (const [label, value] of metrics) {
+    const item = createElement("span", "screening-backtest-metric");
+    item.append(createElement("small", "", label), createElement("strong", "", value));
+    summary.append(item);
+  }
+  container.append(
+    summary,
+    createElement(
+      "small",
+      "screening-backtest-range",
+      `Corte ${formatInstant(payload.request.known_at)} · ${payload.request.start_date}–${payload.request.end_date} · configuración ${payload.rule_fingerprint}`,
+    ),
+    createElement("small", "screening-backtest-limitation", DESCRIPTIVE_OUTCOME_WARNING),
+  );
+  for (const group of payload.groups || []) {
+    if (group.denominator === 0) continue;
+    const block = createElement("div", "screening-backtest-result");
+    block.append(
+      createElement(
+        "strong",
+        "",
+        `${DESCRIPTIVE_OUTCOME_GROUP_LABELS[group.group] || group.group} · n=${formatInteger(group.denominator)}`,
+      ),
+      createElement(
+        "small",
+        "",
+        `Disponibles ${formatInteger(group.available_count)} · ventana abierta ${formatInteger(group.pending_window_count)} · barras insuficientes ${formatInteger(group.insufficient_observed_bars_count)} · cierres ambiguos ${formatInteger(group.ambiguous_close_count)} · cierres inválidos ${formatInteger(group.invalid_close_count)} · no evaluables ${formatInteger(group.condition_not_evaluable_count)}`,
+      ),
+    );
+    if (group.available_count > 0) {
+      block.append(
+        createElement(
+          "small",
+          "",
+          `R medio ${formatDescriptiveOutcomeReturn(group.mean_return_5_intervals)} · mediana ${formatDescriptiveOutcomeReturn(group.median_return_5_intervals)} · positivos ${formatInteger(group.positives)} · negativos ${formatInteger(group.negatives)} · ceros ${formatInteger(group.zeros)}`,
+        ),
+      );
+    } else {
+      block.append(createElement("small", "", "Sin retornos observados; media y mediana ausentes."));
+    }
+    container.append(block);
+  }
+  const table = document.createElement("table");
+  table.className = "preferences-table";
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["Período", "Condición", "Resultado", "R (5 intervalos)", "Duración"]) {
+    headRow.append(createElement("th", "", label));
+  }
+  head.append(headRow);
+  const body = document.createElement("tbody");
+  for (const row of (payload.rows || []).slice(0, DESCRIPTIVE_OUTCOME_MAX_DAYS)) {
+    const tableRow = document.createElement("tr");
+    tableRow.append(
+      createElement("td", "", formatInstant(row.period_as_of)),
+      createElement("td", "", descriptiveOutcomeConditionLabel(row.condition)),
+      createElement(
+        "td",
+        "",
+        DESCRIPTIVE_OUTCOME_STATUS_LABELS[row.outcome.status] || row.outcome.status,
+      ),
+      createElement(
+        "td",
+        "",
+        formatDescriptiveOutcomeReturn(row.outcome.return_5_intervals),
+      ),
+      createElement(
+        "td",
+        "",
+        formatDescriptiveOutcomeDuration(row.outcome.elapsed_seconds),
+      ),
+    );
+    const evidenceRow = document.createElement("tr");
+    const evidenceCell = document.createElement("td");
+    evidenceCell.colSpan = 5;
+    evidenceCell.append(renderDescriptiveOutcomeEvidence(row, payload.currency));
+    evidenceRow.append(evidenceCell);
+    body.append(tableRow, evidenceRow);
+  }
+  table.append(head, body);
+  const tableWrapper = createElement("div", "chart-table-scroll");
+  tableWrapper.append(table);
+  container.append(tableWrapper);
+  if ((payload.rows || []).length === 0) {
+    container.append(
+      createElement(
+        "p",
+        "",
+        "Sin períodos observados en el rango y corte solicitados; la ausencia es explícita.",
+      ),
+    );
+  }
+}
+
+async function fetchDescriptiveOutcomes(query, signal) {
+  const response = await fetch(`/api/v1/screening/outcomes?${query.toString()}`, {
+    cache: "no-store",
+    signal,
+  });
+  const text = await response.text();
+  if (new TextEncoder().encode(text).byteLength > DESCRIPTIVE_OUTCOME_MAX_BYTES) {
+    throw new Error("La respuesta supera 256 KiB; no se descarga ni se trunca.");
+  }
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch (error) {
+    throw new Error("La respuesta de resultados posteriores no es JSON válido.");
+  }
+  if (!response.ok) {
+    const error = payload.error || {};
+    throw new Error(
+      DESCRIPTIVE_OUTCOME_ERROR_MESSAGES[error.code]
+        || ERROR_MESSAGES[error.code]
+        || error.message
+        || `Error HTTP ${response.status}`,
+    );
+  }
+  return { payload, text };
+}
+
+function downloadDescriptiveOutcomeJson(configuration, button) {
+  const state = descriptiveOutcomeState(configuration.rule.rule_id);
+  if (!state.payload || !state.text) {
+    button.disabled = true;
+    return;
+  }
+  if (new TextEncoder().encode(state.text).byteLength > DESCRIPTIVE_OUTCOME_MAX_BYTES) {
+    state.text = null;
+    state.payload = null;
+    button.disabled = true;
+    return;
+  }
+  const symbol = marketAssets[selectedMarketAsset]?.symbol || "activo";
+  const start = state.payload.request.start_date;
+  const end = state.payload.request.end_date;
+  downloadText(
+    `${safeFilePart(symbol)}-resultados-${safeFilePart(configuration.rule.rule_id)}-${start}-${end}.json`,
+    state.text,
+    "application/json",
+  );
+}
+
+async function runDescriptiveOutcomes(configuration, startInput, endInput, container, download, button) {
+  const ruleId = configuration.rule.rule_id;
+  const state = descriptiveOutcomeState(ruleId);
+  const knownAt = byId("report-known-at").value.trim() || defaultKnownAtCut();
+  const start = startInput.value;
+  const end = endInput.value;
+  const days = descriptiveOutcomeCalendarDays(start, end);
+  if (!start || !end || days === null || days < 1 || days > DESCRIPTIVE_OUTCOME_MAX_DAYS) {
+    container.replaceChildren(
+      createElement(
+        "p",
+        "screening-rule-error",
+        "El rango debe contener entre 1 y 90 días calendario inclusivos.",
+      ),
+    );
+    return;
+  }
+  const requestKey = JSON.stringify({
+    ruleId,
+    assetId: selectedMarketAsset,
+    fingerprint: configuration.fingerprint,
+    start,
+    end,
+    knownAt,
+  });
+  state.generation += 1;
+  const generation = state.generation;
+  if (state.controller) state.controller.abort();
+  const controller = new AbortController();
+  state.controller = controller;
+  state.requestKey = requestKey;
+  state.payload = null;
+  state.text = null;
+  download.disabled = true;
+  container.replaceChildren(createElement("p", "", "Leyendo condiciones y cierres persistidos…"));
+  setButtonBusy(button, true, "Consultando…", "Resultados posteriores");
+  try {
+    const query = new URLSearchParams({
+      asset_id: selectedMarketAsset,
+      rule_id: ruleId,
+      expected_rule_fingerprint: configuration.fingerprint,
+      start_date: start,
+      end_date: end,
+      known_at: knownAt,
+    });
+    const response = await fetchDescriptiveOutcomes(query, controller.signal);
+    if (generation !== state.generation || state.requestKey !== requestKey) return;
+    state.payload = response.payload;
+    state.text = response.text;
+    renderDescriptiveOutcomeReport(container, response.payload);
+    download.disabled = false;
+  } catch (error) {
+    if (error.name === "AbortError" || generation !== state.generation || state.requestKey !== requestKey) {
+      return;
+    }
+    container.replaceChildren(createElement("p", "screening-rule-error", error.message));
+    download.disabled = true;
+  } finally {
+    if (generation === state.generation && state.requestKey === requestKey) {
+      state.controller = null;
+      setButtonBusy(button, false, "Consultando…", "Resultados posteriores");
+    }
+  }
+}
+
+function renderDescriptiveOutcomeAction(configuration, card) {
+  const ruleId = configuration.rule.rule_id;
+  if (!DESCRIPTIVE_OUTCOME_RULE_IDS.has(ruleId)) return;
+  const state = descriptiveOutcomeState(ruleId);
+  const panel = createElement("section", "screening-backtest-result screening-outcomes");
+  const knownAt = byId("report-known-at").value.trim() || defaultKnownAtCut();
+  const endDate = descriptiveOutcomeDateFromCut(knownAt)
+    || new Date().toISOString().slice(0, 10);
+  const startDate = descriptiveOutcomeShiftDate(
+    endDate,
+    -(DESCRIPTIVE_OUTCOME_DEFAULT_DAYS - 1),
+  );
+  const startInput = document.createElement("input");
+  startInput.type = "date";
+  startInput.value = startDate;
+  startInput.dataset.descriptiveOutcomeStart = "true";
+  const endInput = document.createElement("input");
+  endInput.type = "date";
+  endInput.value = endDate;
+  endInput.dataset.descriptiveOutcomeEnd = "true";
+  const controls = createElement("div", "screening-rule-actions");
+  const run = createElement("button", "button secondary compact", "Resultados posteriores");
+  run.type = "button";
+  const download = createElement("button", "button secondary compact", "Descargar JSON");
+  download.type = "button";
+  download.disabled = true;
+  const result = createElement("div", "screening-outcomes-result");
+  result.append(
+    createElement("p", "", "Resultados aún no consultados para el activo y corte actuales."),
+  );
+  controls.append(
+    screeningField("Desde", startInput),
+    screeningField("Hasta", endInput),
+    run,
+    download,
+  );
+  panel.append(
+    createElement(
+      "small",
+      "screening-backtest-range",
+      `Corte ${knownAt} · configuración guardada ${configuration.fingerprint}`,
+    ),
+    controls,
+    result,
+  );
+  state.container = result;
+  state.download = download;
+  if (state.payload) {
+    renderDescriptiveOutcomeReport(result, state.payload);
+    download.disabled = !state.text;
+  }
+  startInput.addEventListener("change", () => invalidateDescriptiveOutcome(ruleId));
+  endInput.addEventListener("change", () => invalidateDescriptiveOutcome(ruleId));
+  run.addEventListener("click", () => {
+    void runDescriptiveOutcomes(
+      configuration,
+      startInput,
+      endInput,
+      result,
+      download,
+      run,
+    );
+  });
+  download.addEventListener("click", () => downloadDescriptiveOutcomeJson(configuration, download));
+  card.append(panel);
+}
+
 function screeningField(labelText, control) {
   const label = createElement("label", "field screening-rule-field");
   label.append(createElement("span", "", labelText), control);
@@ -615,6 +1070,7 @@ async function runScreeningBacktest(configuration, container, button) {
 
 async function updateScreeningRule(configuration, form, button, sourceRule = null) {
   const idleLabel = sourceRule ? "Restaurar valores iniciales" : "Guardar regla";
+  invalidateDescriptiveOutcome(configuration.rule.rule_id);
   setButtonBusy(button, true, "Guardando…", idleLabel);
   try {
     const payload = screeningRulePayload(configuration, form, sourceRule);
@@ -750,7 +1206,10 @@ function renderScreeningRule(configuration) {
   backtest.addEventListener("click", () => {
     void runScreeningBacktest(configuration, replay, backtest);
   });
+  form.addEventListener("input", () => invalidateDescriptiveOutcome(rule.rule_id));
+  form.addEventListener("change", () => invalidateDescriptiveOutcome(rule.rule_id));
   card.append(heading, form);
+  renderDescriptiveOutcomeAction(configuration, card);
   return card;
 }
 
