@@ -1681,7 +1681,9 @@ def _check_no_new_capability_or_route_is_introduced_by_the_shell(app_js: str) ->
 # (`/api/v1/research/experiments` and `/api/v1/research/experiment-report`);
 # the legacy `/api/v1/research/ml-report` remains for the compatibility
 # lookup. PIT-READINESS-DELIVERY adds the single read-only readiness route it
-# owns. No transport or contract changes beyond those authorized blocks.
+# owns. PIT-FEATURE-PREVIEW adds the single read-only pre-decision feature
+# preview route it owns. No transport or contract changes beyond those
+# authorized blocks.
 _BASELINE_API_ROUTES = frozenset(
     {
         "/api/alerts",
@@ -1717,6 +1719,7 @@ _BASELINE_API_ROUTES = frozenset(
         "/api/v1/overview",
         "/api/v1/research/experiment-report",
         "/api/v1/research/experiments",
+        "/api/v1/research/feature-preview",
         "/api/v1/research/ml-report",
         "/api/v1/research/readiness",
         "/api/v1/sec-document-timeline",

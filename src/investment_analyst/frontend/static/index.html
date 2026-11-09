@@ -1251,6 +1251,59 @@
                   <pre id="readiness-json" tabindex="0"></pre>
                 </details>
               </div>
+              <section aria-labelledby="feature-preview-title" class="readiness-section">
+                <h4 id="feature-preview-title">Inputs antes de la decisión</h4>
+                <p class="patterns-summary">
+                  Consulta sólo las features D-2 y D-1 disponibles al corte elegido. La decisión
+                  preregistrada es 12:00 UTC de la fecha. Disponibilidad de inputs; no mide
+                  suficiencia de muestra ni capacidad predictiva.
+                </p>
+                <div class="readiness-controls">
+                  <label class="field">
+                    <span>Fecha de decisión (UTC)</span>
+                    <input id="feature-preview-date" type="date">
+                  </label>
+                  <label class="field">
+                    <span>Corte de inputs (UTC)</span>
+                    <input
+                      id="feature-preview-known-at"
+                      type="text"
+                      inputmode="text"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="2026-11-09T01:23:00Z"
+                    >
+                  </label>
+                  <button id="feature-preview-submit" class="button primary" type="button">
+                    Consultar inputs
+                  </button>
+                  <button id="feature-preview-download" class="button" type="button" disabled>
+                    Descargar JSON
+                  </button>
+                </div>
+                <p id="feature-preview-status" class="chart-status" role="status" aria-live="polite">
+                  Sin consultar. Define fecha y corte y pulsa «Consultar inputs».
+                </p>
+                <div
+                  id="feature-preview-results"
+                  class="patterns-results readiness-results hidden"
+                  aria-busy="false"
+                >
+                  <p id="feature-preview-decision" class="badge neutral"></p>
+                  <p id="feature-preview-summary" class="patterns-summary"></p>
+                  <p id="feature-preview-identity" class="patterns-technical"></p>
+                  <div id="feature-preview-columns" class="readiness-columns"></div>
+                  <section aria-labelledby="feature-preview-refs-title">
+                    <h4 id="feature-preview-refs-title">Cierres utilizados</h4>
+                    <div id="feature-preview-refs"></div>
+                  </section>
+                  <ul id="feature-preview-limitations" class="patterns-limitations"></ul>
+                  <details class="json-disclosure">
+                    <summary>Proyección JSON exacta recibida</summary>
+                    <pre id="feature-preview-json" tabindex="0"></pre>
+                  </details>
+                </div>
+              </section>
             </div>
           </details>
           <details id="ml-research-panel" class="patterns-section ml-research-section">

@@ -329,6 +329,11 @@ from investment_analyst.providers.market.alpaca_pipeline import AlpacaHistorical
 from investment_analyst.providers.market.alpaca_stock import AlpacaCredentials, AlpacaStockClient
 from investment_analyst.providers.ownership.sec_ownership_pipeline import SecOwnershipPipeline
 from investment_analyst.providers.peru.smv_open_data import SmvOpenDataClient
+from investment_analyst.research.feature_preview_models import (
+    FeaturePreviewRequest,
+    ResearchFeaturePreview,
+)
+from investment_analyst.research.predictive_dataset import PredictiveDatasetBuilder
 from investment_analyst.research.predictive_models import PredictiveDatasetRequest
 from investment_analyst.research.readiness_models import ResearchPitReadinessView
 from investment_analyst.research.readiness_service import ReadinessService
@@ -584,6 +589,21 @@ class InvestmentAnalystApplication:
                 provider_resolver=self._runtime.provider_resolver,
                 catalog=self._runtime.catalog,
             ).query(request)
+
+    def query_research_feature_preview(
+        self,
+        request: FeaturePreviewRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> ResearchFeaturePreview:
+        """Project pre-decision inputs from one bounded read-only session."""
+        read_only = WorkspaceAccessMode.READ_ONLY
+        with self._runtime.open_storage(location, access_mode=read_only) as storage:
+            return PredictiveDatasetBuilder(
+                storage,
+                provider_resolver=self._runtime.provider_resolver,
+                catalog=self._runtime.catalog,
+            ).preview_features(request)
 
     def query_listed_company_diagnostics(
         self,

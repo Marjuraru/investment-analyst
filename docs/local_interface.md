@@ -414,6 +414,44 @@ con `AbortController` y se descartan respuestas tardías mediante una secuencia;
 AAPL/QQQ/SOL. El hook de reset vive en `app-core.js` y la implementación y los eventos del panel en
 `app-technical.js`. La configuración de reglas, bandeja y canal Windows no se modifica.
 
+### Inputs antes de la decisión
+
+Dentro del disclosure existente **Preparación PIT de datos** se añade una sección compacta
+**Inputs antes de la decisión**. Consume una sola ruta explícita,
+`GET /api/v1/research/feature-preview?asset_id=…&decision_date=YYYY-MM-DD&known_at=…`, y muestra
+fecha de decisión, corte UTC, botón «Consultar inputs», las tres columnas preregistradas con
+valor/estado/versión/disponibilidad, las referencias de los cierres seleccionados y el JSON recibido
+en el disclosure técnico. No crea otra pantalla, tablero, indicador, score ni recomendación y no
+consulta nada al arrancar, abrir el panel o cambiar de activo.
+
+La fecha inicial es el día UTC actual y el corte es el instante actual acotado a las 12:00 del día
+visible; el valor elegido queda visible. Editar la fecha o el corte no reajusta el otro campo de
+forma silenciosa. El servidor acepta únicamente `D 00:00:00Z <= known_at <= D 12:00:00Z`; un corte
+fuera del día, un timestamp naive o una fecha con hora responden `400 invalid_request`. Un activo
+fuera del perfil cripto spot USD responde `422 asset_incompatible` y la presentación anterior se
+descarta; una contradicción de integridad responde `503 operational_error` y nunca se presenta como
+un conjunto vacío.
+
+Al cambiar activo, fecha o corte se aborta la petición en vuelo, se limpian los valores y la descarga
+y se descarta cualquier respuesta tardía. El panel declara «Disponibilidad de inputs; no mide
+suficiencia de muestra ni capacidad predictiva» y no muestra `research_ready` ni pendientes de label.
+La descarga es `feature-preview-<preview_id>.json` con exactamente el JSON recibido, límite 32 KiB y
+`URL.revokeObjectURL`; no hay descarga si la proyección excede el límite o la selección ya no coincide.
+La preparación de muestra y el listado/contraste de estudios conservan su recorrido.
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/preview_predictive_features.py \
+  --workspace <absolute-workspace> \
+  --asset-id crypto:btc-usd \
+  --decision-date 2026-11-09 \
+  --known-at 2026-11-09T01:23:00Z \
+  --json
+```
+
+El CLI devuelve la misma proyección que la API, no acepta `--output-dir`, no entrena, no adquiere
+datos y no persiste; `--help` no importa dependencias ML. El contrato y la evidencia viven en
+[`predictive_foundation.md`](predictive_foundation.md).
+
 La franja de sesiones conserva Nueva York y NYSE, y reemplaza el reloj corriente de Lima por el
 estado regular de BVL en `America/Lima`. Muestra `Abre en…` o `Cierra en…` y usa sólo días laborables y dos periodos oficiales: del
 segundo domingo de marzo al primer domingo de noviembre, 08:30–14:50; el periodo restante,

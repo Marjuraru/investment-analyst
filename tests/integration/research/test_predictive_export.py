@@ -22,6 +22,7 @@ from investment_analyst.core.models import (
 )
 from investment_analyst.core.models.enums import DataFrequency, DataQuality
 from investment_analyst.research import predictive_export
+from investment_analyst.research.feature_preview_models import FeaturePreviewRequest
 from investment_analyst.research.predictive_dataset import PredictiveDatasetBuilder
 from investment_analyst.research.predictive_export import (
     MANIFEST_FILE_NAME,
@@ -411,3 +412,33 @@ def test_export_does_not_write_the_workspace_or_mutate_the_dataset(
     assert _tree_state(workspace) == before
     with pytest.raises(ValidationError):
         dataset.dataset_id = uuid5(NAMESPACE_URL, "mutated")  # type: ignore[misc]
+
+
+def test_preview_at_decision_cut_reuses_export_feature_identity(tmp_path: Path) -> None:
+    dataset, workspace = _dataset(tmp_path)
+    sample = dataset.samples[0]
+    decision = sample.decision_at.date()
+    runtime = ApplicationRuntime.create_default()
+    with runtime.open_storage(
+        StorageLocationRequest(workspace=Path(workspace)),
+        access_mode=WorkspaceAccessMode.READ_ONLY,
+    ) as storage:
+        preview = PredictiveDatasetBuilder(
+            storage,
+            provider_resolver=runtime.provider_resolver,
+            catalog=runtime.catalog,
+        ).preview_features(
+            FeaturePreviewRequest(
+                asset_id=_ASSET,
+                decision_date=decision,
+                known_at=decision_instant(decision),
+            )
+        )
+    assert preview.features == sample.features
+    assert preview.sample_key == sample.sample_key
+    assert preview.feature_hash == sample.feature_hash
+    assert preview.preview_id != dataset.dataset_id
+    assert dataset.dataset_id == dataset.manifest.dataset_id
+    assert tuple(item.row_id for item in dataset.samples) == tuple(
+        item.row_id for item in dataset.manifest.rows
+    )

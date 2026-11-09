@@ -694,6 +694,41 @@ es observación del siguiente PLAN, no espera de este bloque. La próxima lectur
 feature_available y razones por columna) sin exportar datos ni abrir el holdout; no se promete PIT
 ni fecha de entrenamiento.
 
+### Vista previa de inputs antes de la decisión (2026-11-09, `PIT-FEATURE-PREVIEW`/#426, `ADVANCES`)
+
+El bloque añade el contrato aislado `research-feature-preview-v1`, una consulta feature-only con
+`asset_id`, `decision_date` y `known_at` explícito dentro de `D 00:00Z..D 12:00Z`. Reutiliza las
+tres evidencias, los selectores PIT/`Decimal`/versiones y las identidades `sample_key`/`feature_hash`
+del experimento; crea un `preview_id` UUID5 propio y no lee labels, barras D..D+5, raws, archivos
+históricos ni proveedores. El estado sólo es `features_available` cuando las tres columnas están
+disponibles; en otro caso `inputs_unavailable`. No es dataset, readiness, score, señal ni
+recomendación.
+
+`GET /api/v1/research/feature-preview` y
+`scripts/preview_predictive_features.py` devuelven la misma proyección, con `400` para un corte o
+parámetro inválido, `422 asset_incompatible` para un activo fuera de cripto spot USD y `503` para una
+contradicción de integridad. El panel de preparación existente añade «Inputs antes de la decisión»
+con fecha/corte, consulta explícita, tres columnas, referencias, JSON y descarga exacta de hasta
+32 KiB. No hay consulta automática, polling ni refresh; cambiar activo, fecha o corte aborta y
+descarta la presentación anterior.
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
+
+Evidencia premerge: BTC y SOL `2026-11-09` con corte `2026-11-09T01:23:00Z` devuelven
+`inputs_unavailable` con tres columnas `missing` (2.356 B); BTC frío 0,988 s y caliente 0,259 s, RSS
+pico 206.684 KiB. AMD responde `422`; un corte posterior a las 12:00 o una fecha con hora responden
+`400`. La equivalencia histórica BTC `2026-11-08` a las 12:00 reproduce exactamente features,
+`sample_key` y `feature_hash` del dataset `fd55d5ed…`; el CLI coincide con la API. El navegador real
+renderizó el panel, descargó `feature-preview-825de515….json` idéntico a la respuesta, limpió datos
+BTC al cambiar a AMD y verificó 4 estudios BTC en la página 1; la preparación PIT siguió operativa.
+El workspace conservó tamaño, `mtime`, inodo, SHA-256 de `manifest.json` y ausencia de WAL, con sólo
+aperturas `read_only`.
+
+`FUNDAMENTALS-COVERAGE` continúa `PLANNED` y `PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`;
+V1-U4 permanece `UNKNOWN`. La vista previa no demuestra capacidad predictiva ni autoriza
+entrenamiento, tuning, otro indicador o promoción; el contraste prospectivo con labels maduros y el
+primer ciclo observado pertenecen al siguiente PLAN.
+
 ### Objetivos V1
 
 Este bloque especifica métodos: no ejecuta campañas, no declara `MET` y no crea otro marco ni
