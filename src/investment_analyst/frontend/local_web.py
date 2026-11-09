@@ -23,6 +23,7 @@ from investment_analyst.alerts.analytical_backtest import (
     AnalyticalBacktestRequest,
     AnalyticalBacktestService,
 )
+from investment_analyst.alerts.analytical_models import AnalyticalScreeningRule
 from investment_analyst.alerts.analytical_rule_registry import (
     AnalyticalRuleConfigurationUpdate,
     AnalyticalRuleRegistryConflictError,
@@ -34,6 +35,19 @@ from investment_analyst.alerts.analytical_state import (
 )
 from investment_analyst.alerts.candidate_notifications import CandidateNotificationStore
 from investment_analyst.alerts.cazatiburones_notifications import CazatiburonesNotificationStore
+from investment_analyst.alerts.descriptive_outcome_models import (
+    DESCRIPTIVE_CONDITION_OUTCOMES_SCHEMA,
+    FORWARD_CLOSE_INTERVALS_HORIZON,
+    DescriptiveConditionOutcomeReport,
+    DescriptiveOutcomeRequest,
+)
+from investment_analyst.alerts.descriptive_outcomes import (
+    SUPPORTED_DESCRIPTIVE_OUTCOME_RULE_IDS,
+    DescriptiveOutcomeBudgetExceededError,
+    DescriptiveOutcomeError,
+    DescriptiveOutcomeFingerprintChangedError,
+    DescriptiveOutcomeUnsupportedError,
+)
 from investment_analyst.alerts.desktop_notification_models import (
     MAX_RETAINED_DELIVERIES,
     MAX_STATE_BYTES,
@@ -598,6 +612,16 @@ class _ApplicationOperations(Protocol):
         """Execute a point-in-time SEC document timeline query."""
         ...
 
+    def query_descriptive_condition_outcomes(
+        self,
+        request: DescriptiveOutcomeRequest,
+        rule: AnalyticalScreeningRule,
+        *,
+        location: StorageLocationRequest,
+    ) -> DescriptiveConditionOutcomeReport:
+        """Return one read-only descriptive forward-outcome review."""
+        ...
+
     def query_universe_coverage(
         self,
         request: UniverseCoverageRequest,
@@ -900,6 +924,13 @@ class _WebOperations(Protocol):
         parameters: Mapping[str, tuple[str, ...]],
     ) -> dict[str, object]:
         """Replay one configured rule over persisted point-in-time evidence."""
+        ...
+
+    def screening_outcomes(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Return one bounded descriptive forward-outcome review."""
         ...
 
     def report(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
@@ -2056,6 +2087,59 @@ class AaplLocalController:
             ),
         )
 
+    def query_descriptive_condition_outcomes(
+        self,
+        request: DescriptiveOutcomeRequest,
+        rule: AnalyticalScreeningRule,
+    ) -> DescriptiveConditionOutcomeReport:
+        """Read one composite-signed descriptive outcome report without writes."""
+        if self._workspace is None:
+            raise DescriptiveOutcomeUnsupportedError("descriptive outcomes require a workspace")
+        descriptor = self._market_assets_by_id.get(request.asset_id)
+        if descriptor is None:
+            raise DescriptiveOutcomeUnsupportedError(
+                "descriptive outcomes asset_id is not supported"
+            )
+        selector = (
+            f"schema={DESCRIPTIVE_CONDITION_OUTCOMES_SCHEMA};"
+            f"horizon={FORWARD_CLOSE_INTERVALS_HORIZON};"
+            f"rule={rule.rule_id};fingerprint={rule.semantic_fingerprint()};"
+            f"asset={request.asset_id};start={request.start_date.isoformat()};"
+            f"end={request.end_date.isoformat()};known_at={request.known_at.isoformat()};"
+            f"catalog={self._market_assets.catalog_version}"
+        )
+        metrics_query = ReadDependencyQuery(
+            family=ReadDependencyFamily.METRICS,
+            endpoint="/api/v1/screening/outcomes",
+            asset_ids=(request.asset_id,),
+            source_ids=(descriptor.source_id,),
+            metric_keys=tuple(sorted({condition.metric_key for condition in rule.conditions})),
+            start=request.start_utc,
+            end=request.end_before_utc,
+            known_at=request.known_at,
+            selector=selector,
+        )
+        bars_query = ReadDependencyQuery(
+            family=ReadDependencyFamily.MARKET_BARS,
+            endpoint="/api/v1/screening/outcomes",
+            asset_ids=(request.asset_id,),
+            source_ids=(descriptor.source_id,),
+            field_names=("close",),
+            frequency="day_1",
+            start=request.start_utc,
+            end=request.known_at,
+            known_at=request.known_at,
+            selector=selector,
+        )
+        return self._signed_read_composite(
+            (metrics_query, bars_query),
+            lambda: self._application.query_descriptive_condition_outcomes(
+                request,
+                rule,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
+        )
+
     def _invalidate_aapl_refresh_caches(self) -> None:
         """Invalidate only read models refreshed by a completed Apple bootstrap."""
         with self._cache_lock:
@@ -2564,6 +2648,52 @@ class AaplLocalWebApplication:
             ),
         )
         return self._analytical_backtest.run(request).to_json_dict()
+
+    def screening_outcomes(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Return one bounded descriptive forward-outcome review."""
+        if self._analytical_rule_store is None:
+            raise DescriptiveOutcomeUnsupportedError("analytical rule registry is not configured")
+        allowed = {
+            "asset_id",
+            "rule_id",
+            "expected_rule_fingerprint",
+            "start_date",
+            "end_date",
+            "known_at",
+        }
+        if set(parameters) - allowed:
+            raise ValueError("screening outcomes query contains unsupported parameters")
+        request = DescriptiveOutcomeRequest(
+            asset_id=_one_parameter(parameters, "asset_id", required=True),
+            rule_id=_one_parameter(parameters, "rule_id", required=True),
+            expected_rule_fingerprint=_one_parameter(
+                parameters,
+                "expected_rule_fingerprint",
+                required=True,
+            ),
+            start_date=_date_parameter(_one_parameter(parameters, "start_date", required=True)),
+            end_date=_date_parameter(_one_parameter(parameters, "end_date", required=True)),
+            known_at=_aware_datetime(_one_parameter(parameters, "known_at", required=True)),
+        )
+        if request.rule_id not in SUPPORTED_DESCRIPTIVE_OUTCOME_RULE_IDS:
+            raise DescriptiveOutcomeUnsupportedError(
+                "descriptive outcomes rule_id is not supported"
+            )
+        rule = self._analytical_rule_store.get(request.rule_id)
+        if rule.semantic_fingerprint() != request.expected_rule_fingerprint:
+            raise DescriptiveOutcomeFingerprintChangedError(
+                "the saved rule fingerprint does not match the request"
+            )
+        report = self._controller.query_descriptive_condition_outcomes(request, rule)
+        current = self._analytical_rule_store.get(request.rule_id)
+        if current.semantic_fingerprint() != request.expected_rule_fingerprint:
+            raise DescriptiveOutcomeFingerprintChangedError(
+                "the saved rule fingerprint changed during the query"
+            )
+        return report.to_json_dict()
 
     def market_assets(self) -> dict[str, object]:
         """Return one immutable catalog-driven watchlist."""
@@ -3526,6 +3656,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                     server.application.screening_backtest(parameters),
                 )
                 return
+            if parsed.path == "/api/v1/screening/outcomes":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=6)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.screening_outcomes(parameters),
+                )
+                return
             if parsed.path == "/api/market-assets":
                 self._send_json(HTTPStatus.OK, server.application.market_assets())
                 return
@@ -3931,6 +4069,30 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
             self._send_error(
                 HTTPStatus.UNPROCESSABLE_ENTITY,
                 "backtest_unavailable",
+                str(error)[:500],
+            )
+        elif isinstance(error, DescriptiveOutcomeFingerprintChangedError):
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "screening_outcome_fingerprint_changed",
+                str(error)[:500],
+            )
+        elif isinstance(error, DescriptiveOutcomeBudgetExceededError):
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "screening_outcome_budget_exceeded",
+                str(error)[:500],
+            )
+        elif isinstance(error, DescriptiveOutcomeUnsupportedError):
+            self._send_error(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "screening_outcome_unsupported",
+                str(error)[:500],
+            )
+        elif isinstance(error, DescriptiveOutcomeError):
+            self._send_error(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "screening_outcome_unavailable",
                 str(error)[:500],
             )
         elif isinstance(error, DesktopNotificationRateLimitError):

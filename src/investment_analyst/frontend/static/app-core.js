@@ -591,6 +591,7 @@ let marketChartRenderFrame = null;
 let marketChartDrag = null;
 let selectedChartPoint = -1;
 let selectedMarketAsset = null;
+let renderedKnownAtCut = null;
 let selectMarketAssetForNavigation = null;
 const marketStartByAsset = new Map();
 const knownAtByAsset = new Map();
@@ -820,6 +821,7 @@ async function loadMarketAssets() {
     knownAtByAsset.set(selectedMarketAsset, byId("report-known-at").value.trim());
     resetListedCompanyReport();
     selectedMarketAsset = assetId;
+    if (typeof invalidateScreeningOutcomes === "function") invalidateScreeningOutcomes();
     byId("report-known-at").value = knownAtByAsset.get(assetId) || defaultKnownAtCut();
     renderKnownAtCut(byId("report-known-at").value.trim());
     marketChartPayload = null;
@@ -1625,6 +1627,11 @@ function createElement(tag, className, text) {
 // always-visible topbar chip, so every view shares the same declared cut.
 function renderKnownAtCut(effectiveKnownAt) {
   const knownAt = String(effectiveKnownAt ?? "").trim();
+  const cutChanged = renderedKnownAtCut !== null && renderedKnownAtCut !== knownAt;
+  renderedKnownAtCut = knownAt;
+  if (cutChanged && typeof invalidateScreeningOutcomes === "function") {
+    invalidateScreeningOutcomes();
+  }
   const formatted = knownAt && !Number.isNaN(Date.parse(knownAt)) ? knownAt : null;
   const detail = byId("known-at-status");
   const header = byId("known-at-cut-value");

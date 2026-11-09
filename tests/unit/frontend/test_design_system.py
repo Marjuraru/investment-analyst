@@ -1703,6 +1703,7 @@ _BASELINE_API_ROUTES = frozenset(
         "/api/screening-backtest",
         "/api/screening-rules",
         "/api/screening-rules/update",
+        "/api/v1/screening/outcomes",
         "/api/v1/asset-preferences",
         "/api/v1/candidate-notifications",
         "/api/v1/candidate-notifications/acknowledge",
