@@ -1658,3 +1658,246 @@ def test_legacy_execution_without_analytical_inputs_flag_round_trips() -> None:
         ScheduledJobExecution.model_validate(
             {**legacy.to_json_dict(), "analytical_inputs_changed": "yes"}
         )
+
+
+_CRYPTO_DAILY_JOB_ID = "coinbase:crypto:btc-usd:market-daily"
+_SIX_AM_LIMA = datetime(2026, 7, 29, 11, tzinfo=UTC)
+_SEVEN_AM_LIMA = datetime(2026, 7, 29, 12, tzinfo=UTC)
+
+
+def _crypto_daily_definition(
+    *,
+    job_id: str = _CRYPTO_DAILY_JOB_ID,
+    run_at: time = time(hour=6),
+) -> ScheduledJobDefinition:
+    return ScheduledJobDefinition(
+        job_id=job_id,
+        asset_id="crypto:btc-usd",
+        provider="coinbase",
+        domain=ScheduledJobDomain.MARKET_DAILY,
+        data_frequency="day_1",
+        timezone="America/Lima",
+        run_at=run_at,
+        max_attempts_per_day=3,
+        retry_backoff_seconds=60,
+    )
+
+
+def _succeeded_attempt(
+    definition: ScheduledJobDefinition,
+    *,
+    attempt_id: UUID,
+    scheduled_for: datetime,
+) -> ScheduledJobAttempt:
+    return ScheduledJobAttempt(
+        attempt_id=attempt_id,
+        definition=definition,
+        local_date=scheduled_for.astimezone(ZoneInfo(definition.timezone)).date(),
+        scheduled_for=scheduled_for,
+        attempt_number=1,
+        status=ScheduledJobAttemptStatus.SUCCEEDED,
+        started_at=scheduled_for,
+        completed_at=scheduled_for + timedelta(minutes=1),
+        execution=_execution(
+            ScheduledJobInvocation(
+                definition=definition,
+                local_date=scheduled_for.astimezone(ZoneInfo(definition.timezone)).date(),
+                scheduled_for=scheduled_for,
+                started_at=scheduled_for,
+                attempt_number=1,
+            )
+        ),
+    )
+
+
+def test_crypto_daily_minute_gates_due_state_while_equity_keeps_seven(tmp_path: Path) -> None:
+    now = _SIX_AM_LIMA - timedelta(minutes=1)
+    calls: list[str] = []
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        calls.append(invocation.definition.job_id)
+        return _execution(invocation)
+
+    crypto_btc = _crypto_daily_definition()
+    crypto_sol = _crypto_daily_definition(job_id="coinbase:crypto:sol-usd:market-daily")
+    equity = _definition("alpaca:equity:us:aapl:market-daily")
+    scheduler = MultiAssetScheduler(
+        tuple(
+            RegisteredScheduledJob(definition, run)
+            for definition in (crypto_btc, crypto_sol, equity)
+        ),
+        MultiAssetScheduleStateStore(tmp_path / "schedule.json"),
+        clock=lambda: now,
+    )
+
+    assert scheduler.tick() == ()
+
+    now = _SIX_AM_LIMA
+    opened = scheduler.tick()
+
+    assert calls == ["coinbase:crypto:btc-usd:market-daily", "coinbase:crypto:sol-usd:market-daily"]
+    assert {attempt.scheduled_for for attempt in opened} == {_SIX_AM_LIMA}
+    assert {attempt.status for attempt in opened} == {ScheduledJobAttemptStatus.SUCCEEDED}
+
+    now = _SEVEN_AM_LIMA - timedelta(minutes=1)
+    assert scheduler.tick() == ()
+    now = _SEVEN_AM_LIMA
+    equity_attempts = scheduler.tick()
+
+    assert [attempt.definition.job_id for attempt in equity_attempts] == [equity.job_id]
+    assert calls[-1] == equity.job_id
+    assert len(calls) == 3
+
+
+def test_crypto_success_is_not_repeated_after_restart_or_minute_change(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        calls.append(invocation.definition.job_id)
+        return _execution(invocation)
+
+    now = _SIX_AM_LIMA
+    store = MultiAssetScheduleStateStore(tmp_path / "schedule.json")
+    definition = _crypto_daily_definition()
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(definition, run),),
+        store,
+        clock=lambda: now,
+    )
+
+    assert len(scheduler.tick()) == 1
+
+    restarted_now = _SIX_AM_LIMA + timedelta(minutes=30)
+    restarted = MultiAssetScheduler(
+        (RegisteredScheduledJob(definition, run),),
+        MultiAssetScheduleStateStore(tmp_path / "schedule.json"),
+        clock=lambda: restarted_now,
+    )
+    assert restarted.tick() == ()
+    assert calls == [_CRYPTO_DAILY_JOB_ID]
+
+    previous_journal = MultiAssetScheduleStateStore(tmp_path / "previous-journal.json")
+    previous_journal.write_attempt(
+        _succeeded_attempt(
+            _crypto_daily_definition(run_at=time(hour=7)),
+            attempt_id=UUID("00000000-0000-4000-8000-0000000000a1"),
+            scheduled_for=_SEVEN_AM_LIMA,
+        )
+    )
+    changed_now = _SIX_AM_LIMA + timedelta(minutes=5)
+    changed = MultiAssetScheduler(
+        (RegisteredScheduledJob(definition, run),),
+        previous_journal,
+        clock=lambda: changed_now,
+    )
+
+    assert changed.tick() == ()
+    assert calls == [_CRYPTO_DAILY_JOB_ID]
+    assert changed.status().jobs[0].health is ScheduledJobHealth.CURRENT
+
+
+def test_late_crypto_start_is_recorded_as_a_late_execution(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 29, 17, tzinfo=UTC)
+    calls = 0
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        nonlocal calls
+        calls += 1
+        return _execution(invocation)
+
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(_crypto_daily_definition(), run),),
+        MultiAssetScheduleStateStore(tmp_path / "late.json"),
+        clock=lambda: now,
+    )
+
+    attempts = scheduler.tick()
+
+    assert calls == 1
+    assert len(attempts) == 1
+    assert attempts[0].scheduled_for == _SIX_AM_LIMA
+    assert attempts[0].started_at == now
+    assert attempts[0].status is ScheduledJobAttemptStatus.SUCCEEDED
+    assert scheduler.tick() == ()
+
+
+def test_crypto_daily_failure_keeps_the_existing_retry_policy(tmp_path: Path) -> None:
+    now = _SIX_AM_LIMA
+    calls = 0
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ScheduledJobRunError(
+                scheduled_job_failure(
+                    ScheduledJobFailureCategory.TRANSPORT,
+                    "temporary crypto provider failure",
+                )
+            )
+        return _execution(invocation)
+
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(_crypto_daily_definition(), run),),
+        MultiAssetScheduleStateStore(tmp_path / "retry.json"),
+        clock=lambda: now,
+    )
+
+    failed = scheduler.tick()
+
+    assert failed[0].status is ScheduledJobAttemptStatus.FAILED
+    assert failed[0].attempt_number == 1
+    retry_status = scheduler.status().jobs[0]
+    assert retry_status.health is ScheduledJobHealth.RETRY_WAIT
+    assert retry_status.next_retry_at == _SIX_AM_LIMA + timedelta(seconds=60)
+
+    now = _SIX_AM_LIMA + timedelta(seconds=30)
+    assert scheduler.tick() == ()
+    now = _SIX_AM_LIMA + timedelta(seconds=61)
+    retried = scheduler.tick()
+
+    assert calls == 2
+    assert retried[0].attempt_number == 2
+    assert retried[0].scheduled_for == _SIX_AM_LIMA
+    assert retried[0].status is ScheduledJobAttemptStatus.SUCCEEDED
+
+
+def test_interrupted_crypto_attempt_is_recovered_without_a_second_writer(
+    tmp_path: Path,
+) -> None:
+    now = _SIX_AM_LIMA + timedelta(minutes=5)
+    definition = _crypto_daily_definition()
+    store = MultiAssetScheduleStateStore(tmp_path / "interrupted.json")
+    running = ScheduledJobAttempt(
+        attempt_id=UUID("00000000-0000-4000-8000-0000000000b1"),
+        definition=definition,
+        local_date=date(2026, 7, 29),
+        scheduled_for=_SIX_AM_LIMA,
+        attempt_number=1,
+        status=ScheduledJobAttemptStatus.RUNNING,
+        started_at=_SIX_AM_LIMA,
+    )
+    store.write_attempt(running)
+    provider_calls = 0
+
+    def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:
+        nonlocal provider_calls
+        provider_calls += 1
+        return _execution(invocation)
+
+    scheduler = MultiAssetScheduler(
+        (RegisteredScheduledJob(definition, run),),
+        store,
+        clock=lambda: now,
+    )
+
+    recovered = scheduler.tick()
+
+    assert provider_calls == 0
+    assert len(recovered) == 1
+    assert recovered[0].attempt_id == running.attempt_id
+    assert recovered[0].status is ScheduledJobAttemptStatus.FAILED
+    assert recovered[0].failure is not None
+    assert recovered[0].failure.category == "interrupted_job"
+    assert store.load().attempts == (recovered[0],)
+    assert scheduler.status().jobs[0].health is ScheduledJobHealth.RETRY_WAIT

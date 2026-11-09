@@ -328,6 +328,37 @@ def test_new_equities_create_four_jobs_each_without_global_duplicates() -> None:
     ]
 
 
+def test_catalog_composition_applies_the_crypto_minute_only_to_crypto_market_daily() -> None:
+    universe = _universe()
+    jobs = build_local_watchlist_jobs(_UnusedController(), universe, _config())
+    crypto_ids = {
+        item.asset_id for item in universe.assets if item.asset_class is AssetClass.CRYPTO
+    }
+
+    crypto_daily = tuple(
+        job
+        for job in jobs
+        if job.definition.domain is ScheduledJobDomain.MARKET_DAILY
+        and job.definition.asset_id in crypto_ids
+    )
+    other_daily = tuple(
+        job
+        for job in jobs
+        if job.definition.domain is ScheduledJobDomain.MARKET_DAILY
+        and job.definition.asset_id not in crypto_ids
+    )
+
+    assert crypto_daily
+    assert {job.definition.run_at for job in crypto_daily} == {time(hour=6)}
+    assert other_daily
+    assert {job.definition.run_at for job in other_daily} == {time(hour=7)}
+    assert all(
+        job.definition.run_at >= time(hour=7)
+        for job in jobs
+        if job.definition.domain is not ScheduledJobDomain.MARKET_DAILY
+    )
+
+
 def test_adoption_merges_new_assets_without_overwriting_existing_preferences(
     tmp_path: Path,
 ) -> None:

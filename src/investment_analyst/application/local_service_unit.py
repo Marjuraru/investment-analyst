@@ -1,6 +1,7 @@
 """Safe rendering and atomic installation of the local systemd user service."""
 
 import os
+from datetime import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -27,6 +28,7 @@ class AaplLocalServiceUnitConfig(ContractModel):
     memory_max_bytes: int | None = None
     memory_ceiling_bytes: int | None = None
     schedule: AaplDailyScheduleConfig | None
+    crypto_daily_run_at: time = time(hour=6)
     scheduled_asset_ids: tuple[NonEmptyStr, ...] = ()
     schedule_intraday: bool = True
     schedule_smv_registry: bool = True
@@ -66,6 +68,21 @@ class AaplLocalServiceUnitConfig(ContractModel):
         """Reject booleans accepted by Python's integer hierarchy."""
         if isinstance(value, bool):
             raise ValueError("port must be an integer")
+        return value
+
+    @field_validator("crypto_daily_run_at", mode="before")
+    @classmethod
+    def require_local_minute(cls, value: object) -> object:
+        """Accept a whole timezone-naive minute for the crypto daily job."""
+        if isinstance(value, str):
+            try:
+                value = time.fromisoformat(value)
+            except ValueError as error:
+                raise ValueError("schedule times must use HH:MM") from error
+        if not isinstance(value, time):
+            raise ValueError("schedule times must be a time")
+        if value.tzinfo is not None or value.second != 0 or value.microsecond != 0:
+            raise ValueError("schedule times must be a timezone-naive whole minute")
         return value
 
     @field_validator("memory_max_bytes", "memory_ceiling_bytes", mode="before")
@@ -140,6 +157,8 @@ def render_local_service_unit(config: AaplLocalServiceUnitConfig) -> str:
             [
                 "--schedule-at",
                 config.schedule.run_at.strftime("%H:%M"),
+                "--crypto-daily-schedule-at",
+                config.crypto_daily_run_at.strftime("%H:%M"),
                 "--timezone",
                 config.schedule.timezone,
                 "--market-start",

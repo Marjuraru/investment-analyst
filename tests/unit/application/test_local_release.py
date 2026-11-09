@@ -4,7 +4,7 @@ import hashlib
 import io
 import stat
 import tarfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -177,6 +177,7 @@ def test_unit_retargeting_exact_and_fail_closed(tmp_path: Path) -> None:
             require_complete=True,
         ),
         scheduled_asset_ids=("crypto:btc-usd", "equity:us:aapl"),
+        crypto_daily_run_at=time(hour=6, minute=30),
         schedule_intraday=False,
         schedule_smv_registry=True,
         schedule_macro=False,
@@ -201,6 +202,7 @@ def test_unit_retargeting_exact_and_fail_closed(tmp_path: Path) -> None:
     assert f'"{str(tmp_path / "workspace")}"' in updated
     assert '"--port" "8765"' in updated
     assert '"--schedule-at" "07:30"' in updated
+    assert '"--crypto-daily-schedule-at" "06:30"' in updated
     assert '"--timezone" "America/Lima"' in updated
     assert '"--schedule-asset" "crypto:btc-usd"' in updated
     assert '"--schedule-asset" "equity:us:aapl"' in updated
