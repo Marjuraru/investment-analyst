@@ -1314,6 +1314,99 @@ labels maduros pertenecen a la observación del siguiente PLAN, no a una espera 
 
 `route_transition:PREDICTIVE-RESEARCH:ADVANCES`
 
+## Contrato de inferencia con modelo de prueba (2026-11-09, `MODEL-INFERENCE-CONTRACT`/#432, `ADVANCES`)
+
+El bloque separa artefacto, compatibilidad, adaptador y explicación de cualquier entrenamiento real.
+Admite un único doble sintético `constant-test-v1` con probabilidad `Decimal('0.5')` para verificar
+la integración; no entrena, no serializa un modelo real, no promueve un predictor y no genera señal,
+candidato ni recomendación.
+
+### Contratos aislados
+
+- `research-model-artifact-v1` (`ModelArtifact`): identidad, versiones de modelo/adaptador, propósito
+  `integration_test`, estado `test_only`, experimento/target/features existentes, perfil cripto spot
+  USD diario, las tres columnas preregistradas con su contrato exacto,
+  `parameters={family: constant-test-v1, test_probability: "0.5"}`, `available_at` UTC y procedencia
+  `synthetic_fixture_not_trained`. Cualquier otra familia, parámetro, propósito, estado o perfil
+  falla cerrado.
+- Archivo de entrada: JSON UTF-8 regular, ≤16.384 B, leído con cota antes de parsear. Rechaza claves
+  duplicadas, números flotantes/NaN/Infinity, `Decimal` no textual, versión desconocida, campos
+  extra, ID/hash falsos y enlaces simbólicos. No importa ni ejecuta contenido.
+- `ModelInferenceAdapter` es un Protocol tipado; recibe sólo tres `Decimal` ordenados y un contexto
+  de compatibilidad, nunca storage, catálogo, raw, labels, red, histórico ni reloj.
+  `ConstantTestAdapter` es el único adaptador de producción y se selecciona por allowlist exacta de
+  `adapter_id`/`adapter_version`; los dobles de prueba se inyectan sólo desde tests.
+- `research-model-inference-v1` (`ModelInferenceResult`): estado cerrado
+  `test_output|inputs_unavailable|artifact_not_available|incompatible`, razones finitas,
+  `test_probability` nullable y paquete de explicación enlazado.
+- `model-explanation-packet-v1` (`ModelExplanationPacket`): referencia a artefacto/preview,
+  objetivo/horizonte existentes, tres features con estado/valor/IDs/`as_of`/`available_at`/
+  `computed_at`/versión/razones, hasta dos cierres del preview, interpretación y límites. Método
+  `constant_test_no_attribution`: no hay SHAP, atribución causal ni pesos inventados. Publica
+  siempre «Modelo de prueba.», «No entrenado ni calibrado.», «Sin validación predictiva.» y
+  «No es una recomendación.».
+
+### Identidad, compatibilidad y abstención
+
+`artifact_id` es UUID5 de
+`uuid5(NAMESPACE_URL, "investment-analyst/research-model-artifact-v1")` sobre el JSON canónico de
+todos los campos semánticos; `artifact_sha256` es SHA-256 de ese mismo payload. `inference_id` es
+UUID5 de `uuid5(NAMESPACE_URL, "investment-analyst/research-model-inference-v1")` sobre
+`artifact_sha256`, versión del adaptador, `preview_id` y el hash canónico del resultado material con
+el paquete de explicación (sin su referencia circular). Cambiar workspace, activo/fuente, corte,
+evidencia, versión, artefacto, estado o salida cambia la identidad; la ruta local, la duración y el
+reloj de ejecución no. Repetir la misma entrada produce JSON e IDs idénticos.
+
+Antes de invocar el adaptador se recomputan `sample_key`, `feature_hash` y `preview_id`, y se exige
+`request.asset_id == preview.asset.asset_id`, perfil cripto spot USD diario, experimento, target,
+`feature_set_version`, orden/especificación exacta de columnas, unidades `ratio`, versiones upstream
+y `available_at <= known_at` de toda la evidencia. Un ID correcto no sustituye esa verificación.
+Precedencia: `incompatible` → `artifact_not_available` (`artifact.available_at > known_at`) →
+`inputs_unavailable` → `test_output`. En cualquier abstención el adaptador no se invoca,
+`test_probability` es `null` y las razones son específicas; nunca se usa cero por defecto. Una
+corrupción estructural o una excepción/salida inválida del adaptador produce error explícito, nunca
+un éxito parcial.
+
+### CLI y presupuesto
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_model_inference.py \
+  --workspace <absolute-workspace> \
+  --model-artifact <artifact.json> \
+  --asset-id crypto:btc-usd \
+  --decision-date 2026-11-09 \
+  --known-at 2026-11-09T12:00:00Z \
+  --json
+```
+
+Sin defaults de reloj/activo, sin modo batch, export persistente ni `--force`. Abre el workspace
+`READ_ONLY` una vez, pide un preview y lo cierra; no escribe, no adquiere y no importa dependencias
+ML opcionales. Distingue `test_output` de abstención en texto y JSON, límite duro de 65.536 B y
+error compacto en stderr sin secretos; exit 0 para un informe válido (incluida abstención) y exit 2
+para petición/artefacto inválido, sin JSON de éxito parcial. La capa añade O(3) y ≤64 KiB al preview,
+sin scans, queries ni hidratación adicional.
+
+Ejemplo reproducible de artefacto (payload del doble, IDs calculados para
+`available_at=2026-11-09T00:00:00Z`):
+
+```json
+{"adapter_id":"constant-test-v1","adapter_version":"v1","artifact_id":"604cda3f-2583-57a2-a3f4-65d26d0fd6b3","artifact_sha256":"edc1e2d85e0589d8f2bb281f0133f4c56fe52aa8d51da2e6dd2cdee70fd9cfc2","asset_class":"crypto","available_at":"2026-11-09T00:00:00Z","experiment_spec_id":"crypto-daily-positive-return-5d-v1","feature_columns":[{"algorithm_version":null,"column_name":"close_return_1d","metric_key":null,"parameter_filters":{},"transform":"close_ratio_1d","unit":null},{"algorithm_version":"market-rsi-incremental-v2-decimal34","column_name":"rsi_14_fraction","metric_key":"market.technical.rsi","parameter_filters":{"window":14},"transform":"rsi_fraction","unit":"index"},{"algorithm_version":"market-macd-incremental-v2-decimal34","column_name":"macd_12_26_9_histogram_close_ratio","metric_key":"market.technical.macd.histogram","parameter_filters":{"fast_window":12,"signal_window":9,"slow_window":26},"transform":"histogram_over_close","unit":"USD"}],"feature_set_version":"crypto-market-baseline-3-v1","frequency":"day_1","model_id":"constant-test-v1","model_version":"v1","parameters":{"family":"constant-test-v1","test_probability":"0.5"},"provenance":"synthetic_fixture_not_trained","purpose":"integration_test","quote_currency":"USD","schema_version":"research-model-artifact-v1","target_version":"crypto-forward-close-return-5d-v1","validation_status":"test_only"}
+```
+
+### Evidencia y separación de modos
+
+La integración scratch con workspace temporal demuestra `test_output` con BTC y SOL bajo el mismo
+contrato de clase, repetición byte-idéntica, cero escrituras y cero hidratación de un corpus ajeno
+1x/10x. El smoke real sobre el workspace operativo `70c64668…` usa el artefacto creado en scratch con
+su hora efectiva y un corte `2026-11-09T12:00:00Z`; un corte histórico puede devolver
+`artifact_not_available` o `inputs_unavailable` y eso es una abstención legítima, no un fallo. El
+resultado exacto y las razones se registran en la evidencia BUILD del SHA del PR. No se retrodata el
+artefacto para fabricar un éxito y no se declara una predicción real. `PREDICTIVE-RESEARCH` permanece
+`NEXT`, V1-U4 sigue `UNKNOWN` y el siguiente esperado es el 3/3 `SHADOW-AND-V1-RELEASE`, todavía sin
+Issue ni autorización de ejecución.
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
+
 ## Limitaciones y siguiente decisión
 
 - Sólo existe 1 muestra con features PIT disponibles; 0 muestras elegibles. No se puede entrenar,
