@@ -1,8 +1,9 @@
 # Fundación predictiva — experimento diario cripto, dataset PIT y reconstrucción histórica
 
 > Autoridad técnica y operativa única de los artefactos abiertos por `PREDICTIVE-FOUNDATION`/#391,
-> `PREDICTIVE-HISTORICAL-DATA`/#393, `ML-BASELINE-VALIDATION`/#395 y
-> `ML-RESEARCH-RESULTS-DELIVERY`/#397 (`PREDICTIVE-RESEARCH`, `ADVANCES`, sin cierre). Estrategia y
+> `PREDICTIVE-HISTORICAL-DATA`/#393, `ML-BASELINE-VALIDATION`/#395,
+> `ML-RESEARCH-RESULTS-DELIVERY`/#397 y `PIT-FEATURE-PREVIEW`/#426
+> (`PREDICTIVE-RESEARCH`, `ADVANCES`, sin cierre). Estrategia y
 > ruta viven en [`product_roadmap.md`](product_roadmap.md),
 > [`basic_functional_release_plan.md`](basic_functional_release_plan.md) y
 > [`research_information_strategy.md`](research_information_strategy.md). Este documento no autoriza
@@ -1178,6 +1179,106 @@ La acumulación prospectiva depende del calendario y el contrato admite hasta 36
 consulta; esperar no garantiza alcanzar los pisos. La configuración desplegada no es un ciclo
 observado ni una muestra ML suficiente: V1-U4 permanece `UNKNOWN` y no se promete una fecha de
 entrenamiento.
+
+## Vista previa de inputs antes de la decisión (2026-11-09, `PIT-FEATURE-PREVIEW`/#426, `ADVANCES`)
+
+El bloque separa una consulta feature-only de la reconstrucción completa del dataset. El contrato
+aislado `research-feature-preview-v1` responde una sola pregunta: qué inputs preregistrados estaban
+disponibles en un corte explícito dentro del día D, antes de la decisión de las 12:00 UTC. No es un
+dataset de entrenamiento, no produce label, split, resultado posterior, `research_ready`, score ni
+recomendación. Reutiliza `PredictiveFeatureEvidence`, el catálogo, el resolver y los selectores
+PIT/`Decimal`/versiones existentes; no duplica fórmulas ni crea otro motor.
+
+### Contrato, ventanas e identidad
+
+- Request estricto: `asset_id`, `decision_date` y `known_at` UTC explícito con
+  `D 00:00:00Z <= known_at <= D 12:00:00Z`. Rechaza timestamps naive, fechas con hora, listas,
+  duplicados, campos extra y cualquier corte fuera de ese intervalo. No hay rango multi-día, modelo
+  ni reloj oculto del servidor.
+- Lectura exacta: cierres de las barras D-2 y D-1, `[D-2, D)`, y métricas RSI/MACD de D-1,
+  `[D-1, D)`, ambas con `available_at <= known_at`, activo/fuente exactos, `field_name=close`,
+  frecuencia diaria, índice paginado de hasta 256 entradas e hidratación sólo de los IDs
+  seleccionados. No lee barras D..D+5, labels, raws, documentos, lineage completo, archivos
+  históricos ni proveedores.
+- La ausencia es la observada al corte: una fila posterior al corte no se consulta para
+  reclasificarla como `not_yet_available`. Los estados conservan el significado del dataset
+  (`available`, `missing`, `not_yet_available`, `incompatible`, `ambiguous`); una columna ausente
+  ahora puede aparecer antes de las 12:00.
+- Proyección: schema, `preview_id`, workspace, identidad asset/source, experimento y
+  `feature_set_version`, request, `decision_at`, `sample_key`, `feature_hash`, las tres evidencias
+  ordenadas y hasta dos referencias compactas de cierres seleccionados. `status` sólo es
+  `features_available` si las tres columnas están disponibles; en otro caso `inputs_unavailable`.
+  Los valores financieros viajan como texto decimal; no hay float ni cálculo en JavaScript.
+- `sample_key` y `feature_hash` reutilizan las funciones vigentes con `decision_at` fijo. El
+  `preview_id` es un UUID5 del namespace
+  `uuid5(NAMESPACE_URL, "investment-analyst/research-feature-preview-v1")` sobre el JSON canónico de
+  workspace, asset/source, experimento/versión, D, `known_at` y el digest de la proyección material
+  sin `preview_id`. El mismo input/corte produce la misma salida; un corte o revisión distinto
+  produce otra identidad. La proyección tiene un límite duro de 32.768 B y falla explícitamente si
+  se excede; nunca se trunca.
+- `available_at` y `computed_at` se conservan separados. Un `computed_at` posterior al corte no
+  sustituye la disponibilidad ni invalida una reconstrucción que el contrato vigente admite por
+  `available_at`.
+
+### CLI, API y panel
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/preview_predictive_features.py \
+  --workspace <absolute-workspace> \
+  --asset-id crypto:btc-usd \
+  --decision-date 2026-11-09 \
+  --known-at 2026-11-09T01:23:00Z \
+  --json
+```
+
+```text
+GET /api/v1/research/feature-preview?asset_id=crypto:btc-usd&decision_date=2026-11-09&known_at=2026-11-09T01:23:00Z
+```
+
+El CLI no acepta `--output-dir`, no adquiere datos, no entrena y no persiste; abre
+`ApplicationRuntime`/storage en `READ_ONLY` una sola vez. `--help` no importa dependencias ML. La API
+responde `400` para parámetros/corte inválidos, `422 asset_incompatible` para un activo fuera del
+perfil cripto spot USD y `503 operational_error` para una contradicción de integridad; una respuesta
+vacía nunca se confunde con ausencia. La caché compuesta existente usa un selector propio que liga
+schema, experimento/features, activo/fuente, D, `known_at` y workspace/código/catálogo; una revisión o
+corte distinto invalida.
+
+En el panel de preparación existente se añade «Inputs antes de la decisión»: fecha, corte UTC, botón
+explícito, tres columnas con valor/estado/versión/disponibilidad, referencias de cierres y JSON en
+disclosure. La fecha inicial es el día UTC actual y el corte es el instante actual acotado a las
+12:00 del día visible. No hay consulta automática, polling, refresh ni botón de entrenamiento; al
+cambiar activo, fecha o corte se abortan peticiones y se descarta la presentación anterior, incluidas
+respuestas tardías y descargas. La descarga es `feature-preview-<preview_id>.json` con el JSON
+recibido, límite 32 KiB y `URL.revokeObjectURL`. La preparación de muestra y el listado de estudios
+conservan su comportamiento.
+
+### Evidencia real (premerge, 2026-11-09)
+
+Smoke desde el candidato, workspace `active-v2-20261021` (`70c64668…`) en `READ_ONLY`, servidor
+aislado sin scheduler y credenciales de prueba, sin proveedores:
+
+- BTC y SOL, decisión `2026-11-09` y corte `2026-11-09T01:23:00Z` (anterior a la disponibilidad de la
+  barra D-1): HTTP `200`, `inputs_unavailable`, tres columnas `missing` y una referencia D-2. La
+  respuesta mide 2.356 B; BTC frío 0,988 s, caliente 0,259 s y RSS pico 206.684 KiB; SOL frío
+  0,593 s. Un resultado incompleto es correcto y no un fallo del gate.
+- `equity:us:amd` devuelve `422 asset_incompatible`; un corte posterior a las 12:00 o una fecha con
+  hora devuelven `400 invalid_request`.
+- Equivalencia histórica: BTC `2026-11-08` con corte `2026-11-08T12:00:00Z` reproduce exactamente
+  features, `sample_key` y `feature_hash` del dataset `fd55d5ed-b330-5810-9649-155752afc997`; el
+  `preview_id` es distinto del `dataset_id`. El CLI con `--json` devuelve exactamente la proyección de
+  la API.
+- Navegador real (`Chromium 153.0.8010.12`, Node 24 y CDP, perfil/descargas scratch): el panel
+  renderizó el estado incompleto, descargó `feature-preview-825de515….json` (2.348 B) idéntico a la
+  proyección recibida, AMD limpió los datos BTC y SOL quedó seleccionado sin residuos. La preparación
+  PIT siguió operativa (`insufficient_pit_sample`) y el listado de estudios BTC verificó 4 estudios y
+  6 candidatos en la página 1.
+- El workspace conservó tamaño, `mtime`, inodo y SHA-256 de `manifest.json`, sin WAL; sólo se observó
+  apertura `read_only`. No se copió la DB, no se exportó el workspace y no se abrió el holdout.
+
+La vista previa no sustituye la admisión de muestra ni demuestra capacidad predictiva. No autoriza
+entrenamiento, tuning, nuevos indicadores, otra pantalla de estudios ni promoción de predictor;
+`PREDICTIVE-RESEARCH` permanece `NEXT` y V1-U4 sigue `UNKNOWN`. El primer ciclo prospectivo posterior
+y cualquier contraste con labels maduros pertenecen a la observación del siguiente PLAN.
 
 ## Limitaciones y siguiente decisión
 

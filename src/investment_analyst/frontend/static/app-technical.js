@@ -656,6 +656,312 @@ byId("daily-patterns-form").addEventListener("submit", (event) => {
 });
 prepareDailyPatternsRange();
 
+const FEATURE_PREVIEW_SCHEMA = "research-feature-preview-v1";
+const FEATURE_PREVIEW_MAX_BYTES = 32768;
+const FEATURE_PREVIEW_STATE_LABELS = Object.freeze({
+  available: "Disponible",
+  missing: "Faltante",
+  not_yet_available: "Aún no disponible",
+  incompatible: "Incompatible",
+  ambiguous: "Ambiguo",
+});
+const FEATURE_PREVIEW_STATUS_LABELS = Object.freeze({
+  features_available: "Inputs disponibles",
+  inputs_unavailable: "Inputs incompletos",
+});
+let featurePreviewRequestSequence = 0;
+let featurePreviewAbortController = null;
+let featurePreviewPayload = null;
+let featurePreviewDownloadUrl = null;
+let featurePreviewRequestKey = null;
+
+function featurePreviewIsoDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function featurePreviewCutInstant() {
+  const now = new Date();
+  const day = new Date(now);
+  day.setUTCHours(0, 0, 0, 0);
+  const noon = new Date(day.getTime() + 12 * 60 * 60 * 1000);
+  const chosen = now.getTime() < noon.getTime() ? now : noon;
+  return chosen.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+function featurePreviewApplyDefaults() {
+  byId("feature-preview-date").value = featurePreviewIsoDate();
+  byId("feature-preview-known-at").value = featurePreviewCutInstant();
+}
+
+function featurePreviewStatus(text) {
+  byId("feature-preview-status").textContent = text;
+}
+
+function featurePreviewKey() {
+  return [
+    selectedMarketAsset || "",
+    byId("feature-preview-date").value.trim(),
+    byId("feature-preview-known-at").value.trim(),
+  ].join("|");
+}
+
+function featurePreviewRevokeDownload() {
+  if (featurePreviewDownloadUrl) {
+    URL.revokeObjectURL(featurePreviewDownloadUrl);
+    featurePreviewDownloadUrl = null;
+  }
+}
+
+function featurePreviewAbort() {
+  featurePreviewRequestSequence += 1;
+  if (featurePreviewAbortController) {
+    featurePreviewAbortController.abort();
+    featurePreviewAbortController = null;
+  }
+}
+
+function featurePreviewClearPresentation() {
+  featurePreviewRevokeDownload();
+  featurePreviewPayload = null;
+  featurePreviewRequestKey = null;
+  byId("feature-preview-results").classList.add("hidden");
+  byId("feature-preview-results").setAttribute("aria-busy", "false");
+  byId("feature-preview-decision").textContent = "";
+  byId("feature-preview-decision").className = "badge neutral";
+  byId("feature-preview-summary").textContent = "";
+  byId("feature-preview-identity").textContent = "";
+  byId("feature-preview-columns").replaceChildren();
+  byId("feature-preview-refs").replaceChildren();
+  byId("feature-preview-limitations").replaceChildren();
+  byId("feature-preview-json").textContent = "";
+  byId("feature-preview-download").disabled = true;
+  byId("feature-preview-submit").disabled = false;
+}
+
+function resetFeaturePreviewPanel() {
+  featurePreviewAbort();
+  featurePreviewClearPresentation();
+  featurePreviewApplyDefaults();
+  featurePreviewStatus("Sin consultar. Define fecha y corte y pulsa «Consultar inputs».");
+}
+
+function featurePreviewInvalidate() {
+  featurePreviewAbort();
+  featurePreviewClearPresentation();
+  featurePreviewStatus(
+    "La selección cambió. La presentación y la descarga previas se descartaron;"
+      + " vuelve a consultar para esta fecha y corte.",
+  );
+}
+
+function featurePreviewTable(headers, rows) {
+  const table = createElement("table", "patterns-segments-table readiness-table");
+  const head = createElement("thead");
+  const headRow = createElement("tr");
+  for (const header of headers) {
+    headRow.append(createElement("th", "", header));
+  }
+  head.append(headRow);
+  table.append(head);
+  const body = createElement("tbody");
+  for (const row of rows) {
+    const bodyRow = createElement("tr");
+    for (const cell of row) {
+      const bodyCell = createElement("td");
+      if (typeof cell === "string" || typeof cell === "number") {
+        bodyCell.textContent = String(cell);
+      } else {
+        bodyCell.append(cell);
+      }
+      bodyRow.append(bodyCell);
+    }
+    body.append(bodyRow);
+  }
+  table.append(body);
+  return table;
+}
+
+function featurePreviewColumnBlock(feature) {
+  const article = createElement("article", "patterns-card readiness-column");
+  article.append(createElement("h4", "", feature.column_name));
+  const identity = [
+    feature.algorithm_version ? `versión ${feature.algorithm_version}` : null,
+    feature.unit ? `unidad ${feature.unit}` : null,
+  ].filter(Boolean).join(" · ");
+  if (identity) article.append(createElement("p", "patterns-coverage", identity));
+  article.append(
+    featurePreviewTable(
+      ["Estado", "Valor", "Disponible"],
+      [[
+        FEATURE_PREVIEW_STATE_LABELS[feature.state] || feature.state,
+        feature.value === null || feature.value === undefined ? "—" : String(feature.value),
+        feature.available_at || "—",
+      ]],
+    ),
+  );
+  if (feature.metric_result_id) {
+    article.append(
+      createElement("p", "patterns-technical", `resultado ${feature.metric_result_id}`),
+    );
+  }
+  if (feature.reasons.length) {
+    const reasons = createElement("ul", "patterns-limitations readiness-reasons");
+    for (const reason of feature.reasons) {
+      reasons.append(createElement("li", "", `${reason.code}: ${reason.detail}`));
+    }
+    article.append(reasons);
+  }
+  return article;
+}
+
+function featurePreviewRender(payload) {
+  const status = payload.status;
+  const badge = byId("feature-preview-decision");
+  badge.textContent = FEATURE_PREVIEW_STATUS_LABELS[status] || status;
+  badge.className = status === "features_available" ? "badge good" : "badge warn";
+  byId("feature-preview-summary").textContent =
+    `Decisión ${payload.decision_at} · corte ${payload.request.known_at}`
+      + ` · preview ${payload.preview_id}.`;
+  byId("feature-preview-identity").textContent =
+    `activo ${payload.asset.asset_id} · fuente ${payload.asset.source_id}`
+      + ` · workspace ${payload.workspace_uuid}`
+      + ` · experimento ${payload.experiment_spec_id}`
+      + ` · features ${payload.feature_set_version}`
+      + ` · sample ${payload.sample_key} · feature_hash ${payload.feature_hash}.`;
+  byId("feature-preview-columns").replaceChildren(
+    ...payload.features.map((feature) => featurePreviewColumnBlock(feature)),
+  );
+  const references = byId("feature-preview-refs");
+  references.replaceChildren();
+  references.append(
+    featurePreviewTable(
+      ["Cierre", "Disponible", "Observación"],
+      payload.close_references.map((reference) => [
+        reference.period_start,
+        reference.available_at,
+        reference.observation_id,
+      ]),
+    ),
+  );
+  const limitations = byId("feature-preview-limitations");
+  limitations.replaceChildren();
+  for (const limitation of payload.limitations) {
+    limitations.append(createElement("li", "", limitation));
+  }
+  byId("feature-preview-json").textContent = JSON.stringify(payload, null, 2);
+  byId("feature-preview-results").classList.remove("hidden");
+  byId("feature-preview-results").setAttribute("aria-busy", "false");
+  byId("feature-preview-download").disabled = false;
+  const available = payload.features.filter((feature) => feature.state === "available").length;
+  featurePreviewStatus(
+    `${FEATURE_PREVIEW_STATUS_LABELS[status] || status}:`
+      + ` ${available} de ${payload.features.length} inputs disponibles al corte.`,
+  );
+}
+
+async function featurePreviewQuery() {
+  if (!selectedMarketAsset) {
+    featurePreviewStatus("Selecciona un activo del catálogo antes de consultar los inputs.");
+    return;
+  }
+  const assetId = selectedMarketAsset;
+  const decisionDate = byId("feature-preview-date").value.trim();
+  const knownAt = byId("feature-preview-known-at").value.trim();
+  if (!decisionDate || !knownAt) {
+    featurePreviewStatus("Define fecha de decisión y corte UTC antes de consultar.");
+    return;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(decisionDate)) {
+    featurePreviewStatus("La fecha de decisión debe usar YYYY-MM-DD.");
+    return;
+  }
+  if (!Number.isFinite(Date.parse(knownAt))) {
+    featurePreviewStatus(
+      "El corte debe ser una fecha ISO 8601 con zona horaria, por ejemplo 2026-11-09T01:23:00Z.",
+    );
+    return;
+  }
+  const key = featurePreviewKey();
+  featurePreviewAbort();
+  const sequence = featurePreviewRequestSequence;
+  const controller = new AbortController();
+  featurePreviewAbortController = controller;
+  featurePreviewClearPresentation();
+  byId("feature-preview-submit").disabled = true;
+  byId("feature-preview-results").setAttribute("aria-busy", "true");
+  featurePreviewStatus("Leyendo inputs disponibles al corte con evidencia local…");
+  const parameters = new URLSearchParams({
+    asset_id: assetId,
+    decision_date: decisionDate,
+    known_at: knownAt,
+  });
+  try {
+    const payload = await api(`/api/v1/research/feature-preview?${parameters.toString()}`, {
+      signal: controller.signal,
+    });
+    if (
+      sequence !== featurePreviewRequestSequence
+      || controller.signal.aborted
+      || assetId !== selectedMarketAsset
+      || key !== featurePreviewKey()
+    ) return;
+    if (!payload || payload.schema_version !== FEATURE_PREVIEW_SCHEMA) {
+      throw new Error("La respuesta de inputs no coincide con el contrato declarado.");
+    }
+    featurePreviewPayload = payload;
+    featurePreviewRequestKey = key;
+    featurePreviewRender(payload);
+  } catch (error) {
+    if (sequence !== featurePreviewRequestSequence || controller.signal.aborted) return;
+    featurePreviewClearPresentation();
+    featurePreviewStatus(error.message);
+  } finally {
+    if (sequence === featurePreviewRequestSequence) {
+      byId("feature-preview-submit").disabled = false;
+      featurePreviewAbortController = null;
+    }
+  }
+}
+
+function featurePreviewDownload() {
+  if (!featurePreviewPayload || featurePreviewRequestKey !== featurePreviewKey()) {
+    featurePreviewStatus("Vuelve a consultar: la selección actual no coincide con la proyección recibida.");
+    return;
+  }
+  const body = JSON.stringify(featurePreviewPayload);
+  if (new TextEncoder().encode(body).length > FEATURE_PREVIEW_MAX_BYTES) {
+    featurePreviewStatus("La proyección recibida excede el límite de 32 KiB y no se descarga.");
+    return;
+  }
+  featurePreviewRevokeDownload();
+  const blob = new Blob([body], { type: "application/json" });
+  featurePreviewDownloadUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = featurePreviewDownloadUrl;
+  link.download = `feature-preview-${featurePreviewPayload.preview_id}.json`;
+  link.click();
+  featurePreviewStatus(
+    "Proyección JSON exacta descargada desde la respuesta recibida, sin recomputar nada.",
+  );
+}
+
+function initializeFeaturePreviewPanel() {
+  for (const controlId of ["feature-preview-date", "feature-preview-known-at"]) {
+    byId(controlId).addEventListener("input", () => {
+      featurePreviewInvalidate();
+    });
+  }
+  byId("feature-preview-submit").addEventListener("click", () => {
+    void featurePreviewQuery();
+  });
+  byId("feature-preview-download").addEventListener("click", () => {
+    featurePreviewDownload();
+  });
+  resetFeaturePreviewPanel();
+}
+
+initializeFeaturePreviewPanel();
+
 const ML_REPORT_SCHEMA = "ml-research-report-view-v1";
 const ML_RUN_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ML_SCORER_LABELS = Object.freeze({
@@ -2163,6 +2469,7 @@ function initializeExperimentsExplorer() {
 
 initializeExperimentsExplorer();
 
+
 const READINESS_VIEW_SCHEMA = "research-pit-readiness-view-v1";
 const READINESS_DEFAULT_DATE_COUNT = 366;
 const READINESS_STATE_LABELS = Object.freeze({
@@ -2283,6 +2590,7 @@ function resetReadinessPanel() {
   readinessApplyDefaults();
   readinessContext();
   readinessStatus("Sin consultar. Define rango y corte y pulsa «Consultar preparación».");
+  if (typeof resetFeaturePreviewPanel === "function") resetFeaturePreviewPanel();
 }
 
 function readinessInvalidate() {

@@ -282,6 +282,15 @@ from investment_analyst.research.experiment_report_service import (
     ExperimentReportNotFoundError,
     ExperimentReportService,
 )
+from investment_analyst.research.feature_preview_models import (
+    FEATURE_PREVIEW_SCHEMA_VERSION,
+    FeaturePreviewAssetUnsupportedError,
+    FeaturePreviewBudgetError,
+    FeaturePreviewError,
+    FeaturePreviewIntegrityError,
+    FeaturePreviewRequest,
+    ResearchFeaturePreview,
+)
 from investment_analyst.research.ml_report_models import MlResearchReportView
 from investment_analyst.research.ml_report_service import (
     MlReportConflictError,
@@ -524,6 +533,15 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> ResearchPitReadinessView:
         """Project one deterministic research readiness view without writes."""
+        ...
+
+    def query_research_feature_preview(
+        self,
+        request: FeaturePreviewRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> ResearchFeaturePreview:
+        """Project one bounded pre-decision feature view without writes."""
         ...
 
     def query_listed_company_diagnostics(
@@ -1178,6 +1196,53 @@ class AaplLocalController:
         return self._signed_read_composite(
             (bars_query, metrics_query),
             lambda: self._application.query_research_readiness(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
+        )
+
+    def research_feature_preview_request(
+        self,
+        request: FeaturePreviewRequest,
+    ) -> ResearchFeaturePreview:
+        """Project pre-decision inputs from persisted evidence without providers or writes."""
+        descriptor = self._market_assets_by_id.get(request.asset_id)
+        source_ids = (descriptor.source_id,) if descriptor is not None else ()
+        selector = (
+            f"schema={FEATURE_PREVIEW_SCHEMA_VERSION};"
+            f"experiment={PREREGISTERED_EXPERIMENT.experiment_spec_id};"
+            f"features={PREREGISTERED_EXPERIMENT.feature_set_version};"
+            f"asset={request.asset_id};"
+            f"decision_date={request.decision_date.isoformat()};"
+            f"known_at={request.known_at.isoformat()}"
+        )
+        day_start = bar_start_instant(request.decision_date)
+        bars_query = ReadDependencyQuery(
+            family=ReadDependencyFamily.MARKET_BARS,
+            endpoint="/api/v1/research/feature-preview",
+            asset_ids=(request.asset_id,),
+            source_ids=source_ids,
+            field_names=("close",),
+            frequency="day_1",
+            start=bar_start_instant(request.decision_date + timedelta(days=FEATURE_DAY_OFFSETS[1])),
+            end=day_start,
+            known_at=request.known_at,
+            selector=selector,
+        )
+        metrics_query = ReadDependencyQuery(
+            family=ReadDependencyFamily.METRICS,
+            endpoint="/api/v1/research/feature-preview",
+            asset_ids=(request.asset_id,),
+            source_ids=source_ids,
+            metric_keys=tuple(sorted((RSI_METRIC_KEY, MACD_HISTOGRAM_METRIC_KEY))),
+            start=bar_start_instant(request.decision_date + timedelta(days=FEATURE_DAY_OFFSETS[0])),
+            end=day_start,
+            known_at=request.known_at,
+            selector=selector,
+        )
+        return self._signed_read_composite(
+            (bars_query, metrics_query),
+            lambda: self._application.query_research_feature_preview(
                 request,
                 location=StorageLocationRequest(workspace=self._workspace),
             ),
@@ -2526,6 +2591,24 @@ class AaplLocalWebApplication:
         )
         return self._controller.research_readiness_request(request).to_json_dict()
 
+    def research_feature_preview(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Validate one explicit pre-decision feature query without providers or writes."""
+        allowed = {"asset_id", "decision_date", "known_at"}
+        if set(parameters) - allowed:
+            raise ValueError("research feature preview query contains unsupported parameters")
+        descriptor = self._market_asset(_one_parameter(parameters, "asset_id", required=True))
+        request = FeaturePreviewRequest(
+            asset_id=descriptor.asset_id,
+            decision_date=_date_parameter(
+                _one_parameter(parameters, "decision_date", required=True)
+            ),
+            known_at=_aware_datetime(_one_parameter(parameters, "known_at", required=True)),
+        )
+        return self._controller.research_feature_preview_request(request).to_json_dict()
+
     def ml_research_report(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate one explicit sealed-run query without provider or storage access."""
         allowed = {"asset_id", "run_id"}
@@ -3490,6 +3573,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                     server.application.research_readiness(parameters),
                 )
                 return
+            if parsed.path == "/api/v1/research/feature-preview":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=3)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.research_feature_preview(parameters),
+                )
+                return
             if parsed.path == "/api/v1/research/ml-report":
                 raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=2)
                 parameters = {key: tuple(values) for key, values in raw.items()}
@@ -3882,10 +3973,25 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
             self._send_error(HTTPStatus.NOT_FOUND, "ml_report_not_found", str(error)[:500])
         elif isinstance(error, MlReportConflictError):
             self._send_error(HTTPStatus.CONFLICT, "ml_report_conflict", str(error)[:500])
-        elif isinstance(error, ReadinessAssetUnsupportedError):
+        elif isinstance(
+            error,
+            (FeaturePreviewAssetUnsupportedError, ReadinessAssetUnsupportedError),
+        ):
             self._send_error(
                 HTTPStatus.UNPROCESSABLE_ENTITY,
                 "asset_incompatible",
+                str(error)[:500],
+            )
+        elif isinstance(error, FeaturePreviewIntegrityError):
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "operational_error",
+                str(error)[:500],
+            )
+        elif isinstance(error, (FeaturePreviewBudgetError, FeaturePreviewError)):
+            self._send_error(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "feature_preview_unavailable",
                 str(error)[:500],
             )
         elif isinstance(error, ReadinessRequestError):

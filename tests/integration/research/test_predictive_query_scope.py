@@ -19,6 +19,11 @@ from investment_analyst.core.models import (
     SourceReference,
 )
 from investment_analyst.core.models.enums import DataFrequency, DataQuality
+from investment_analyst.research.feature_preview_models import (
+    FeaturePreviewRequest,
+    FeaturePreviewStatus,
+    ResearchFeaturePreview,
+)
 from investment_analyst.research.predictive_dataset import PredictiveDatasetBuilder
 from investment_analyst.research.predictive_models import (
     MAX_PAGE_SIZE,
@@ -254,6 +259,40 @@ def _build(
     return dataset, hydrated, pages
 
 
+def _preview(
+    service: WorkspaceService,
+    root: Path,
+    request: FeaturePreviewRequest,
+) -> tuple[ResearchFeaturePreview, list[MetricResult], list[int]]:
+    runtime = ApplicationRuntime.create_default(workspace_service=service)
+    hydrated: list[MetricResult] = []
+    pages: list[int] = []
+    location = StorageLocationRequest(workspace=root)
+    with runtime.open_storage(location, access_mode=WorkspaceAccessMode.READ_ONLY) as storage:
+        repository = storage.metric_results
+        original_get_many = repository.get_many
+        original_page = repository.list_metric_index_page
+
+        def recording_get_many(identifiers: tuple[UUID, ...]) -> dict[UUID, MetricResult]:
+            result = original_get_many(identifiers)
+            hydrated.extend(result.values())
+            return result
+
+        def recording_page(query: object) -> tuple[object, ...]:
+            result = original_page(query)
+            pages.append(len(result))
+            return result
+
+        repository.get_many = recording_get_many  # type: ignore[method-assign]
+        repository.list_metric_index_page = recording_page  # type: ignore[method-assign]
+        preview = PredictiveDatasetBuilder(
+            storage,
+            provider_resolver=runtime.provider_resolver,
+            catalog=runtime.catalog,
+        ).preview_features(request)
+    return preview, hydrated, pages
+
+
 def test_foreign_corpus_never_changes_identity_or_hydration(tmp_path: Path) -> None:
     service = WorkspaceService(environ={}, home=tmp_path / "home")
     initialization = service.initialize(tmp_path / "workspace")
@@ -469,3 +508,160 @@ def test_reads_every_metric_page_without_truncating_revisions(tmp_path: Path) ->
     assert sample.features[1].value == Decimal("299") / Decimal(100)
     assert sample.features[1].metric_result_id is not None
     assert sample.feature_state.value == "available"
+
+
+def test_preview_foreign_corpus_never_changes_identity_or_hydration(tmp_path: Path) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialization = service.initialize(tmp_path / "workspace")
+    decision = date(2026, 8, 10)
+    close_days = _decision_days(decision - timedelta(days=2), decision)
+    foreign_days = _decision_days(decision - timedelta(days=1), decision)
+    writer = service.open_storage(
+        initialization.paths,
+        WorkspaceAccessMode.READ_WRITE,
+    )
+    try:
+        _seed_series(
+            writer,
+            asset_id=_BTC,
+            source_id=_BTC_SOURCE,
+            days=close_days,
+            start_value=100,
+            suffix="btc",
+        )
+        _seed_series(
+            writer,
+            asset_id=_SOL,
+            source_id=_SOL_SOURCE,
+            days=foreign_days,
+            start_value=200,
+            suffix="sol-1x",
+        )
+    finally:
+        writer.close()
+
+    request = FeaturePreviewRequest(
+        asset_id=_BTC,
+        decision_date=decision,
+        known_at=decision_instant(decision),
+    )
+    first, hydrated, pages = _preview(service, tmp_path / "workspace", request)
+    assert first.status is FeaturePreviewStatus.FEATURES_AVAILABLE
+    assert all(item.state.value == "available" for item in first.features)
+    assert hydrated
+    assert all(metric.asset_id == _BTC for metric in hydrated)
+    assert all(metric.parameters.get("source_id") == _BTC_SOURCE for metric in hydrated)
+    assert pages and all(0 < size <= MAX_PAGE_SIZE for size in pages)
+
+    writer = service.open_storage(
+        initialization.paths,
+        WorkspaceAccessMode.READ_WRITE,
+    )
+    try:
+        for index in range(9):
+            _seed_series(
+                writer,
+                asset_id=_SOL,
+                source_id=_SOL_SOURCE,
+                days=foreign_days,
+                start_value=300 + index * 100,
+                suffix=f"sol-10x-{index}",
+            )
+    finally:
+        writer.close()
+
+    before = _tree_state(initialization.paths.root)
+    second, hydrated_second, pages_second = _preview(
+        service,
+        tmp_path / "workspace",
+        request,
+    )
+    after = _tree_state(initialization.paths.root)
+
+    assert first.preview_id == second.preview_id
+    assert first.to_json_dict() == second.to_json_dict()
+    assert hydrated_second
+    assert all(metric.asset_id == _BTC for metric in hydrated_second)
+    assert all(0 < size <= MAX_PAGE_SIZE for size in pages_second)
+    assert before == after
+
+
+def test_preview_reads_every_metric_page_without_truncating_revisions(tmp_path: Path) -> None:
+    service = WorkspaceService(environ={}, home=tmp_path / "home")
+    initialization = service.initialize(tmp_path / "workspace")
+    decision = date(2026, 8, 10)
+    close_days = _decision_days(decision - timedelta(days=2), decision)
+    period = decision - timedelta(days=1)
+    writer = service.open_storage(
+        initialization.paths,
+        WorkspaceAccessMode.READ_WRITE,
+    )
+    try:
+        _, observations, _ = _seed_series(
+            writer,
+            asset_id=_BTC,
+            source_id=_BTC_SOURCE,
+            days=close_days,
+            start_value=100,
+            suffix="btc",
+            with_metrics=False,
+        )
+        observation = next(
+            item for item in observations if item.observed_at == bar_start_instant(period)
+        )
+        revision_base = decision_instant(decision) - timedelta(hours=11)
+        metrics = [
+            _metric(
+                asset_id=_BTC,
+                source_id=_BTC_SOURCE,
+                day=period,
+                key="market.technical.rsi",
+                value=Decimal(index),
+                available_at=revision_base + timedelta(minutes=index),
+                input_observation_id=observation.observation_id,
+                seed=f"preview-rsi-revision-{index}",
+                version=_RSI_VERSION,
+                unit="index",
+                parameters={"window": 14},
+            )
+            for index in range(300)
+        ]
+        metrics.append(
+            _metric(
+                asset_id=_BTC,
+                source_id=_BTC_SOURCE,
+                day=period,
+                key="market.technical.macd.histogram",
+                value=Decimal("2"),
+                available_at=revision_base,
+                input_observation_id=observation.observation_id,
+                seed="preview-macd-revision",
+                version=_MACD_VERSION,
+                unit="USD",
+                parameters={"fast_window": 12, "slow_window": 26, "signal_window": 9},
+            )
+        )
+        writer.metric_results.save_many(metrics)
+        _seed_series(
+            writer,
+            asset_id=_SOL,
+            source_id=_SOL_SOURCE,
+            days=_decision_days(period, period),
+            start_value=900,
+            suffix="sol-foreign",
+        )
+    finally:
+        writer.close()
+
+    request = FeaturePreviewRequest(
+        asset_id=_BTC,
+        decision_date=decision,
+        known_at=decision_instant(decision),
+    )
+    preview, hydrated, pages = _preview(service, tmp_path / "workspace", request)
+    assert pages == [256, 45]
+    assert len(hydrated) == 301
+    assert all(metric.asset_id == _BTC for metric in hydrated)
+    assert preview.features[1].value == Decimal("299") / Decimal(100)
+    assert preview.features[1].metric_result_id is not None
+    assert preview.features[1].state.value == "available"

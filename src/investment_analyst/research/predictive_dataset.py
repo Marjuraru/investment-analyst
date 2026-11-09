@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
@@ -28,11 +29,23 @@ from investment_analyst.analytics.market.history_service import (
     require_unambiguous_revision,
 )
 from investment_analyst.analytics.metric_identity_cut import MetricCutContractError
+from investment_analyst.catalog.models import CatalogAsset
 from investment_analyst.catalog.provider_configuration import resolve_coinbase_configuration
 from investment_analyst.catalog.provider_context import ProviderAssetContextResolver
 from investment_analyst.catalog.service import AssetCatalogService
 from investment_analyst.core.models import MetricResult, NormalizedObservation
 from investment_analyst.core.models.enums import AssetClass, DataFrequency, DataQuality
+from investment_analyst.research.feature_preview_models import (
+    MAX_FEATURE_PREVIEW_BYTES,
+    FeaturePreviewAssetUnsupportedError,
+    FeaturePreviewBudgetError,
+    FeaturePreviewCloseReference,
+    FeaturePreviewIntegrityError,
+    FeaturePreviewRequest,
+    FeaturePreviewStatus,
+    ResearchFeaturePreview,
+    feature_preview_id,
+)
 from investment_analyst.research.predictive_models import (
     CLOSE_FIELD_NAME,
     CLOSE_RETURN_ALGORITHM_VERSION,
@@ -141,6 +154,27 @@ class _DraftSample:
     label_state: LabelState
 
 
+@dataclass(frozen=True, slots=True)
+class _ResolvedAsset:
+    asset: CatalogAsset
+    source_id: str
+    identity: PredictiveAssetIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadContext:
+    asset_id: str
+    source_id: str
+    known_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _FeatureSelection:
+    features: tuple[PredictiveFeatureEvidence, ...]
+    previous: _CloseSelection
+    prior: _CloseSelection
+
+
 def _combine_states(*states: FeatureState) -> FeatureState:
     for candidate in (
         FeatureState.AMBIGUOUS,
@@ -211,9 +245,9 @@ class PredictiveDatasetBuilder:
             conditions=(condition,),
         )
 
-    def build(self, request: PredictiveDatasetRequest) -> PredictiveDataset:
-        """Return the deterministic dataset for one explicit request and cut."""
-        asset = self._catalog.get(request.asset_id)
+    def _resolve_asset(self, asset_id: str) -> _ResolvedAsset:
+        """Resolve the single supported crypto spot source once per read."""
+        asset = self._catalog.get(asset_id)
         if asset.asset_class is not SUPPORTED_ASSET_CLASS:
             raise UnsupportedPredictiveAssetError(
                 f"asset {asset.asset_id} is not a supported crypto spot asset"
@@ -228,7 +262,7 @@ class PredictiveDatasetBuilder:
             )
         configuration = resolve_coinbase_configuration(
             self._provider_resolver,
-            asset_id=request.asset_id,
+            asset_id=asset_id,
         )
         if (
             configuration.asset_class is not SUPPORTED_ASSET_CLASS
@@ -237,7 +271,28 @@ class PredictiveDatasetBuilder:
             raise UnsupportedPredictiveAssetError(
                 "resolved Coinbase configuration is outside crypto spot USD"
             )
-        source_id = configuration.source_id
+        return _ResolvedAsset(
+            asset=asset,
+            source_id=configuration.source_id,
+            identity=PredictiveAssetIdentity(
+                asset_id=asset.asset_id,
+                source_id=configuration.source_id,
+                asset_class=asset.asset_class,
+                quote_currency=asset.quote_currency,
+                crypto_profile=asset.crypto_profile.value,
+                exchange=asset.exchange or "UNKNOWN",
+            ),
+        )
+
+    def build(self, request: PredictiveDatasetRequest) -> PredictiveDataset:
+        """Return the deterministic dataset for one explicit request and cut."""
+        resolved = self._resolve_asset(request.asset_id)
+        source_id = resolved.source_id
+        read_context = _ReadContext(
+            asset_id=request.asset_id,
+            source_id=source_id,
+            known_at=request.dataset_known_at,
+        )
 
         decision_dates = request.decision_dates()
         feature_read_start = bar_start_instant(
@@ -250,27 +305,25 @@ class PredictiveDatasetBuilder:
         )
 
         closes = self._read_closes(
-            request,
-            source_id=source_id,
+            read_context,
             start=min(feature_read_start, label_read_start),
             end=max(feature_read_end, bar_start_instant(request.end_date + timedelta(days=6))),
         )
         metrics = self._read_metrics(
-            request,
-            source_id=source_id,
+            read_context,
             as_of_from=bar_start_instant(request.start_date + timedelta(days=-1)),
             as_of_before=bar_start_instant(request.end_date),
         )
 
         drafts: list[_DraftSample] = []
         for decision_date in decision_dates:
-            features = self._features(
+            features = self._feature_selection(
                 closes,
                 metrics,
                 decision_date=decision_date,
-                dataset_known_at=request.dataset_known_at,
+                cut=decision_instant(decision_date),
                 source_id=source_id,
-            )
+            ).features
             label = self._label(
                 closes,
                 decision_date=decision_date,
@@ -321,14 +374,7 @@ class PredictiveDatasetBuilder:
             train_positive=splits[0].positive or 0,
             train_negative=splits[0].negative or 0,
         )
-        asset_identity = PredictiveAssetIdentity(
-            asset_id=asset.asset_id,
-            source_id=source_id,
-            asset_class=asset.asset_class,
-            quote_currency=asset.quote_currency,
-            crypto_profile=asset.crypto_profile.value,
-            exchange=asset.exchange or "UNKNOWN",
-        )
+        asset_identity = resolved.identity
         dataset_id = predictive_dataset_id(
             experiment_spec_id=PREREGISTERED_EXPERIMENT.experiment_spec_id,
             workspace_uuid=self._workspace_uuid,
@@ -390,29 +436,163 @@ class PredictiveDatasetBuilder:
             samples=samples,
         )
 
+    def preview_features(self, request: FeaturePreviewRequest) -> ResearchFeaturePreview:
+        """Project the three preregistered inputs available at one explicit cut."""
+        try:
+            resolved = self._resolve_asset(request.asset_id)
+        except UnsupportedPredictiveAssetError as error:
+            raise FeaturePreviewAssetUnsupportedError(str(error)) from error
+        context = _ReadContext(
+            asset_id=request.asset_id,
+            source_id=resolved.source_id,
+            known_at=request.known_at,
+        )
+        decision_at = decision_instant(request.decision_date)
+        day_start = bar_start_instant(request.decision_date)
+        feature_start = bar_start_instant(
+            request.decision_date + timedelta(days=FEATURE_DAY_OFFSETS[1])
+        )
+        metric_start = bar_start_instant(
+            request.decision_date + timedelta(days=FEATURE_DAY_OFFSETS[0])
+        )
+        try:
+            closes = self._read_closes(context, start=feature_start, end=day_start)
+            metrics = self._read_metrics(
+                context,
+                as_of_from=metric_start,
+                as_of_before=day_start,
+            )
+            selection = self._feature_selection(
+                closes,
+                metrics,
+                decision_date=request.decision_date,
+                cut=request.known_at,
+                source_id=resolved.source_id,
+            )
+            close_references = tuple(
+                sorted(
+                    (
+                        reference
+                        for reference in (
+                            self._close_reference(selection.previous),
+                            self._close_reference(selection.prior),
+                        )
+                        if reference is not None
+                    ),
+                    key=lambda item: item.period_start,
+                )
+            )
+        except PredictiveDatasetIntegrityError as error:
+            raise FeaturePreviewIntegrityError(str(error)) from error
+        features = selection.features
+        sample_key = predictive_sample_key(
+            experiment_spec_id=PREREGISTERED_EXPERIMENT.experiment_spec_id,
+            asset_id=request.asset_id,
+            source_id=resolved.source_id,
+            decision_at=decision_at,
+        )
+        feature_hash = predictive_feature_hash(
+            sample_key=sample_key,
+            asset_id=request.asset_id,
+            source_id=resolved.source_id,
+            decision_at=decision_at,
+            features=features,
+        )
+        status = (
+            FeaturePreviewStatus.FEATURES_AVAILABLE
+            if aggregate_feature_state(features) is FeatureState.AVAILABLE
+            else FeaturePreviewStatus.INPUTS_UNAVAILABLE
+        )
+        limitations = (
+            "Disponibilidad de inputs; no mide suficiencia de muestra ni capacidad predictiva.",
+            "Una columna ausente al corte puede aparecer antes de las 12:00 UTC de la decisión.",
+            "La consulta no lee labels, barras D..D+5 ni archivos históricos ni entrena.",
+            "available_at y computed_at se distinguen; computed_at no sustituye la disponibilidad.",
+        )
+        material_payload: dict[str, object] = {
+            "schema_version": "research-feature-preview-v1",
+            "workspace_uuid": self._workspace_uuid,
+            "asset": resolved.identity,
+            "experiment_spec_id": PREREGISTERED_EXPERIMENT.experiment_spec_id,
+            "feature_set_version": PREREGISTERED_EXPERIMENT.feature_set_version,
+            "request": request.model_dump(mode="json"),
+            "decision_at": decision_at,
+            "status": status,
+            "sample_key": sample_key,
+            "feature_hash": feature_hash,
+            "features": features,
+            "close_references": close_references,
+            "limitations": limitations,
+        }
+        preview = ResearchFeaturePreview(
+            preview_id=feature_preview_id(
+                workspace_uuid=self._workspace_uuid,
+                asset=resolved.identity,
+                request=request,
+                decision_at=decision_at,
+                material_payload=material_payload,
+            ),
+            workspace_uuid=self._workspace_uuid,
+            asset=resolved.identity,
+            experiment_spec_id=PREREGISTERED_EXPERIMENT.experiment_spec_id,
+            feature_set_version=PREREGISTERED_EXPERIMENT.feature_set_version,
+            request=request,
+            decision_at=decision_at,
+            status=status,
+            sample_key=sample_key,
+            feature_hash=feature_hash,
+            features=features,
+            close_references=close_references,
+            limitations=limitations,
+        )
+        encoded = json.dumps(
+            preview.to_json_dict(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > MAX_FEATURE_PREVIEW_BYTES:
+            raise FeaturePreviewBudgetError(
+                f"feature preview projection exceeds {MAX_FEATURE_PREVIEW_BYTES} bytes"
+            )
+        return preview
+
+    @staticmethod
+    def _close_reference(
+        selection: _CloseSelection,
+    ) -> FeaturePreviewCloseReference | None:
+        observation = selection.observation
+        if observation is None:
+            return None
+        if observation.period_start is None or observation.period_end is None:
+            raise PredictiveDatasetIntegrityError("selected close lacks an explicit period")
+        return FeaturePreviewCloseReference(
+            observation_id=observation.observation_id,
+            period_start=observation.period_start,
+            period_end=observation.period_end,
+            available_at=observation.available_at,
+        )
+
     def _read_closes(
         self,
-        request: PredictiveDatasetRequest,
+        context: _ReadContext,
         *,
-        source_id: str,
         start: datetime,
         end: datetime,
     ) -> dict[datetime, tuple[NormalizedObservation, ...]]:
         observations = self._storage.observations.list(
-            asset_id=request.asset_id,
-            source_id=source_id,
+            asset_id=context.asset_id,
+            source_id=context.source_id,
             frequency=DataFrequency.DAY_1,
             field_name=CLOSE_FIELD_NAME,
             observed_from=start,
             observed_before=end,
-            available_to=request.dataset_known_at,
+            available_to=context.known_at,
         )
         grouped: dict[datetime, list[NormalizedObservation]] = {}
         for observation in observations:
             self._validate_close_scope(
                 observation,
-                request=request,
-                source_id=source_id,
+                context=context,
                 start=start,
                 end=end,
             )
@@ -426,14 +606,13 @@ class PredictiveDatasetBuilder:
     def _validate_close_scope(
         observation: NormalizedObservation,
         *,
-        request: PredictiveDatasetRequest,
-        source_id: str,
+        context: _ReadContext,
         start: datetime,
         end: datetime,
     ) -> None:
-        if observation.asset_id != request.asset_id:
+        if observation.asset_id != context.asset_id:
             raise PredictiveDatasetIntegrityError("close observation belongs to another asset")
-        if observation.source.source_id != source_id:
+        if observation.source.source_id != context.source_id:
             raise PredictiveDatasetIntegrityError("close observation belongs to another source")
         if observation.frequency is not DataFrequency.DAY_1:
             raise PredictiveDatasetIntegrityError("close observation is not daily")
@@ -443,25 +622,24 @@ class PredictiveDatasetBuilder:
             raise PredictiveDatasetIntegrityError("close observation lacks observed_at")
         if not start <= observation.observed_at < end:
             raise PredictiveDatasetIntegrityError("close observation is outside the read window")
-        if observation.available_at > request.dataset_known_at:
+        if observation.available_at > context.known_at:
             raise PredictiveDatasetIntegrityError(
-                "close observation is not available at dataset_known_at"
+                "close observation is not available at the requested cut"
             )
 
     def _read_metrics(
         self,
-        request: PredictiveDatasetRequest,
+        context: _ReadContext,
         *,
-        source_id: str,
         as_of_from: datetime,
         as_of_before: datetime,
     ) -> dict[datetime, tuple[MetricResult, ...]]:
         query = MetricSeriesQuery(
-            asset_id=request.asset_id,
+            asset_id=context.asset_id,
             domain="market",
-            known_at=request.dataset_known_at,
+            known_at=context.known_at,
             metric_keys=(RSI_METRIC_KEY, MACD_HISTOGRAM_METRIC_KEY),
-            source_id=source_id,
+            source_id=context.source_id,
             as_of_from=as_of_from,
             as_of_before=as_of_before,
             limit=MAX_PAGE_SIZE,
@@ -485,7 +663,7 @@ class PredictiveDatasetBuilder:
                 if entry.result_id in seen:
                     raise PredictiveDatasetIntegrityError("metric index repeated a result")
                 seen.add(entry.result_id)
-                if self._legacy_visible(entry, request.dataset_known_at):
+                if self._legacy_visible(entry, context.known_at):
                     visible.append(entry)
             identifiers = tuple(entry.result_id for entry in visible)
             results = self._storage.metric_results.get_many(identifiers) if identifiers else {}
@@ -553,7 +731,7 @@ class PredictiveDatasetBuilder:
             )
         if result.available_at > query.known_at:
             raise PredictiveDatasetIntegrityError(
-                "metric result is not available at dataset_known_at"
+                "metric result is not available at the requested cut"
             )
 
     @staticmethod
@@ -574,44 +752,49 @@ class PredictiveDatasetBuilder:
             )
         return legacy <= known_at
 
-    def _features(
+    def _feature_selection(
         self,
         closes: dict[datetime, tuple[NormalizedObservation, ...]],
         metrics: dict[datetime, tuple[MetricResult, ...]],
         *,
         decision_date: date,
-        dataset_known_at: datetime,
+        cut: datetime,
         source_id: str,
-    ) -> tuple[PredictiveFeatureEvidence, ...]:
-        decision_at = decision_instant(decision_date)
+    ) -> _FeatureSelection:
         previous_day = decision_date + timedelta(days=FEATURE_DAY_OFFSETS[0])
         prior_day = decision_date + timedelta(days=FEATURE_DAY_OFFSETS[1])
         previous = self._select_close(
             closes.get(bar_start_instant(previous_day)),
-            cut=decision_at,
+            cut=cut,
             expected_start=bar_start_instant(previous_day),
         )
         prior = self._select_close(
             closes.get(bar_start_instant(prior_day)),
-            cut=decision_at,
+            cut=cut,
             expected_start=bar_start_instant(prior_day),
         )
-        return (
-            self._close_return_evidence(previous, prior),
-            self._metric_evidence(
-                self._rule_for(RSI_COLUMN),
-                metrics.get(bar_start_instant(previous_day), ()),
-                decision_at=decision_at,
-                source_id=source_id,
-                denominator=None,
+        return _FeatureSelection(
+            features=(
+                self._close_return_evidence(previous, prior),
+                self._metric_evidence(
+                    self._rule_for(RSI_COLUMN),
+                    metrics.get(bar_start_instant(previous_day), ()),
+                    decision_date=decision_date,
+                    known_at=cut,
+                    source_id=source_id,
+                    denominator=None,
+                ),
+                self._metric_evidence(
+                    self._rule_for(MACD_HISTOGRAM_COLUMN),
+                    metrics.get(bar_start_instant(previous_day), ()),
+                    decision_date=decision_date,
+                    known_at=cut,
+                    source_id=source_id,
+                    denominator=previous,
+                ),
             ),
-            self._metric_evidence(
-                self._rule_for(MACD_HISTOGRAM_COLUMN),
-                metrics.get(bar_start_instant(previous_day), ()),
-                decision_at=decision_at,
-                source_id=source_id,
-                denominator=previous,
-            ),
+            previous=previous,
+            prior=prior,
         )
 
     def _rule_for(self, column: str) -> AnalyticalScreeningRule:
@@ -741,7 +924,8 @@ class PredictiveDatasetBuilder:
         rule: AnalyticalScreeningRule,
         period_metrics: tuple[MetricResult, ...],
         *,
-        decision_at: datetime,
+        decision_date: date,
+        known_at: datetime,
         source_id: str,
         denominator: _CloseSelection | None,
     ) -> PredictiveFeatureEvidence:
@@ -754,7 +938,8 @@ class PredictiveDatasetBuilder:
             rule,
             spec,
             period_metrics,
-            decision_at=decision_at,
+            decision_date=decision_date,
+            known_at=known_at,
             source_id=source_id,
         )
         if denominator is not None:
@@ -803,7 +988,8 @@ class PredictiveDatasetBuilder:
         spec: PredictiveFeatureColumnSpec,
         period_metrics: tuple[MetricResult, ...],
         *,
-        decision_at: datetime,
+        decision_date: date,
+        known_at: datetime,
         source_id: str,
     ) -> _MetricSelection:
         try:
@@ -811,7 +997,7 @@ class PredictiveDatasetBuilder:
                 rule=rule,
                 metrics=period_metrics,
                 source_id=source_id,
-                known_at=decision_at,
+                known_at=known_at,
             )
         except (AmbiguousAnalyticalMetricError, MetricCutContractError) as error:
             return _MetricSelection(
@@ -822,7 +1008,7 @@ class PredictiveDatasetBuilder:
             raise PredictiveDatasetIntegrityError("metric selector returned multiple results")
         if selected:
             metric = selected[0]
-            if metric.as_of != bar_start_instant(decision_at.date() + timedelta(days=-1)):
+            if metric.as_of != bar_start_instant(decision_date + timedelta(days=-1)):
                 raise PredictiveDatasetIntegrityError(
                     "metric selector returned evidence from another period"
                 )
@@ -832,13 +1018,13 @@ class PredictiveDatasetBuilder:
             for metric in period_metrics
             if self._matches_metric_contract(metric, spec, source_id)
         )
-        if matching and all(metric.available_at > decision_at for metric in matching):
+        if matching and all(metric.available_at > known_at for metric in matching):
             return _MetricSelection(
                 FeatureState.NOT_YET_AVAILABLE,
                 reasons=(
                     _reason(
                         ReasonCode.METRIC_NOT_YET_AVAILABLE,
-                        f"{spec.metric_key} for {decision_at.date()} is not available at decision",
+                        f"{spec.metric_key} for {decision_date} is not available at cut",
                     ),
                 ),
             )
@@ -859,7 +1045,7 @@ class PredictiveDatasetBuilder:
             reasons=(
                 _reason(
                     ReasonCode.METRIC_MISSING,
-                    f"no {spec.metric_key} evidence for {decision_at.date()}",
+                    f"no {spec.metric_key} evidence for {decision_date}",
                 ),
             ),
         )

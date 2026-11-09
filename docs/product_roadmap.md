@@ -167,6 +167,18 @@ en FINALIZE y el primer ciclo futuro es observación posterior, no requisito de 
 sigue `UNKNOWN`, `PREDICTIVE-RESEARCH` es el único `NEXT` y las hipótesis baseline, funding y
 volatility permanecen detenidas sin promoción.
 
+`PIT-FEATURE-PREVIEW`/#426 (`ADVANCES`) separa la consulta de inputs antes de la decisión de la
+reconstrucción completa del dataset: `research-feature-preview-v1` lee sólo cierres D-2/D-1 y
+métricas RSI/MACD de D-1 disponibles en un corte explícito dentro de `D 00:00Z..D 12:00Z`, reutiliza
+las tres evidencias e identidades del experimento y no lee labels, barras D..D+5, raws ni archivos
+históricos. `GET /api/v1/research/feature-preview`, el CLI y el panel de preparación devuelven la
+misma proyección con descarga exacta de hasta 32 KiB, sin consulta automática ni entrenamiento. La
+evidencia real BTC/SOL `2026-11-09` con corte `2026-11-09T01:23:00Z` fue `inputs_unavailable` (2.356 B,
+BTC 0,988 s frío / 0,259 s caliente, RSS 206.684 KiB); la equivalencia histórica a las 12:00 coincidió
+exactamente con el dataset `fd55d5ed…` y el workspace no cambió. No demuestra capacidad predictiva ni
+autoriza tuning, otro indicador o promoción; el contraste prospectivo con labels maduros pertenece al
+siguiente PLAN y V1-U4 permanece `UNKNOWN`.
+
 La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de crecimiento viven en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md).
 La implementación vigente de reglas, replay y entrega se reconcilia en
