@@ -1,6 +1,6 @@
 # Hoja de ruta estratégica del producto
 
-> Estado vigente 2026-11-05: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
+> Estado vigente 2026-11-09: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
 > `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` conservando su deuda y evidencia, sin declararse `DONE`.
 > La readiness operativa v2 se registra en
 > [`v2_operational_readiness.md`](v2_operational_readiness.md): avanza prerrequisitos de interfaz,
@@ -155,6 +155,17 @@ con folds, MSE/MAE, comparaciones pareadas y el motivo del fold 2, y descarga
 `volatility-44b61556….json`. Sin entrenar, sin promover, sin abrir el holdout ni el dataset y sin
 reabrir el experimento. La readiness sigue cubriendo sólo el experimento direccional cripto.
 `PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`.
+
+`PIT-PROSPECTIVE-SCHEDULE`/#424 (`ADVANCES`) separa la adquisición diaria cripto de la decisión
+preregistrada: `--crypto-daily-schedule-at` (default `06:00` local) mueve sólo los jobs
+`MARKET_DAILY` de `asset_class=crypto`, mientras equity/ETF conservan `--schedule-at` y el resto de
+offsets permanece anclado al ancla global. Con la unidad local `07:00 America/Lima`, BTC/SOL diario
+pasa de `12:00` a `11:00` UTC. No retrofecha datos, no cambia `decision_at`, datasets, fórmulas ni
+splits y no entrena. La muestra read-only 2026-10-30..2026-11-07 con corte `2026-11-08T23:50:00Z`
+(dataset `ca76d212…`) sigue con 0 features disponibles y 0 elegibles; la entrega local se verifica
+en FINALIZE y el primer ciclo futuro es observación posterior, no requisito de este bloque. V1-U4
+sigue `UNKNOWN`, `PREDICTIVE-RESEARCH` es el único `NEXT` y las hipótesis baseline, funding y
+volatility permanecen detenidas sin promoción.
 
 La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de crecimiento viven en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md).

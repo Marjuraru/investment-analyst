@@ -50,6 +50,7 @@ def test_service_unit_quotes_paths_and_contains_restart_and_schedule(tmp_path: P
     assert "repository%%" in document
     assert "EnvironmentFile=/" in document
     assert '"--schedule-at" "07:00"' in document
+    assert '"--crypto-daily-schedule-at" "06:00"' in document
     assert '"--market-end-lag-days" "1"' in document
     assert "Type=notify" in document
     assert "NotifyAccess=main" in document
@@ -83,6 +84,7 @@ def test_unit_render_without_memory_config_is_byte_identical_to_base(tmp_path: P
                 f'ExecStart="{repository_unit}/.venv/bin/python" '
                 f'"{repository_unit}/scripts/serve_investment_analyst.py" '
                 f'"--workspace" "{workspace}" "--port" "8765" "--schedule-at" "07:00" '
+                '"--crypto-daily-schedule-at" "06:00" '
                 '"--timezone" "America/Lima" "--market-start" "2025-01-01" '
                 '"--market-end-lag-days" "1" "--fundamental-frequency" "quarterly" '
                 '"--refresh-mode" "auto"'
@@ -153,6 +155,7 @@ def test_service_unit_can_disable_scheduler_and_writes_atomically(tmp_path: Path
     assert written == target
     assert target.read_text(encoding="utf-8") == document
     assert '"--no-scheduler"' in document
+    assert '"--crypto-daily-schedule-at"' not in document
     assert list(target.parent.glob(".*.tmp")) == []
 
 
@@ -187,3 +190,60 @@ def test_service_unit_rejects_relative_paths_and_boolean_port(tmp_path: Path) ->
     values["environment_file"] = tmp_path / "private env"
     with pytest.raises(ValidationError, match="must not contain whitespace"):
         AaplLocalServiceUnitConfig(**values)
+
+
+def test_service_unit_renders_an_explicit_crypto_daily_local_minute(tmp_path: Path) -> None:
+    values = _config(tmp_path).model_dump()
+    values["crypto_daily_run_at"] = time(hour=5, minute=45)
+
+    document = render_local_service_unit(AaplLocalServiceUnitConfig(**values))
+
+    assert '"--schedule-at" "07:00"' in document
+    assert '"--crypto-daily-schedule-at" "05:45"' in document
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("06:00:30", "whole minute"),
+        ("06:00:00.500000", "whole minute"),
+        ("06:00+00:00", "whole minute"),
+        ("not-a-time", "HH:MM"),
+    ],
+)
+def test_service_unit_rejects_ambiguous_crypto_daily_minutes(
+    tmp_path: Path,
+    value: object,
+    message: str,
+) -> None:
+    values = _config(tmp_path).model_dump()
+    values["crypto_daily_run_at"] = value
+
+    with pytest.raises(ValidationError, match=message):
+        AaplLocalServiceUnitConfig(**values)
+
+
+@pytest.mark.parametrize(
+    "parser_script",
+    ["serve_investment_analyst.py", "install_local_service.py"],
+)
+def test_crypto_daily_schedule_parser_defaults_to_0600_and_accepts_an_override(
+    parser_script: str,
+) -> None:
+    parser = _script_parser(parser_script)()
+
+    assert parser.parse_args([]).crypto_daily_schedule_at == time(hour=6)
+    assert parser.parse_args(["--crypto-daily-schedule-at", "07:00"]).crypto_daily_schedule_at == (
+        time(hour=7)
+    )
+
+
+@pytest.mark.parametrize(
+    "parser_script",
+    ["serve_investment_analyst.py", "install_local_service.py"],
+)
+@pytest.mark.parametrize("value", ("06:00:30", "06:00+00:00", "morning"))
+def test_crypto_daily_schedule_parser_fails_closed(parser_script: str, value: str) -> None:
+    with pytest.raises(SystemExit) as error:
+        _script_parser(parser_script)().parse_args(["--crypto-daily-schedule-at", value])
+    assert error.value.code == 2

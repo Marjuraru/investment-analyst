@@ -97,7 +97,7 @@ from investment_analyst.application.sec_institutional_history_models import (
     SecInstitutionalHistorySummary,
 )
 from investment_analyst.application.sec_submissions_refresh import SecSubmissionsRefreshError
-from investment_analyst.core.models import DataFrequency
+from investment_analyst.core.models import AssetClass, DataFrequency
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr
 from investment_analyst.providers.asset_config import ProviderConfigurationError
 from investment_analyst.providers.crypto.coinbase_exchange import CoinbaseExchangeError
@@ -216,6 +216,7 @@ class LocalWatchlistScheduleConfig(ContractModel):
 
     timezone: NonEmptyStr = "America/Lima"
     run_at: time = time(hour=7)
+    crypto_daily_run_at: time = time(hour=6)
     market_start: date
     market_end_lag_days: int = 1
     fundamental_frequency: DataFrequency = DataFrequency.QUARTERLY
@@ -243,7 +244,7 @@ class LocalWatchlistScheduleConfig(ContractModel):
             raise ValueError("market_start must be a date")
         return value
 
-    @field_validator("run_at", mode="before")
+    @field_validator("run_at", "crypto_daily_run_at", mode="before")
     @classmethod
     def require_local_minute(cls, value: object) -> object:
         """Accept a whole timezone-naive minute."""
@@ -251,11 +252,11 @@ class LocalWatchlistScheduleConfig(ContractModel):
             try:
                 value = time.fromisoformat(value)
             except ValueError as error:
-                raise ValueError("run_at must use HH:MM") from error
+                raise ValueError("schedule times must use HH:MM") from error
         if not isinstance(value, time):
-            raise ValueError("run_at must be a time")
+            raise ValueError("schedule times must be a time")
         if value.tzinfo is not None or value.second != 0 or value.microsecond != 0:
-            raise ValueError("run_at must be a timezone-naive whole minute")
+            raise ValueError("schedule times must be a timezone-naive whole minute")
         return value
 
     @field_validator("market_end_lag_days", mode="before")
@@ -556,7 +557,11 @@ def _market_job(
         domain=ScheduledJobDomain.MARKET_DAILY,
         data_frequency="day_1",
         timezone=config.timezone,
-        run_at=config.run_at,
+        run_at=(
+            config.crypto_daily_run_at
+            if descriptor.asset_class is AssetClass.CRYPTO
+            else config.run_at
+        ),
     )
 
     def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:

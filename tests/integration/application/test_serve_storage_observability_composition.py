@@ -68,6 +68,7 @@ _EXPECTED_OPTIONS = (
     "--port",
     "--no-scheduler",
     "--schedule-at",
+    "--crypto-daily-schedule-at",
     "--timezone",
     "--market-start",
     "--market-end-lag-days",
@@ -82,6 +83,7 @@ _EXPECTED_OPTIONS = (
 )
 _EXPECTED_DESTINATIONS = (
     "allow_partial",
+    "crypto_daily_schedule_at",
     "fundamental_frequency",
     "market_end_lag_days",
     "market_start",

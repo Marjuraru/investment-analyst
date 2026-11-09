@@ -1,6 +1,6 @@
 # Plan de cierre de la versión básica funcional
 
-> Estado vigente 2026-11-05: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
+> Estado vigente 2026-11-09: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
 > `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` conservando su deuda y evidencia. La readiness operativa
 > v2 ([`v2_operational_readiness.md`](v2_operational_readiness.md)) avanza sus prerrequisitos de
 > interfaz, lectura, limpieza y entrega; no declara cobertura fundamental nueva ni cierra la ruta.
@@ -664,6 +664,35 @@ Este bloque extiende el discriminador cerrado a baseline/funding/volatility, añ
 descarga `volatility-44b61556….json`. Sin entrenar, sin promover, sin abrir el holdout ni el dataset,
 sin persistencia nueva y sin modificar contratos sellados. `GET /api/v1/research/ml-report` conserva
 el contrato baseline: `ml_family` sólo admite `baseline`.
+
+### Configuración prospectiva cripto (2026-11-09, `PIT-PROSPECTIVE-SCHEDULE`/#424, `ADVANCES`)
+
+`--crypto-daily-schedule-at HH:MM` (default `06:00` local) fija únicamente los jobs `MARKET_DAILY`
+de descriptores `asset_class=crypto`; `--schedule-at` sigue siendo el ancla de equity/ETF y de los
+offsets de derivados, intradía, fundamentales, documentos, actividad, SMV y macro. La opción llega
+al parser del servidor, a la composición de jobs y al instalador; la unidad se renderiza con el flag
+explícito. Una invocación previa sin la opción cambia de heredar el ancla a `06:00`; para conservar
+el horario anterior se repite la hora de `--schedule-at`. Con la unidad local
+`--schedule-at 07:00 --timezone America/Lima`, BTC/SOL diario pasa de `12:00` a `11:00` UTC.
+
+No se modifica el motor del scheduler, la selección, `job_id`, journal, refresh `AUTO`, cuotas,
+retry ni writer único. La configuración no retrofecha evidencia ni cambia `decision_at`,
+`available_at`, targets, splits, pisos, fórmulas o datasets, y no entrena.
+
+Baseline read-only del runtime base: BTC `crypto:btc-usd`, 2026-10-30..2026-11-07, corte
+`2026-11-08T23:50:00Z`, dataset `ca76d212-5a74-55e8-90cb-44c895df830f`: N=9, feature disponible 0,
+feature pendiente 9, label disponible 4, label pendiente 5, elegibles antes del split 0. Es una
+muestra puntual y no se extrapola.
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
+
+`FUNDAMENTALS-COVERAGE` continúa `PLANNED` y `PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`;
+V1-U4 permanece `UNKNOWN`. La entrega local se verifica en FINALIZE (SHA de merge, unidad, proceso,
+workspace y HTTP 200) y acredita el nuevo default en el servicio; el primer ciclo cripto posterior
+es observación del siguiente PLAN, no espera de este bloque. La próxima lectura debe contrastar
+`journal` y readiness de la fecha de decisión observada (scheduled_for, started_at, completed_at,
+feature_available y razones por columna) sin exportar datos ni abrir el holdout; no se promete PIT
+ni fecha de entrenamiento.
 
 ### Objetivos V1
 

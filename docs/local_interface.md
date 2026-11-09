@@ -769,8 +769,9 @@ fundamentales o valoración.
 ## Programación de la watchlist
 
 La configuración predeterminada deriva trabajos para todos los activos visibles del catálogo. El
-mercado diario Alpaca y Coinbase se evalúa a las `07:00` de `America/Lima`, los fundamentales SEC
-a las `07:15` y Coinbase intradía a las `07:30`. El inicio de mercado predeterminado es
+mercado diario de cripto se evalúa por defecto a las `06:00` de `America/Lima`; el mercado diario de
+equity y ETF conserva las `07:00`. Los fundamentales SEC usan `07:15` y Coinbase intradía `07:30`,
+ambos como offsets del ancla global. El inicio de mercado predeterminado es
 `2025-01-01`; el fin diario es el día calendario anterior:
 
 ```text
@@ -787,6 +788,34 @@ falle y admite hasta tres intentos diarios con backoff de 15 minutos únicamente
 transitorios. Tras reiniciar, transforma un intento interrumpido en un fallo trazable antes de
 reintentarlo. Las operaciones del controlador continúan compartiendo un único mutex writer; no se
 ejecutan dos escrituras simultáneas.
+
+### Horario diario cripto separado
+
+`--schedule-at` conserva el ancla global. `--crypto-daily-schedule-at HH:MM` ajusta únicamente los
+jobs `MARKET_DAILY` cuyo descriptor declara `asset_class=crypto`; acepta una hora local naive de
+minuto entero y su valor predeterminado es `06:00`. No mueve derivados cripto, intradía,
+fundamentales, documentos, actividad declarada, SMV, macro ni el resto de jobs: sus offsets siguen
+anclados a `--schedule-at`. Tampoco cambia la selección de watchlist, favoritos, `job_id`,
+`source_ids`, journal, recuperación, cuotas, polling, retry ni el writer único.
+
+Cambio de comportamiento: una invocación anterior sin la opción heredaba `--schedule-at` para todo
+mercado diario; ahora cripto usa `06:00`. Para reproducir el horario previo, indica
+`--crypto-daily-schedule-at` con la misma hora del ancla:
+
+```bash
+.venv/bin/python scripts/serve_investment_analyst.py \
+  --schedule-at 07:00 \
+  --crypto-daily-schedule-at 07:00 \
+  --timezone America/Lima
+```
+
+Con la unidad local actual (`--schedule-at 07:00 --timezone America/Lima`) el job diario cripto pasa
+de `12:00` a `11:00` UTC, una hora nominal de margen antes de la decisión preregistrada de las
+`12:00` UTC. `scripts/install_local_service.py` acepta la misma opción y emite el flag en la unidad;
+una unidad existente generada sin el flag no se reescribe por desplegar una release nueva y el
+servidor aplica el valor predeterminado `06:00`. El adelanto no garantiza que la evidencia esté
+lista antes de la decisión si el equipo está apagado, el proveedor falla o la cola se retrasa:
+mantén el PC/WSL despierto antes del job para que pueda ejecutarse.
 
 ### Riesgo operativo separado: contención del mutex writer
 

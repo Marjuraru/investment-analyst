@@ -1157,6 +1157,28 @@ el run sin fits ni reescritura. `--help` y el lector del artefacto no requieren 
 `scipy` ni `threadpoolctl`; el destino debe ser absoluto, fuera del repositorio, workspace, runtime y
 ops, sin symlinks ni solapamiento con la entrada u otro experimento.
 
+## Configuración prospectiva y límite de la acumulación (2026-11-09, `PIT-PROSPECTIVE-SCHEDULE`/#424, `ADVANCES`)
+
+El experimento direccional decide a las `12:00` UTC y exige features D-1/D-2. El scheduler heredaba
+el ancla global `--schedule-at 07:00` de `America/Lima` (`12:00` UTC) para el mercado diario cripto:
+una adquisición iniciada a la decisión no dejaba margen para que las nuevas barras estuvieran
+disponibles antes de ella. El bloque separa sólo la cadencia `MARKET_DAILY` cripto mediante
+`--crypto-daily-schedule-at`, con default `06:00` local, y conserva el resto de jobs en sus offsets
+respecto del ancla global.
+
+El cambio no retrofecha datos, no modifica `decision_at`, `available_at`, targets, splits, pisos,
+fórmulas, datasets ni versiones, y no entrena. Una muestra read-only del runtime base
+(`crypto:btc-usd`, 2026-10-30..2026-11-07, corte `2026-11-08T23:50:00Z`, dataset `ca76d212…`)
+registró N=9, `feature_available=0`, `feature_not_yet_available=9`, `label_available=4`,
+`label_not_yet_available=5` y `eligible_before_split=0`. Esa lectura es una fotografía puntual: no
+se extrapola a todo el histórico ni atribuye todas las ausencias a una sola causa. PC/WSL apagado,
+fallos de proveedor, colas y warm-up pueden seguir impidiendo PIT aun con el horario adelantado.
+
+La acumulación prospectiva depende del calendario y el contrato admite hasta 366 fechas por
+consulta; esperar no garantiza alcanzar los pisos. La configuración desplegada no es un ciclo
+observado ni una muestra ML suficiente: V1-U4 permanece `UNKNOWN` y no se promete una fecha de
+entrenamiento.
+
 ## Limitaciones y siguiente decisión
 
 - Sólo existe 1 muestra con features PIT disponibles; 0 muestras elegibles. No se puede entrenar,

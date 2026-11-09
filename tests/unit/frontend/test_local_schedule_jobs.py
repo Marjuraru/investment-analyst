@@ -177,6 +177,103 @@ def test_selected_equity_and_crypto_receive_only_compatible_jobs() -> None:
     assert not any(job_id.endswith(":declared-activity") for job_id in crypto_job_ids)
 
 
+def test_crypto_market_daily_uses_its_own_minute_and_equity_keeps_the_global_one() -> None:
+    config = LocalWatchlistScheduleConfig(
+        timezone="America/Lima",
+        run_at=time(hour=7),
+        market_start=date(2025, 1, 1),
+        selected_asset_ids=(
+            "crypto:btc-usd",
+            "crypto:eth-usd",
+            "crypto:sol-usd",
+            "equity:us:aapl",
+        ),
+        crypto_derivatives_asset_ids=("crypto:btc-usd",),
+    )
+
+    jobs = build_local_watchlist_jobs(_UnusedController(), _universe(), config)
+    by_id = {item.definition.job_id: item.definition for item in jobs}
+
+    for asset_id in ("crypto:btc-usd", "crypto:eth-usd", "crypto:sol-usd"):
+        assert by_id[f"coinbase:{asset_id}:market-daily"].run_at == time(hour=6)
+    assert by_id["alpaca:equity:us:aapl:market-daily"].run_at == time(hour=7)
+    assert by_id["deribit:crypto:btc-usd:crypto-derivatives"].run_at == time(hour=7, minute=10)
+
+
+def test_explicit_seven_am_reproduces_the_previous_crypto_schedule() -> None:
+    config = LocalWatchlistScheduleConfig(
+        timezone="America/Lima",
+        run_at=time(hour=7),
+        crypto_daily_run_at=time(hour=7),
+        market_start=date(2025, 1, 1),
+        selected_asset_ids=("crypto:btc-usd",),
+    )
+
+    jobs = build_local_watchlist_jobs(_UnusedController(), _universe(), config)
+
+    market_daily_times = {
+        item.definition.run_at
+        for item in jobs
+        if item.definition.domain is ScheduledJobDomain.MARKET_DAILY
+    }
+    assert market_daily_times == {time(hour=7)}
+
+
+def test_crypto_minute_changes_only_crypto_market_daily_times() -> None:
+    selected = (
+        "crypto:btc-usd",
+        "crypto:sol-usd",
+        "equity:us:aapl",
+        "equity:us:amd",
+        "etf:us:qqq",
+    )
+    previous = LocalWatchlistScheduleConfig(
+        timezone="America/Lima",
+        run_at=time(hour=7),
+        crypto_daily_run_at=time(hour=7),
+        market_start=date(2025, 1, 1),
+        selected_asset_ids=selected,
+    )
+    current = previous.model_copy(update={"crypto_daily_run_at": time(hour=6)})
+
+    before = {
+        item.definition.job_id: item
+        for item in build_local_watchlist_jobs(_UnusedController(), _universe(), previous)
+    }
+    after = {
+        item.definition.job_id: item
+        for item in build_local_watchlist_jobs(_UnusedController(), _universe(), current)
+    }
+
+    assert tuple(before) == tuple(after)
+    assert {item.definition.domain for item in before.values()} == {
+        item.definition.domain for item in after.values()
+    }
+    changed = {
+        job_id: (before[job_id].definition.run_at, after[job_id].definition.run_at)
+        for job_id in before
+        if before[job_id].definition.run_at != after[job_id].definition.run_at
+    }
+    assert changed == {
+        "coinbase:crypto:btc-usd:market-daily": (time(hour=7), time(hour=6)),
+        "coinbase:crypto:sol-usd:market-daily": (time(hour=7), time(hour=6)),
+    }
+
+
+@pytest.mark.parametrize(
+    "crypto_daily_run_at",
+    ["06:00:30", "06:00+00:00", "06:00:00.500000", "dawn"],
+)
+def test_crypto_daily_minute_rejects_ambiguous_values(crypto_daily_run_at: str) -> None:
+    with pytest.raises(ValueError):
+        LocalWatchlistScheduleConfig(
+            timezone="America/Lima",
+            run_at=time(hour=7),
+            crypto_daily_run_at=crypto_daily_run_at,
+            market_start=date(2025, 1, 1),
+        )
+
+
 def test_derivatives_job_is_capability_opt_in_offset_and_requests_rolling_90_days() -> None:
     class _Controller(_UnusedController):
         def __init__(self) -> None:

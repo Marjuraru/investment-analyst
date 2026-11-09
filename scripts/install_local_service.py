@@ -35,9 +35,9 @@ def _time_value(value: str) -> time:
     try:
         parsed = time.fromisoformat(value)
     except ValueError as error:
-        raise argparse.ArgumentTypeError("schedule-at must use HH:MM") from error
+        raise argparse.ArgumentTypeError("schedule times must use HH:MM") from error
     if parsed.tzinfo is not None or parsed.second != 0 or parsed.microsecond != 0:
-        raise argparse.ArgumentTypeError("schedule-at must be a whole local minute")
+        raise argparse.ArgumentTypeError("schedule times must be a whole local minute")
     return parsed
 
 
@@ -71,6 +71,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-scheduler", action="store_true")
     parser.add_argument("--schedule-at", type=_time_value, default=time(hour=7))
+    parser.add_argument(
+        "--crypto-daily-schedule-at",
+        type=_time_value,
+        default=time(hour=6),
+        help="local time for crypto MARKET_DAILY jobs; other assets keep --schedule-at",
+    )
     parser.add_argument("--timezone", default="America/Lima")
     parser.add_argument("--market-start", type=_date_value, default=date(2025, 1, 1))
     parser.add_argument("--market-end-lag-days", type=int, default=1)
@@ -177,6 +183,7 @@ def main() -> int:
                 else None
             ),
             schedule=schedule,
+            crypto_daily_run_at=arguments.crypto_daily_schedule_at,
             scheduled_asset_ids=tuple(
                 sorted(
                     {
