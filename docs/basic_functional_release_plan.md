@@ -118,6 +118,142 @@
 > describen un Issue activo ni autorizan ejecución: la única autoridad de Work Block es el Issue
 > abierto con `workflow:active` resuelto desde GitHub vivo.
 
+## V1-OPERATIONAL-ACCEPTANCE — evaluación finita y veredicto (2026-11-09, `ADVANCES`)
+
+`V1-OPERATIONAL-ACCEPTANCE`/#430 evalúa el recorrido V1 existente, no añade capacidad, no adquiere
+datos, no modifica el workspace y no declara la V1 cerrada. Base y runtime evaluados:
+`5e7323917be8abaf7257898fe8a0fd5e2c0d0518`; workspace
+`70c64668-1738-4dfe-ba1f-7e72026bb7fe` (`active-v2-20261021`); corte de evaluación
+`2026-11-09T21:30:00Z`; Python 3.12, Linux/WSL2, proceso PID 18406 y generación
+`8bf9c4a34d004810ac7b947b613cdf8e`. El veredicto es **no aceptado**: V1-U4 sigue `UNKNOWN`,
+V1-U2 no acredita acuse, la captura prospectiva observada es `NOT_MET`, los dos fallos 13F quedan
+clasificados como criterio no satisfecho con causa raíz `UNKNOWN` y ningún V1-U se declara `MET`.
+
+### Universo, corte y cobertura
+
+El universo de esta aceptación son los ocho activos watchlist/scheduled, cero favoritos y 27 jobs:
+BTC, SOL, AAPL, AMD, GOOGL, MOG.A, NKE y QQQ. Preferencias fingerprint
+`442f352d169d76e8ed32bdbb700698a089e38b9cb3dc76c5c83ff790967f68cc`, revisión
+`3b60931f-07a9-4cb9-85d4-39c9e41664c5`, `unavailable_count=0`. La consulta
+`universe-coverage-v1` usó `known_at=2026-11-09T00:00:00Z`, mercado 2025-11-08..2026-11-08,
+fundamentales 2016-10-31..2026-11-08 y frecuencia anual: 40 activos, catálogo v1 con SHA-256
+`785db47f90864e02e8cac9dbbc4e2b9e10293dc1b39f8ea6c736b90b383cb8fc`.
+
+**A1 — matriz y trazabilidad.** Los ocho tienen mercado `supported/present`: BTC y SOL, 365 barras
+con referencia 2026-11-07; AAPL, AMD, GOOGL, MOG.A, NKE y QQQ, 250 barras con referencia
+2026-11-06; edades de 2–3 días. AAPL, AMD, GOOGL, MOG.A y NKE tienen fundamentales anuales
+`supported/present` (10/9/3/9/10 períodos de origen y salida; 358/218/83/145/197 métricas). BTC,
+SOL y QQQ declaran fundamentales `not_applicable`; no se fuerzan a valoración corporativa.
+Valoración: AAPL `evaluated` 11/11; AMD y GOOGL `partial` 6/11 con
+`ebitda_unavailable`/`missing_input`; MOG.A y NKE `not_evaluable` 0/11 con `missing_input`. Las
+seis filas BVL `equity:pe:bvl:*` del universo de 40 aparecen bloqueadas y sin evidencia; no forman
+parte de los ocho y no se cuentan como evaluables.
+
+La bandeja de candidatos tiene 5 eventos y la outbox 5 recepciones `pending`, con correspondencia
+uno a uno de `candidate_id` y cero IDs duplicados en ese universo: NKE MACD incremental (`new`,
+as_of 2026-11-04, activado 2026-11-05), SOL RSI incremental (`resolved`, as_of 2026-11-02,
+activado 2026-11-03), AMD volumen relativo (`new`, as_of 2026-11-02, activado 2026-11-03), AAPL
+volumen relativo (`resolved`, as_of 2026-11-02, activado 2026-11-03) y BTC volumen relativo
+(`resolved`, as_of 2026-10-30, activado 2026-10-31). El estado `pending` de la outbox describe la
+recepción, no el ciclo de vida del candidato. No se marcaron vistos, no se acusaron y no se cambió
+ningún candidato. El detalle de bandejas, alertas operativas y canal está en
+[`automated_screening_alerts.md`](automated_screening_alerts.md).
+
+El navegador real sobre el runtime base verificó Mesa (5 candidatos, 3 institucionales, 0 actividad;
+40/40 activos de cobertura al expandir la tabla) y los perfiles del tablero Activo: BTC cripto con
+Mercado+Derivados; AAPL equity con Fundamentales y Valoración 11/11; AMD equity con 17/40 métricas
+trimestrales y valoración 6/11; MOG.A equity con fundamentales anuales 17/40 y valoración 0/11;
+QQQ ETF sólo Mercado. GOOGL, NKE y SOL se verificaron mediante `universe-coverage-v1`. La evidencia
+es operacional del SHA base; como el candidato sólo cambia documentación y el test documental, la
+equivalencia de rutas productivas base...head permite reutilizarla (ver A4). No se observó una
+entrega financiera externa ni lectura humana.
+
+**A2 — pendientes, fallos 13F y decisión honesta.** Los dos fallos 13F se trazan en
+[`automated_screening_alerts.md`](automated_screening_alerts.md#fallos-13f-del-2026-11-09): etapas,
+inputs, snapshots, cursores, fechas y efecto visible. Son escenarios distintos —el ciclo falla en
+la materialización de observaciones del dataset 2026-03-01..2026-05-31 y la historia falla al
+verificar la materialización antigua 2025-12-01..2026-02-28—; comparten proveedor SEC y la ruta de
+materialización, pero no hay evidencia de que uno cause al otro. El mensaje exacto de la excepción
+no se persiste, así que la causa raíz es `UNKNOWN`: no se presume corrupción, ni error de proveedor,
+ni dato ausente. Se clasifican como **criterio de aceptación no satisfecho** para la frescura y
+cobertura 13F de Cazatiburones, con defecto de producto de causa raíz aún no confirmada. La
+reparación requiere un bloque de producto con `src/**` autorizado y captura de la excepción real;
+este bloque no la ejecuta ni la declara resuelta. El readiness estructural `PASS` con
+`failure_categories` que registra `provider_contract_error: 2` acredita coherencia del probe, no
+cobertura sana.
+
+**Captura prospectiva.** BTC y SOL estaban programados a las 11:00Z y arrancaron a las
+16:27:12/16:27:35Z, después del inicio del servicio a las 16:26Z; ambos crearon 27 barras,
+reutilizaron 1.780, con `evidence_changed=true` y `analytical_inputs_changed=true`. No existió un
+ciclo terminado antes de las 12:00Z. La vista previa al corte 12:00Z devolvió `inputs_unavailable`
+(2.348 B, `preview_id=93989298-662e-529a-a0e6-8fb5576a1034`, `sample_key=a0fab4eb-894b-5b58-816e-f68c39ba1603`)
+con `close_missing` para 2026-11-08 y `metric_missing` para RSI/MACD de 2026-11-09. La readiness
+posterior al corte 16:45Z (dataset `79a309c3-184b-5c4f-9980-28e13b44f6bd`, 2026-11-03..2026-11-09)
+registró 7 solicitadas, 0 features disponibles, 7 `not_yet_available`, 1 label disponible, 6
+pendientes, 0 elegibles, 5 purgadas e `insufficient_pit_sample`; los motivos fueron
+`close_not_yet_available` (9 ocurrencias) y `metric_not_yet_available` (7+7). La oportunidad
+observada es `NOT_MET`; la acumulación futura es `UNKNOWN`. No se cambia `decision_at`,
+`available_at`, el rango ni la fecha del estudio. La instrucción operativa es mantener
+Windows/WSL/servicio activos antes de las 11:00 UTC (06:00 Lima) para la próxima observación, sin
+modificar energía, arranque ni nube.
+
+**Canal externo.** Permanece cerrado: `desktop-notification-status-v1` informa `windows_toast`,
+`enabled=false`, `enabled_at=null`, `updated_at=2026-10-31T02:10:33.911525Z`,
+`last_test_accepted=true` (2026-10-31T02:10:23.432705Z), 0 entregas y 0 pendientes; presupuesto de
+8 MiB y 10.000 entregas. La bandeja local sí está operativa: 5 candidatos pendientes, 3
+institucionales y 0 de actividad declarada. El transporte probado no acredita entrega financiera ni
+lectura humana; la aceptación de alertas externas queda como gate explícito para el bloque final y
+sus defaults no cambian hoy.
+
+**A3 — secuencia finita de cierre.** La ruta de cierre queda fijada en tres bloques, sin
+autorización anticipada y sin crear Issues futuros:
+
+1. **1/3 `V1-OPERATIONAL-ACCEPTANCE`** (este bloque): evaluación de funciones existentes, evidencia
+   y pendientes clasificados; ninguna feature nueva.
+2. **2/3 `MODEL-INFERENCE-CONTRACT`**: interfaz ML independiente, artefacto/versiones/compatibilidad
+   de features, inferencia explícita y paquete de explicación. Sólo un modelo de prueba identificado
+   para verificar la integración; sin éxito predictivo, sin promoción de modelos rechazados y con
+   representación y presupuesto fijados por PLAN antes de BUILD.
+3. **3/3 `SHADOW-AND-V1-RELEASE`**: ejecución experimental aislada, límites,
+   desactivación/rollback, resolución o decisión explícita sobre los pendientes y aceptación local
+   completa. No se cierra si queda un riesgo crítico sin resolver. Shadow con modelo de prueba
+   demuestra ingeniería, no ventaja económica.
+
+La validación de un candidato real y su promoción son etapas condicionales, no promesas ni Issues
+actuales. LLM, expansión de activos, nuevos indicadores o fuentes y campañas de parámetros quedan
+fuera de estos tres bloques. Si ningún modelo supera validación, se entrega un entorno funcional con
+ausencia explícita de predictor; no se cambia el criterio para llamarlo V1 predictiva. La espera
+pasiva se registra sin crear tareas accesorias. Planificar o completar un bloque no autoriza
+automáticamente otra fuente, activo, indicador, pantalla, modelo o LLM.
+
+**A4 — validación, medidas y entrega.** `FOCUSED`:
+`.venv/bin/pytest -q tests/unit/test_delivery_route_contract.py` y `git diff --check`. `FULL` es el
+gate `Python 3.12 quality` para el SHA exacto en GitHub. El probe operativo del candidato ejecuta
+`scripts/check_operational_readiness.py --workspace <workspace> --since 2026-11-09T00:00:00Z
+--min-local-dates 1`; en la base devolvió `PASS`, sin `reason_codes`, fingerprint
+`bc36e0ec3ff08c1e3faa22d30083caedbb5ca0e8975680289191b2451e2b0a90`, 27 intentos terminales, 27
+recibos analíticos, 108 screenings operativos, 0 running/manual y 2 `provider_contract_error`. Un
+`NOT_READY` no se oculta cambiando `since`.
+
+Medición de un recorrido crítico representativo (`GET /api/v1/universe-coverage`, 10 años,
+frecuencia trimestral, 40 activos, 166.766 B): n=4 (1 fría + 3 calientes); apertura fría 29,717 s;
+calientes 3,660/3,671/3,969 s; mediana global 3,820 s y máximo 29,717 s. RSS del proceso antes
+351.752 KiB, después 445.088 KiB y `VmHWM` 700.044 KiB; es memoria del proceso/probe, no un pico de
+vida atribuido a un job. La telemetría existente registró 12 requests de cobertura, 6 hits, 6
+misses, p50 657,621 ms, p95 10.846,393 ms y máximo 24.728,587 ms; no se usa p95 con dos muestras.
+El DB mide 719.859.712 B sin WAL; workspace 4.186.378.256 B; estado 4.389.223 B; releases
+2.500.808.396 B en 36 entradas; WSL libre 937.054.720.000 B; host `C:` libre 23.128.629.248 B;
+scratch 0 B; worktree 18.564.769 B. No se añadieron datos financieros, no se copió la DB, no se
+hizo backup/restore, no se entrenó y no se modificó el workspace; `manifest.json` conservó
+`mtime` 2026-10-21 y SHA-256
+`fb061475b0ff203b817f542bd7a8edbd66bb37f1520f7bd742fb4c0c513a8175`, y el DB conservó tamaño,
+`mtime` 2026-11-09T11:34:06 y ausencia de WAL. El candidato sólo cambia documentación y el
+consumidor documental, por lo que la evidencia de navegador del runtime base se reutiliza con
+equivalencia de rutas productivas; FINALIZE registra esa equivalencia y verifica el runtime nuevo
+sin repetir una campaña de navegador que no cambió.
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
+
 
 ## Objetivo
 
@@ -742,20 +878,24 @@ primer ciclo observado pertenecen al siguiente PLAN.
 
 ### Objetivos V1
 
-Este bloque especifica métodos: no ejecuta campañas, no declara `MET` y no crea otro marco ni
-registro. Baseline y actual permanecen `UNKNOWN` salvo evidencia exacta reutilizable. Cuatro
-escenarios bastan para las fronteras pertinentes: sin novedad, con novedad, interrupción/reanudación
-y lote ampliado. No se añaden daemons, dashboards de telemetría, scans para medir ni suites de
-benchmark; ningún escenario se repite si el cambio no lo afecta.
+Este registro conserva la especificación de métodos y añade la evidencia operacional fechada de
+`V1-OPERATIONAL-ACCEPTANCE` (corte `2026-11-09T21:30:00Z`, runtime
+`5e7323917be8abaf7257898fe8a0fd5e2c0d0518`, workspace
+`70c64668-1738-4dfe-ba1f-7e72026bb7fe`). No se declara `MET` en ningún objetivo: V1-U4 sigue
+`UNKNOWN`, V1-U2 no acredita acuse y la captura prospectiva observada es `NOT_MET`. Las cifras son
+acotadas a ese corte y universo; no son un porcentaje global de avance. Cuatro escenarios bastan
+para las fronteras pertinentes: sin novedad, con novedad, interrupción/reanudación y lote ampliado.
+No se añaden daemons, dashboards de telemetría, scans para medir ni suites de benchmark; ningún
+escenario se repite si el cambio no lo afecta.
 
 | Objetivo | Baseline → actual | Unidad | Universo y carga | Meta y comparador | Método y referencia |
 | --- | --- | --- | --- | --- | --- |
-| V1-U1 cobertura | `UNKNOWN` → `UNKNOWN` | activos | activos solicitados y compatibles del catálogo en el mismo corte | (evaluables + explicados) / solicitados, con cobertura evaluable separada | `universe-coverage-v1` y recibos de adquisición; una ausencia nunca cuenta como evaluable |
-| V1-U2 entrega | `UNKNOWN` → `UNKNOWN` | eventos y segundos | candidatos elegibles de un ciclo, outbox y un canal | elegible→outbox→acuse completo; cero duplicados por evento en replay/reanudación; demora mediana y máxima con tamaño muestral | outbox/bandeja y recibos existentes; el acuse de transporte no equivale a lectura humana |
+| V1-U1 cobertura | `UNKNOWN` → `8/8 mercado; 5/5 fundamentales y valoración soportada (3 calculadas/parciales; 2 no evaluables explicadas)` | activos | activos solicitados y compatibles del catálogo en el mismo corte | (evaluables + explicados) / solicitados, con cobertura evaluable separada | `universe-coverage-v1` y recibos de adquisición; una ausencia nunca cuenta como evaluable |
+| V1-U2 entrega | `UNKNOWN` → `5/5 recepciones outbox; 0/5 acuses; 0 entregas externas; demora UNKNOWN` | eventos y segundos | candidatos elegibles de un ciclo, outbox y un canal | elegible→outbox→acuse completo; cero duplicados por evento en replay/reanudación; demora mediana y máxima con tamaño muestral | outbox/bandeja y recibos existentes; el acuse de transporte no equivale a lectura humana |
 | V1-U3 utilidad descriptiva | `UNKNOWN` → `UNKNOWN` | detecciones | detecciones y horizonte declarados, misma versión de regla | frecuencia y duplicación; resultado posterior por detección/horizonte sólo cuando exista módulo autorizado | replay acotado y evidencia persistida; descartado por humano no equivale a falso positivo financiero |
 | V1-U4 predicción | `UNKNOWN` → `UNKNOWN` | métrica de validación | hipótesis, universo y horizonte fijados antes del experimento | comparación fuera de muestra con baseline, incertidumbre/calibración pertinente y estabilidad | label, umbral de promoción y tolerancia se fijan antes; hoy no existe modelo validado ni porcentaje de avance |
-| V1-U5 tiempo y memoria | `UNKNOWN` → `UNKNOWN` | segundos y bytes | misma release, proceso/cgroup, universo, corte e inputs | mediana y máximo con tamaño muestral; demoras separadas fuente→adquisición→evaluación→entrega | colector existente; no p95 con pocas muestras ni pico de vida atribuido a un job; los límites vigentes se heredan y cualquier SLA nuevo queda para el PLAN de implementación |
-| V1-U6 espacio | `UNKNOWN` → `UNKNOWN` | bytes | host y WSL medidos por separado; DB+WAL y almacenamiento físico restante | coste marginal por lote; proyección 30/90 días declarada estimación | colector y reportes existentes; adquisición inicial, ordinaria, revisiones, derivados, logs, backup, releases y scratch separados; día no observado no es cero y un checkpoint no es adquisición |
+| V1-U5 tiempo y memoria | `UNKNOWN` → `n=4 (1 fría + 3 calientes): frío 29,717 s; calientes 3,660/3,671/3,969 s; mediana global 3,820 s; máximo 29,717 s; 166.766 B; RSS HWM 700.044 KiB` | segundos y bytes | misma release, proceso/cgroup, universo, corte e inputs | mediana y máximo con tamaño muestral; demoras separadas fuente→adquisición→evaluación→entrega | colector existente; no p95 con pocas muestras ni pico de vida atribuido a un job; los límites vigentes se heredan y cualquier SLA nuevo queda para el PLAN de implementación |
+| V1-U6 espacio | `UNKNOWN` → `DB 719.859.712 B sin WAL; workspace 4.186.378.256 B; WSL libre 937.054.720.000 B; host 23.128.629.248 B; marginal/proyección UNKNOWN` | bytes | host y WSL medidos por separado; DB+WAL y almacenamiento físico restante | coste marginal por lote; proyección 30/90 días declarada estimación | colector y reportes existentes; adquisición inicial, ordinaria, revisiones, derivados, logs, backup, releases y scratch separados; día no observado no es cero y un checkpoint no es adquisición |
 
 ### Disciplina de crecimiento
 

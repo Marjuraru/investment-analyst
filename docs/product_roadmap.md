@@ -74,6 +74,49 @@
 > activo ni autorizan ejecución; la única autoridad de Work Block es el Issue abierto con
 > `workflow:active` resuelto desde GitHub vivo.
 
+## Evaluación operacional V1 y secuencia finita de cierre (2026-11-09)
+
+`V1-OPERATIONAL-ACCEPTANCE`/#430 evaluó el recorrido V1 existente sobre la base y runtime
+`5e7323917be8abaf7257898fe8a0fd5e2c0d0518`, workspace
+`70c64668-1738-4dfe-ba1f-7e72026bb7fe` y corte `2026-11-09T21:30:00Z`. No añade capacidad y no
+declara la V1 cerrada. El veredicto es **no aceptado**: los ocho activos watchlist tienen mercado
+presente y los cinco equities tienen fundamentales/valoración soportados, pero V1-U4 sigue
+`UNKNOWN`, V1-U2 no acredita acuse, la captura prospectiva observada es `NOT_MET` y los dos fallos
+13F quedan como criterio no satisfecho con causa raíz `UNKNOWN`. `V1-U1`, `V1-U3`, `V1-U5` y
+`V1-U6` conservan evidencia acotada o `UNKNOWN` y ningún objetivo se declara `MET`. La autoridad
+del registro V1-U1..V1-U6 y del veredicto es
+[`basic_functional_release_plan.md`](basic_functional_release_plan.md).
+La evidencia de bandejas, canal y fallos 13F vive en
+[`automated_screening_alerts.md`](automated_screening_alerts.md) y la restricción prospectiva en
+[`predictive_foundation.md`](predictive_foundation.md).
+
+La ruta de cierre queda fijada en **tres bloques**, sin autorización anticipada y sin crear Issues
+futuros:
+
+1. **1/3 `V1-OPERATIONAL-ACCEPTANCE`** (este bloque): evaluación de las funciones existentes,
+   evidencia y pendientes clasificados; ninguna feature nueva.
+2. **2/3 `MODEL-INFERENCE-CONTRACT`**: interfaz ML independiente, artefacto/versiones/compatibilidad
+   de features, inferencia explícita y paquete de explicación. Sólo un modelo de prueba identificado
+   para verificar la integración; sin éxito predictivo ni promoción de modelos rechazados. PLAN fija
+   representación exacta y presupuesto antes de BUILD.
+3. **3/3 `SHADOW-AND-V1-RELEASE`**: ejecución experimental aislada, límites,
+   desactivación/rollback, resolución o decisión explícita sobre los pendientes y aceptación local
+   completa. No se cierra si queda un riesgo crítico sin resolver. Shadow con modelo de prueba
+   demuestra ingeniería, no ventaja económica.
+
+La validación de un candidato real y su promoción son etapas condicionales, no promesas ni Issues
+actuales. LLM, expansión de activos, nuevos indicadores o fuentes y campañas de parámetros quedan
+fuera de estos tres bloques. Si ningún modelo supera validación, se entrega un entorno funcional con
+ausencia explícita de predictor; no se cambia el criterio para llamarlo V1 predictiva. La espera
+pasiva se registra sin crear tareas accesorias. Completar o planificar un bloque no autoriza
+automáticamente otra fuente, activo, indicador, pantalla, modelo o LLM.
+
+`DATA-CHASSIS` permanece `DONE`, `PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`,
+`FUNDAMENTALS-COVERAGE` y `ASSET-EXPANSION` siguen `PLANNED` y este bloque no cierra
+`PREDICTIVE-RESEARCH`, `FUNDAMENTALS-COVERAGE` ni cambia los seis IDs V1-U1..V1-U6.
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
+
 ## Dirección de V1 (2026-10-30)
 
 La V1 es el recorrido local `catálogo/watchlist → actualización incremental → análisis → candidato →

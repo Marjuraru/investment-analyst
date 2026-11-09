@@ -1280,6 +1280,40 @@ entrenamiento, tuning, nuevos indicadores, otra pantalla de estudios ni promoci�
 `PREDICTIVE-RESEARCH` permanece `NEXT` y V1-U4 sigue `UNKNOWN`. El primer ciclo prospectivo posterior
 y cualquier contraste con labels maduros pertenecen a la observación del siguiente PLAN.
 
+## Restricción prospectiva observada (2026-11-09, `V1-OPERATIONAL-ACCEPTANCE`, `ADVANCES`)
+
+La evaluación operacional de la base y runtime `5e7323917be8abaf7257898fe8a0fd5e2c0d0518`, con el
+workspace `70c64668-1738-4dfe-ba1f-7e72026bb7fe`, confirma el límite de la captura prospectiva y no
+autoriza entrenamiento, tuning ni apertura del holdout.
+
+- **Programación y arranque.** BTC y SOL estaban programados a las 11:00Z. El servicio arrancó a
+  las 16:26Z y los jobs `coinbase:crypto:btc-usd:market-daily` y
+  `coinbase:crypto:sol-usd:market-daily` empezaron a las 16:27:12.583290Z y
+  16:27:35.144034Z; terminaron correctamente, crearon 27 barras, reutilizaron 1.780 y marcaron
+  `evidence_changed=true` y `analytical_inputs_changed=true`. No existió un ciclo terminado antes
+  de las 12:00Z.
+- **Vista previa al corte de decisión.** `GET /api/v1/research/feature-preview` para BTC
+  `2026-11-09`, corte `2026-11-09T12:00:00Z`, devolvió `inputs_unavailable` (2.348 B,
+  `preview_id=93989298-662e-529a-a0e6-8fb5576a1034`,
+  `sample_key=a0fab4eb-894b-5b58-816e-f68c39ba1603`). Las tres columnas quedaron `missing`:
+  `close_missing` para 2026-11-08 y `metric_missing` para RSI/MACD de 2026-11-09. El corte
+  16:45Z no es válido para la vista previa: el contrato sólo admite `D 00:00Z..D 12:00Z`.
+- **Readiness posterior.** La consulta al corte `2026-11-09T16:45:00Z`, rango 2026-11-03..2026-11-09,
+  dataset `79a309c3-184b-5c4f-9980-28e13b44f6bd`, registró 7 decisiones solicitadas, 0 features
+  disponibles, 7 `not_yet_available`, 1 label disponible, 6 pendientes, 0 elegibles, 5 purgadas y
+  `insufficient_pit_sample`; los motivos fueron `close_not_yet_available` (9 ocurrencias) y
+  `metric_not_yet_available` (7 en RSI y 7 en MACD). La adquisición posterior a las 16:27Z no
+  retrofecha disponibilidad ni satisface el corte de las 12:00Z.
+
+La oportunidad observada es `NOT_MET`; la acumulación futura es `UNKNOWN`. No se cambia
+`decision_at`, `available_at`, el rango, el dataset ni la fecha del estudio; una observación en hora
+tampoco implica muestra suficiente ni modelo validado. La instrucción operativa es mantener
+Windows/WSL/servicio activos antes de las 11:00 UTC (06:00 Lima) para la próxima observación, sin
+modificar energía, arranque o nube. El primer ciclo prospectivo posterior y cualquier contraste con
+labels maduros pertenecen a la observación del siguiente PLAN, no a una espera de este bloque.
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
+
 ## Limitaciones y siguiente decisión
 
 - Sólo existe 1 muestra con features PIT disponibles; 0 muestras elegibles. No se puede entrenar,

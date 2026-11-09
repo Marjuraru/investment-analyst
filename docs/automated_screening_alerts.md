@@ -558,6 +558,90 @@ Las medidas de entrega y utilidad descriptiva son `V1-U2` y `V1-U3` en
 se presenta como lectura humana y un candidato descartado por el analista no se contabiliza como
 falso positivo financiero.
 
+## Evidencia operativa V1 (2026-11-09, `V1-OPERATIONAL-ACCEPTANCE`, `ADVANCES`)
+
+Evaluación read-only sobre la base y runtime `5e7323917be8abaf7257898fe8a0fd5e2c0d0518`, workspace
+`70c64668-1738-4dfe-ba1f-7e72026bb7fe` y corte `2026-11-09T21:30:00Z`. No se marcó ningún
+candidato como visto, no se acusó ninguna recepción, no se activó ningún canal y no se ejecutó un
+refresh.
+
+**Candidatos, outbox y alertas.** El registro analítico informa 313 resultados, 342 intentos
+procesados, 5 candidatos (2 `new`, 3 `resolved`) y último candidato el 2026-11-05T20:30:02Z. La
+outbox contiene 5 recepciones `pending`, con correspondencia uno a uno de `candidate_id` y cero IDs
+duplicados en ese universo: NKE MACD incremental `8e6791ad-d60d-58c3-96c7-f9bbbdf8fece`, SOL RSI
+incremental `ee9b255c-a307-5ea1-a523-c025b06b8b41`, AMD volumen relativo
+`828b37f0-8db3-5eb8-a3cf-fdc779e4506d`, AAPL volumen relativo
+`b6764277-df63-5221-918f-bc9adecd07bb` y BTC volumen relativo
+`aee20db0-84b1-5196-a0aa-5593dea7e266`. La outbox no tiene ningún acuse; su estado `pending` es de
+entrega, no el ciclo de vida del candidato. La bandeja de alertas operativas es distinta: 57
+eventos, 47 `new`, sin mezclarse con los candidatos financieros. El resumen de la Mesa muestra 5
+candidatos, 3 institucionales y 0 de actividad declarada.
+
+### Fallos 13F del 2026-11-09
+
+Los dos trabajos programados de Cazatiburones institucional fallaron y dejan la cobertura
+incompleta; no se reejecutaron ni se materializaron datos en este bloque.
+
+- **`sec:institutional:13f-cycle`.** Programado 2026-11-09T13:45:00Z, ejecutado
+  16:30:42.689777Z–16:32:43.467138Z (120.777 ms), estado `failed`,
+  `provider_contract_error` con mensaje `scheduled 13F cycle step failed: run_failed:StorageError`,
+  `retryable=false`, 0 creados, pico RSS 834.408 KiB. Estado persistido: dataset
+  2026-03-01..2026-05-31, SHA-256 `05f4da8f526cd471a387af45661a8cb3bbfaf345d3ec9c2cefd31349aa257e63`,
+  snapshot `2e35473d-5b49-5080-ac19-be2998ee20de`, `manager_cursor=0`, 42 gestores,
+  `last_processed_cik=0000895421`, ciclo 7. La etapa es la materialización de observaciones: un
+  `StorageError` capturado por tipo en `_observe_asset`; el mensaje exacto de la excepción no se
+  persiste. Último éxito: 2026-10-23, 47 creados, `coverage_complete=false`,
+  `traceability_verified=true`.
+- **`sec:institutional:13f-history`.** Programado 2026-11-09T14:00:00Z, ejecutado
+  16:32:43.606531Z–16:32:52.416377Z (8.809 ms), estado `failed`,
+  `provider_contract_error` con el mensaje
+  `scheduled 13F history step failed: older_materialization_unverified`, `retryable=false`, 0
+  creados, pico RSS 716.456 KiB. Estado
+  persistido: `phase=ready`, dataset antiguo 2025-12-01..2026-02-28, snapshot
+  `3818034b-ab18-51f8-8d8a-6eac0c7b930f`; dataset nuevo 2026-03-01..2026-05-31, snapshot
+  `50b90260-1e19-502b-8b2a-eec33bee646a`; `target_cursor=6`, 20 objetivos, ciclo 6,
+  `last_processed_cik=0000764068`. La etapa es la verificación de materialización del rol `older`
+  (fallo de candidatos, de runs o de trazabilidad); el subcausante exacto no se persiste. Último
+  éxito: 2026-10-23, 17 creados, 3 reutilizados, `coverage_complete=false`.
+
+Las etapas e inputs son distintos: el ciclo falla en la materialización del dataset
+2026-03-01..2026-05-31 y la historia falla al verificar la materialización antigua
+2025-12-01..2026-02-28. Comparten proveedor SEC y la ruta de materialización, pero no hay evidencia
+de que uno cause al otro; el inicio de la historia 0,14 s después del cierre del ciclo no demuestra
+dependencia causal. La causa raíz de ambos es `UNKNOWN`: no se presume corrupción por la palabra
+`StorageError`, ni error de proveedor, ni dato ausente. Efecto visible: 2 trabajos fallidos, 2
+bloqueados, 2 incompletos, dos alertas operativas nuevas a las 16:32Z, última cobertura
+institucional del 2026-10-23 y 3 notificaciones institucionales pendientes del 2026-10-21. Se
+clasifican como **criterio de aceptación no satisfecho** para la frescura y cobertura 13F; la
+reparación exige un bloque de producto con `src/**` autorizado y captura de la excepción real, y no
+se declara resuelta aquí. El readiness estructural `PASS` del probe conserva
+`failure_categories` con `provider_contract_error: 2`; no acredita cobertura sana.
+
+### Canal externo y límites
+
+`GET /api/v1/desktop-notifications` devuelve `desktop-notification-status-v1` con canal
+`windows_toast`, `enabled=false`, `enabled_at=null`, `updated_at=2026-10-31T02:10:33.911525Z`,
+`capability.available=true`, `last_test_accepted=true` (`2026-10-31T02:10:23.432705Z`), 0 entregas,
+0 pendientes, 0 aceptadas y `budget_exceeded=false`; el presupuesto es 8 MiB y 10.000 entregas. La
+bandeja local está operativa: 5 candidatos pendientes, 3 institucionales y 0 de actividad
+declarada. El transporte probado no equivale a una entrega financiera actual ni a lectura humana:
+la aceptación de alertas externas queda como gate explícito para el bloque final y no se cambia
+ningún default hoy.
+
+**Recorrido de navegador.** Chromium real sobre `http://127.0.0.1:8765` verificó Mesa (5
+candidatos, 3 institucionales, 0 actividad; 40/40 activos de cobertura al expandir la tabla, con
+las seis filas BVL bloqueadas) y los perfiles del tablero Activo: BTC cripto con Mercado+Derivados;
+AAPL equity con Fundamentales y Valoración 11/11; AMD equity con 17/40 métricas trimestrales y
+6/11; MOG.A equity con fundamentales anuales 17/40 y valoración 0/11; QQQ ETF sólo Mercado. GOOGL,
+NKE y SOL se verificaron por `universe-coverage-v1`. La evidencia es del runtime base; el candidato
+sólo cambia documentación y el test documental, por lo que la equivalencia de rutas productivas
+base...head permite reutilizarla. No se observó entrega financiera ni lectura humana. Las
+llamadas `400` de fundamentales para BTC/SOL/QQQ y las de MOG.A en frecuencia trimestral son
+ausencias por perfil/frecuencia, no fallos de la bandeja; la consulta trimestral de MOG.A se repite
+en anual para verificar su perfil soportado.
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
+
 ## Validación
 
 Cada entrega prueba:
