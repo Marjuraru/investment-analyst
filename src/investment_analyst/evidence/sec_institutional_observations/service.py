@@ -1,10 +1,8 @@
 """PIT persistence for linked institutional observations."""
 
-import json
 from collections import Counter
 from collections.abc import Collection
 from datetime import UTC, datetime
-from typing import cast
 from uuid import UUID
 
 from investment_analyst.evidence.instrument_correspondence.repository import (
@@ -24,6 +22,11 @@ from investment_analyst.evidence.sec_institutional_semantics.repository import (
 )
 from investment_analyst.storage import RecordNotFoundError, StorageError
 
+from .compatibility import (
+    InstitutionalObservationCompatibilityError,
+    compare_reconstruction,
+    parse_record_key,
+)
 from .definitions import SOURCE_ID
 from .models import (
     InstitutionalObservationQuery,
@@ -35,28 +38,6 @@ from .models import (
 from .normalizer import normalize_row
 
 _OBSERVATION_SELECTION_BATCH_SIZE = 256
-
-_RECORD_KEY_FIELDS = frozenset(
-    {
-        "artifact_id",
-        "report_id",
-        "manager_cik",
-        "row_id",
-        "correspondence_id",
-        "cover_revision_id",
-        "cover_content_sha256",
-        "information_table_revision_id",
-        "information_table_content_sha256",
-        "cusip",
-        "title_of_class",
-        "put_call",
-        "quantity_type",
-        "transformation_version",
-        "monetary_policy_version",
-        "filing_accepted_at",
-        "field_name",
-    }
-)
 
 
 class InstitutionalObservationLineageError(StorageError):
@@ -155,11 +136,21 @@ class InstitutionalObservationService:
                         self._storage.observations.save(candidate)
                         created += 1
                     else:
-                        if (
-                            existing.model_copy(update={"normalized_at": candidate.normalized_at})
-                            != candidate
-                        ):
-                            raise StorageError("institutional observation identity conflicts")
+                        try:
+                            compare_reconstruction(
+                                existing,
+                                candidate,
+                                existing_key=_record_key(existing),
+                                candidate_key=_record_key(candidate),
+                                artifact=item,
+                                report=parent,
+                                row=row,
+                                correspondence=correspondence,
+                            )
+                        except InstitutionalObservationCompatibilityError as error:
+                            raise StorageError(
+                                "institutional observation identity conflicts"
+                            ) from error
                         reused += 1
         return InstitutionalObservationSummary(
             asset_id=request.asset_id,
@@ -335,39 +326,9 @@ def _record_key(observation) -> dict[str, str | None]:
     if observation.source.source_id != SOURCE_ID:
         raise InstitutionalObservationLineageError("institutional observation source is invalid")
     try:
-        parsed = json.loads(observation.source.record_key)
-    except (TypeError, json.JSONDecodeError) as error:
-        raise InstitutionalObservationLineageError(
-            "institutional observation record_key is invalid"
-        ) from error
-    if not isinstance(parsed, dict) or set(parsed) != _RECORD_KEY_FIELDS:
-        raise InstitutionalObservationLineageError(
-            "institutional observation record_key is incomplete"
-        )
-    required_strings = _RECORD_KEY_FIELDS - {"put_call", "quantity_type"}
-    nullable_strings = {"put_call", "quantity_type"}
-    if any(not isinstance(parsed[name], str) for name in required_strings) or any(
-        parsed[name] is not None and not isinstance(parsed[name], str) for name in nullable_strings
-    ):
-        raise InstitutionalObservationLineageError(
-            "institutional observation record_key has invalid types"
-        )
-    if json.dumps(parsed, sort_keys=True, separators=(",", ":")) != observation.source.record_key:
-        raise InstitutionalObservationLineageError(
-            "institutional observation record_key is not canonical"
-        )
-    try:
-        UUID(parsed["artifact_id"])
-        UUID(parsed["report_id"])
-        UUID(parsed["row_id"])
-        UUID(parsed["correspondence_id"])
-        UUID(parsed["cover_revision_id"])
-        UUID(parsed["information_table_revision_id"])
-    except ValueError as error:
-        raise InstitutionalObservationLineageError(
-            "institutional observation record_key has invalid IDs"
-        ) from error
-    return cast(dict[str, str | None], parsed)
+        return parse_record_key(observation)
+    except InstitutionalObservationCompatibilityError as error:
+        raise InstitutionalObservationLineageError(str(error)) from error
 
 
 def _resolve_all(ids, resolver, kind: str):
@@ -417,12 +378,26 @@ def _verified_view(observation, key, artifacts, reports, correspondences):
             artifact, row, correspondence, normalized_at=observation.normalized_at
         )
     }.get(observation.field_name)
-    if expected is None or expected != observation or key["field_name"] != observation.field_name:
+    if expected is None or key["field_name"] != observation.field_name:
         raise InstitutionalObservationLineageError("institutional observation content conflicts")
+    try:
+        compatibility_notes = compare_reconstruction(
+            observation,
+            expected,
+            existing_key=key,
+            candidate_key=_record_key(expected),
+            artifact=artifact,
+            report=report,
+            row=row,
+            correspondence=correspondence,
+        )
+    except InstitutionalObservationCompatibilityError as error:
+        raise InstitutionalObservationLineageError(str(error)) from error
     return InstitutionalObservationView(
         observation=observation,
         report=report,
         artifact=artifact,
         row=row,
         correspondence=correspondence,
+        compatibility_notes=compatibility_notes,
     )

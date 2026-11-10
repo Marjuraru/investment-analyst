@@ -63,4 +63,11 @@ def test_observation_view_accepts_both_admissible_correspondence_proofs() -> Non
         "artifact",
         "row",
         "correspondence",
+        "compatibility_notes",
+    }
+    notes = InstitutionalObservationView.model_fields["compatibility_notes"]
+    assert notes.default == ()
+    assert set(get_args(get_args(notes.annotation)[0])) == {
+        "replayed_retrieval_time",
+        "legacy_acceptance_timezone",
     }

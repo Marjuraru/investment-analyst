@@ -1402,8 +1402,38 @@ su hora efectiva y un corte `2026-11-09T12:00:00Z`; un corte histórico puede de
 `artifact_not_available` o `inputs_unavailable` y eso es una abstención legítima, no un fallo. El
 resultado exacto y las razones se registran en la evidencia BUILD del SHA del PR. No se retrodata el
 artefacto para fabricar un éxito y no se declara una predicción real. `PREDICTIVE-RESEARCH` permanece
-`NEXT`, V1-U4 sigue `UNKNOWN` y el siguiente esperado es el 3/3 `SHADOW-AND-V1-RELEASE`, todavía sin
-Issue ni autorización de ejecución.
+`NEXT`, V1-U4 sigue `UNKNOWN` y el siguiente esperado era el 3/3 `SHADOW-AND-V1-RELEASE`, todavía sin
+Issue ni autorización de ejecución en ese corte (`HISTORICAL_REFERENCE`; #434 ya está activo y este
+bloque entrega el 3/3).
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
+
+## Shadow experimental acotado (2026-11-10, `SHADOW-AND-V1-RELEASE`/#434)
+
+El contrato `research-model-shadow-run-v1` observa una o dos previews PIT con el único artefacto
+`constant-test-v1`, sin entrenar, promover, adquirir, escribir en el workspace ni publicar en outbox,
+screening o alertas. El CLI `scripts/run_model_shadow.py` exige `--enabled` y todos los argumentos
+explícitos: sin él informa `disabled` y no abre workspace, artefacto ni raíz. Con él abre el
+workspace `READ_ONLY` una sola vez, construye 1–2 previews, cierra, infiere y publica un bundle
+completo sólo si toda la petición terminó.
+
+Cada run vive en `<output-root>/<run_id>` con `manifest.json` ≤16.384 B y 1–2 resultados canónicos
+≤65.536 B; el nombre del archivo deriva del UUID de inferencia, no del ticker ni del path. La
+identidad UUID5 incluye workspace, artefacto, versión shadow, D/corte, activos ordenados, source y
+los hashes de los resultados completos; el manifiesto no contiene reloj de ejecución, sólo
+`test_only`, limitaciones y estados. La raíz es absoluta, exclusiva, fuera de workspace, repo y
+release; rechaza symlinks, traversal, entradas ajenas y `/`. Un lock exclusivo no bloqueante, un
+presupuesto de 32 runs/8 MiB con temporales incluidos y una publicación atómica impiden parciales;
+una repetición idéntica reutiliza sin reescribir mtime y una corrupción bajo el mismo ID falla
+cerrada. No hay expulsión automática ni elevación del tope. Desactivar es omitir `--enabled`; el
+rollback elige explícitamente otro artefacto válido y los runs anteriores permanecen intactos.
+
+Smoke real del 2026-11-10 sobre el workspace `70c64668…`: BTC `crypto:btc-usd` y SOL
+`crypto:sol-usd`, corte `2026-11-10T02:00:00Z`, devolvieron `inputs_unavailable` porque el cierre
+D-1 no estaba disponible; `test_probability` fue `null` y las razones quedaron en el resultado. Un
+único bundle de 9.850 B; la repetición devolvió `reused`; 0,81/0,71 s y RSS 122.616/123.376 KiB; el
+workspace conservó tamaño, mtime, inodo y ausencia de WAL. El smoke no demuestra capacidad
+predictiva y no cambia V1-U4: la abstención es un resultado legítimo, no un éxito predictivo.
 
 `route_transition:PREDICTIVE-RESEARCH:ADVANCES`
 

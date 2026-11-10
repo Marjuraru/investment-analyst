@@ -1,5 +1,6 @@
 """Typed requests and accounting for the institutional-observation service."""
 
+from typing import Literal
 from uuid import UUID
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -106,6 +107,23 @@ class InstitutionalObservationView(_Strict):
     artifact: InstitutionalHoldingsSemantics
     row: InstitutionalSemanticsRow
     correspondence: InstrumentCorrespondence | SecInstitutionalRowCorrespondence
+    compatibility_notes: tuple[
+        Literal["replayed_retrieval_time", "legacy_acceptance_timezone"], ...
+    ] = ()
+
+    @field_validator("compatibility_notes")
+    @classmethod
+    def ordered_unique_notes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("compatibility notes must not repeat")
+        expected = tuple(
+            note
+            for note in ("replayed_retrieval_time", "legacy_acceptance_timezone")
+            if note in value
+        )
+        if tuple(value) != expected:
+            raise ValueError("compatibility notes must preserve canonical order")
+        return value
 
 
 class InstitutionalObservationQueryResult(_Strict):
