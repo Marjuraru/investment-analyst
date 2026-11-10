@@ -15,6 +15,10 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 from investment_analyst.evidence.sec_documents.models import normalize_cik
+from investment_analyst.evidence.sec_institutional_observations.models import (
+    InstitutionalObservationReference,
+    InstitutionalObservationWitness,
+)
 
 SEC_INSTITUTIONAL_MATERIALIZATION_SCHEMA_VERSION = (
     "sec-institutional-observation-materialization-v1"
@@ -35,6 +39,10 @@ class SecInstitutionalObservationMaterializationRequest(_Strict):
     known_at: UTCDateTime
     manager_offset: int = Field(default=0, ge=0)
     manager_limit: int = Field(default=1, ge=1, le=MAX_MATERIALIZATION_MANAGERS_PER_PAGE)
+
+
+class MaterializationObservationWitness(InstitutionalObservationWitness):
+    """Ephemeral materialization witness; never persisted or used as historical authority."""
 
 
 class SecInstitutionalMaterializationCandidateSummary(_Strict):
@@ -102,6 +110,7 @@ class SecInstitutionalMaterializationRunSummary(_Strict):
     observations_created: int = Field(default=0, ge=0)
     observations_reused: int = Field(default=0, ge=0)
     skipped_by_reason: dict[NonEmptyStr, int] = Field(default_factory=dict)
+    observation_witnesses: tuple[MaterializationObservationWitness, ...] = ()
 
     @field_validator("manager_cik")
     @classmethod
@@ -114,6 +123,11 @@ class SecInstitutionalMaterializationRunSummary(_Strict):
             raise ValueError("only a failed run declares a reason code")
         if len(set(self.report_ids)) != len(self.report_ids):
             raise ValueError("run report identifiers must be unique")
+        witness_keys = {
+            (item.observation_id, item.current_claim_id) for item in self.observation_witnesses
+        }
+        if len(witness_keys) != len(self.observation_witnesses):
+            raise ValueError("run observation witnesses must be unique")
         return self
 
 
@@ -126,6 +140,7 @@ class SecInstitutionalObservationMaterializationSummary(_Strict):
     policy_version: Literal["sec-institutional-observation-materialization-page-v1"] = (
         SEC_INSTITUTIONAL_MATERIALIZATION_POLICY_VERSION
     )
+    mode: Literal["materialized", "preflight"] = "materialized"
     request: SecInstitutionalObservationMaterializationRequest
     effective_known_at: UTCDateTime
     snapshot_id: UUID
@@ -148,6 +163,8 @@ class SecInstitutionalObservationMaterializationSummary(_Strict):
     observations_reused: int = Field(ge=0)
     failed_candidates: int = Field(ge=0)
     failed_runs: int = Field(ge=0)
+    observation_witnesses: tuple[MaterializationObservationWitness, ...] = ()
+    observation_references: tuple[InstitutionalObservationReference, ...] = ()
     traceability_verified: bool
 
     @model_validator(mode="after")
@@ -173,6 +190,23 @@ class SecInstitutionalObservationMaterializationSummary(_Strict):
         for name, expected in totals.items():
             if getattr(self, name) != expected:
                 raise ValueError(f"{name} must equal the sum over the page")
+        witness_keys = {
+            (item.observation_id, item.current_claim_id) for item in self.observation_witnesses
+        }
+        if len(witness_keys) != len(self.observation_witnesses):
+            raise ValueError("page observation witnesses must be unique")
+        if any(
+            item.verified_at_cut != self.effective_known_at for item in self.observation_witnesses
+        ):
+            raise ValueError("page observation witnesses must use the effective cut")
+        reference_keys = {
+            (item.observation_id, item.claim_id, item.field_name)
+            for item in self.observation_references
+        }
+        if len(reference_keys) != len(self.observation_references):
+            raise ValueError("page observation references must be unique")
+        if any(item.available_at > self.effective_known_at for item in self.observation_references):
+            raise ValueError("page observation references must be visible at the cut")
         return self
 
     def to_json_dict(self) -> dict[str, object]:
@@ -182,6 +216,7 @@ class SecInstitutionalObservationMaterializationSummary(_Strict):
 
 __all__ = [
     "MAX_MATERIALIZATION_MANAGERS_PER_PAGE",
+    "MaterializationObservationWitness",
     "SEC_INSTITUTIONAL_MATERIALIZATION_POLICY_VERSION",
     "SEC_INSTITUTIONAL_MATERIALIZATION_SCHEMA_VERSION",
     "SecInstitutionalMaterializationCandidateSummary",

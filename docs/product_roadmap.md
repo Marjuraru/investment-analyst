@@ -122,8 +122,9 @@ artefacto→compatibilidad→features PIT→adaptador→resultado/explicación�
 `constant-test-v1`. No entrena, no promueve un predictor, no abre el holdout, no adquiere datos y no
 genera señal ni recomendación. La integración scratch demuestra `test_output`; el smoke real puede
 abstenerse legítimamente (`artifact_not_available`/`inputs_unavailable`) y se reporta sin
-retrofechar. `PREDICTIVE-RESEARCH` permanece `NEXT` y el siguiente esperado es el 3/3
-`SHADOW-AND-V1-RELEASE`, todavía sin Issue.
+retrofechar. `PREDICTIVE-RESEARCH` permanece `NEXT` y el siguiente esperado era el 3/3
+`SHADOW-AND-V1-RELEASE`, todavía sin Issue en ese corte (`HISTORICAL_REFERENCE`; #434 ya está activo
+y el veredicto de este bloque figura más abajo).
 
 `route_transition:PREDICTIVE-RESEARCH:ADVANCES`
 
@@ -231,6 +232,21 @@ BTC 0,988 s frío / 0,259 s caliente, RSS 206.684 KiB); la equivalencia históri
 exactamente con el dataset `fd55d5ed…` y el workspace no cambió. No demuestra capacidad predictiva ni
 autoriza tuning, otro indicador o promoción; el contraste prospectivo con labels maduros pertenece al
 siguiente PLAN y V1-U4 permanece `UNKNOWN`.
+
+`SHADOW-AND-V1-RELEASE`/#434 (`ADVANCES`) cierra la ingeniería experimental 3/3 con un shadow
+`research-model-shadow-run-v1` explícito, acotado, desactivable y read-only, y con la compatibilidad
+13F que explica los 58 conflictos reproducidos (46 por hora de aceptación NY mal etiquetada y 12 por
+reloj de recuperación) sin reescribir la observación histórica. El smoke real BTC/SOL del
+2026-11-10 se abstuvo (`inputs_unavailable`, sin probabilidad) y reutilizó el mismo bundle; no es
+señal ni evidencia predictiva. La enmienda A5 reparó la trazabilidad multiactivo con una resolución
+compartida y un witness efímero: seis páginas con preflight 0/0, dos pasadas productivas 0/0, 96
+witnesses, 243 claims y 338 observaciones con hashes idénticos y DB/WAL/workspace sin delta. El
+witness no corrige la disponibilidad antigua; los claims duplicados se conservan append-only.
+Veredicto: **V1 NO ACEPTADA** por V1-U3/V1-U4 `UNKNOWN`, el acuse no acreditado y la captura
+prospectiva sujeta al calendario. La siguiente decisión es la aceptación explícita de las
+observaciones pendientes o la captura prospectiva; no se abre un cuarto bloque automático.
+`PREDICTIVE-RESEARCH` permanece `NEXT`, `FUNDAMENTALS-COVERAGE` y `ASSET-EXPANSION` siguen
+`PLANNED` y `DATA-CHASSIS` permanece `DONE`.
 
 La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de crecimiento viven en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md).

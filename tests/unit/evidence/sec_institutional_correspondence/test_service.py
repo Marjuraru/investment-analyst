@@ -333,3 +333,58 @@ def test_resolution_reports_conflicting_content_for_one_asset(tmp_path: Path) ->
         assert resolution.state == "conflicting_content"
         assert resolution.correspondence is None
         assert resolution.considered == 2
+
+
+def test_classification_distinguishes_verified_stale_and_invalid(tmp_path: Path) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        chain = _build_chain(storage)
+        row = chain[1].rows[0]
+        service = SecInstitutionalRowCorrespondenceService(storage)
+        verified = _claim(chain, row)
+        stale = _claim(chain, row, available_at=chain[1].available_at)
+        invalid = _claim(chain, row, artifact_id=uuid4())
+        assert service.classify_lineage(verified).state == "verified"
+        assert service.classify_lineage(stale).state == "stale_availability"
+        assert service.classify_lineage(invalid).state == "invalid"
+        with pytest.raises(SecInstitutionalRowCorrespondenceError):
+            service.verify_lineage(stale)
+
+
+def test_verified_resolution_selects_current_and_retains_stale(tmp_path: Path) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        chain = _build_chain(storage)
+        row = chain[1].rows[0]
+        repository = SecInstitutionalRowCorrespondenceRepository(storage.raw_records)
+        verified = _claim(chain, row)
+        stale = _claim(chain, row, available_at=chain[1].available_at)
+        repository.save(verified)
+        repository.save(stale)
+        resolution = SecInstitutionalRowCorrespondenceService(storage).resolve_verified(
+            artifact_id=chain[1].artifact_id, row_id=row.row_id, known_at=_NOW
+        )
+        assert resolution.state == "verified"
+        assert resolution.selected == verified
+        assert resolution.verified == (verified,)
+        assert resolution.stale == (stale,)
+        assert resolution.considered == 2
+
+
+def test_verified_resolution_rejects_conflicting_dataset_or_candidate(tmp_path: Path) -> None:
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        chain = _build_chain(storage)
+        row = chain[1].rows[0]
+        repository = SecInstitutionalRowCorrespondenceRepository(storage.raw_records)
+        repository.save(_claim(chain, row))
+        repository.save(
+            _claim(
+                chain,
+                row,
+                dataset_revision_id=uuid4(),
+                available_at=_NOW - timedelta(minutes=1),
+            )
+        )
+        resolution = SecInstitutionalRowCorrespondenceService(storage).resolve_verified(
+            artifact_id=chain[1].artifact_id, row_id=row.row_id, known_at=_NOW
+        )
+        assert resolution.state == "conflicting_content"
+        assert resolution.selected is None

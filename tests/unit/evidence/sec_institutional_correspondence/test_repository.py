@@ -172,3 +172,23 @@ def test_repository_list_applies_point_in_time_and_filters(tmp_path: Path) -> No
 
 def _order(item: SecInstitutionalRowCorrespondence) -> tuple[datetime, str]:
     return (item.available_at, str(item.correspondence_id))
+
+
+def test_repository_list_for_artifacts_is_closed_and_point_in_time(tmp_path: Path) -> None:
+    first_artifact, second_artifact = uuid4(), uuid4()
+    first = _claim(artifact_id=first_artifact, row_id=uuid4())
+    second = _claim(artifact_id=second_artifact, row_id=uuid4())
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        repository = SecInstitutionalRowCorrespondenceRepository(storage.raw_records)
+        repository.save(first)
+        repository.save(second)
+        assert repository.list_for_artifacts(
+            known_at=_RECORDED_AT, artifact_ids=(first_artifact,)
+        ) == [first]
+        assert (
+            repository.list_for_artifacts(
+                known_at=_AVAILABLE_AT.replace(hour=11), artifact_ids=(first_artifact,)
+            )
+            == []
+        )
+        assert repository.list_for_artifacts(known_at=_RECORDED_AT, artifact_ids=()) == []

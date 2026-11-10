@@ -642,6 +642,20 @@ en anual para verificar su perfil soportado.
 
 `route_transition:PREDICTIVE-RESEARCH:ADVANCES`
 
+La reparación 13F de `SHADOW-AND-V1-RELEASE`/#434 (`ADVANCES`) mantiene separadas la observación
+histórica y su reconstrucción: un único helper tipado tolera sólo el reloj de recuperación y una hora
+de aceptación antigua mal etiquetada UTC que, interpretada en `America/New_York` con DST histórico,
+convierte exactamente a la hora documental del mismo filing; cualquier otra diferencia sigue
+conflicto. Los 58 conflictos reproducidos (46 de aceptación y 12 de recuperación) se leen con
+`compatibility_notes`, conservando el objeto original y sin reescribir ni duplicar sus 212
+observaciones objetivo. La enmienda A5 resolvió la selección compartida: las seis páginas se
+preflightaron READ_ONLY con 0 claims y 0 observaciones previstas, y dos pasadas productivas con un
+único writer dieron 0/0 nuevas, 243 claims y 338 observaciones con hashes idénticos, 96 witnesses y
+`traceability_verified=true`; DB/WAL/workspace no cambiaron. El witness es efímero, no certifica la
+disponibilidad antigua y los claims duplicados se conservan append-only. El canal externo sigue en
+su preferencia actual (`disabled`), no se envían mensajes ni se acusa en nombre del usuario: V1-U2
+no acredita acuse y el veredicto es **V1 NO ACEPTADA**. No hay señal, recomendación ni ejecución.
+
 ## Validación
 
 Cada entrega prueba:

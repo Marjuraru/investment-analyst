@@ -113,6 +113,34 @@ class SecInstitutionalRowCorrespondenceRepository:
         self._raw_records.save(row_correspondence_to_raw_record(item))
         return item
 
+    def list_for_artifacts(
+        self,
+        *,
+        known_at: datetime,
+        artifact_ids: tuple[UUID, ...],
+        manager_cik: str | None = None,
+    ) -> list[SecInstitutionalRowCorrespondence]:
+        """Load claims for a closed set of target artifacts in one bounded selection."""
+        ordered_ids = tuple(sorted(set(artifact_ids), key=str))
+        if not ordered_ids:
+            return []
+        selected_ids = self._raw_records.select_record_ids_by_json_field(
+            field="correspondence_artifact",
+            values=tuple(str(value) for value in ordered_ids),
+            source_id=ROW_CORRESPONDENCE_SOURCE_ID,
+            schema_version=ROW_CORRESPONDENCE_SCHEMA_VERSION,
+            available_to=known_at,
+        )
+        manager = normalize_cik(manager_cik) if manager_cik is not None else None
+        claims = (
+            row_correspondence_from_raw_record(record)
+            for record in self._hydrate_selected_in_order(selected_ids)
+        )
+        return sorted(
+            (item for item in claims if manager is None or item.manager_cik == manager),
+            key=lambda item: (item.available_at, str(item.correspondence_id)),
+        )
+
     def list(
         self,
         *,

@@ -2,10 +2,13 @@
 
 One execution resolves the latest manager-universe snapshot available at the requested cut, selects
 the same deterministic page of already selected managers as ``SEC-CORPUS-28`` while preserving each
-candidate's own ``(asset_id, cusip, manager_cik, report_period)`` tuple, proves one row-scoped
-correspondence per exact CUSIP match against the persisted 13F evidence, and then completes the
-integrated observation layer for every asset present in the page. No network call is performed and
-the workspace is opened exactly once.
+candidate's own ``(asset_id, cusip, manager_cik, report_period)`` tuple, selects strictly verified
+row-scoped correspondences, and completes the integrated observation layer for every asset present
+in the page. No network call is performed and the workspace is opened exactly once.
+
+The preflight mode executes the same selection and all traceability checks without writing. A
+witness only links a current verified claim to an older observation of the same row; it never
+certifies the old claim's historical availability.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from investment_analyst.application.runtime import (
     StorageLocationRequest,
 )
 from investment_analyst.application.sec_institutional_observation_materialization_models import (
+    MaterializationObservationWitness,
     SecInstitutionalMaterializationCandidateSummary,
     SecInstitutionalMaterializationRunSummary,
     SecInstitutionalObservationMaterializationRequest,
@@ -42,8 +46,12 @@ from investment_analyst.evidence.sec_institutional_holdings.repository import (
     InstitutionalHoldingsRepository,
 )
 from investment_analyst.evidence.sec_institutional_observations.models import (
+    InstitutionalObservationClaimSelection,
+    InstitutionalObservationParentContext,
     InstitutionalObservationRequest,
+    InstitutionalObservationSummary,
 )
+from investment_analyst.evidence.sec_institutional_observations.normalizer import normalize_row
 from investment_analyst.evidence.sec_institutional_observations.service import (
     InstitutionalObservationService,
 )
@@ -141,8 +149,13 @@ class SecInstitutionalObservationMaterializationApplication:
         *,
         snapshot: Sec13FManagerUniverseSnapshot | None = None,
         revision: Sec13FDataSetRevision | None = None,
+        preflight: bool = False,
     ) -> SecInstitutionalObservationMaterializationSummary:
-        """Materialize claims and observations for one page under an open storage connection."""
+        """Select, verify and optionally write one page under an open storage connection."""
+        if not preflight and storage.read_only:
+            raise SecInstitutionalObservationMaterializationError(
+                "materialization requires writable storage"
+            )
         catalog_cusips = resolve_catalog_sec_cusip_mappings(self._runtime.catalog)
         if snapshot is None or revision is None:
             snapshot, revision = _resolve_snapshot(storage, request.known_at)
@@ -157,8 +170,10 @@ class SecInstitutionalObservationMaterializationApplication:
         recorded_at = self._now()
         candidates: list[SecInstitutionalMaterializationCandidateSummary] = []
         runs: list[SecInstitutionalMaterializationRunSummary] = []
+        selections: list[InstitutionalObservationClaimSelection] = []
+        outcomes: list[InstitutionalObservationSummary] = []
         for target in targets:
-            target_candidates, target_runs = self._run_target(
+            target_candidates, target_runs, target_selections, target_outcomes = self._run_target(
                 target=target,
                 request=request,
                 snapshot_id=snapshot.snapshot_id,
@@ -171,10 +186,34 @@ class SecInstitutionalObservationMaterializationApplication:
                 observations=observations,
                 catalog_cusips=catalog_cusips,
                 recorded_at=recorded_at,
+                preflight=preflight,
             )
             candidates.extend(target_candidates)
             runs.extend(target_runs)
+            selections.extend(target_selections)
+            outcomes.extend(target_outcomes)
+        witnesses = tuple(
+            MaterializationObservationWitness(**item.model_dump())
+            for outcome in outcomes
+            for item in outcome.observation_witnesses
+        )
+        failed = any(item.state == "failed" for item in candidates) or any(
+            item.claims_ambiguous for item in candidates
+        )
+        traceability = (
+            False
+            if failed
+            else _verify_context_traceability(
+                storage=storage,
+                selections=tuple(selections),
+                outcomes=tuple(outcomes),
+                known_at=request.known_at,
+                preflight=preflight,
+            )
+        )
+        references = tuple(item for outcome in outcomes for item in outcome.observation_references)
         return SecInstitutionalObservationMaterializationSummary(
+            mode="preflight" if preflight else "materialized",
             request=request,
             effective_known_at=request.known_at,
             snapshot_id=snapshot.snapshot_id,
@@ -197,12 +236,9 @@ class SecInstitutionalObservationMaterializationApplication:
             observations_reused=sum(item.observations_reused for item in runs),
             failed_candidates=sum(item.state == "failed" for item in candidates),
             failed_runs=sum(item.state == "failed" for item in runs),
-            traceability_verified=_verify_traceability(
-                repository=repository,
-                storage=storage,
-                candidates=tuple(candidates),
-                known_at=request.known_at,
-            ),
+            observation_witnesses=witnesses,
+            observation_references=references,
+            traceability_verified=traceability,
         )
 
     def materialize(
@@ -210,15 +246,16 @@ class SecInstitutionalObservationMaterializationApplication:
         request: SecInstitutionalObservationMaterializationRequest,
         *,
         location: StorageLocationRequest | None = None,
+        preflight: bool = False,
     ) -> SecInstitutionalObservationMaterializationSummary:
-        """Materialize claims and observations for one bounded page under a single writer."""
+        """Run one bounded page under a single read-only or read-write connection."""
         storage_request = location or StorageLocationRequest()
-        with self._runtime.open_storage(
-            storage_request, access_mode=WorkspaceAccessMode.READ_WRITE
-        ) as storage:
+        access_mode = WorkspaceAccessMode.READ_ONLY if preflight else WorkspaceAccessMode.READ_WRITE
+        with self._runtime.open_storage(storage_request, access_mode=access_mode) as storage:
             return self.materialize_with_storage(
                 storage,
                 request,
+                preflight=preflight,
             )
 
     def _run_target(
@@ -236,11 +273,14 @@ class SecInstitutionalObservationMaterializationApplication:
         observations: InstitutionalObservationService,
         catalog_cusips: dict[str, str],
         recorded_at: datetime,
+        preflight: bool,
     ) -> tuple[
         list[SecInstitutionalMaterializationCandidateSummary],
         list[SecInstitutionalMaterializationRunSummary],
+        list[InstitutionalObservationClaimSelection],
+        list[InstitutionalObservationSummary],
     ]:
-        """Prove claims for every candidate of one manager and period, then observe each asset."""
+        """Select verified claims for one manager/period page and complete its observations."""
         reports = [
             report
             for report in holdings.list_reports(
@@ -253,14 +293,24 @@ class SecInstitutionalObservationMaterializationApplication:
             for report in reports
             if (artifact := semantics.get_for_parent(report)) is not None
         }
+        artifact_ids = tuple(dict.fromkeys(artifact.artifact_id for artifact in artifacts.values()))
+        claims_by_row: dict[tuple[UUID, UUID], list[SecInstitutionalRowCorrespondence]] = {}
+        for claim in repository.list_for_artifacts(
+            known_at=request.known_at,
+            artifact_ids=artifact_ids,
+            manager_cik=target.manager_cik,
+        ):
+            claims_by_row.setdefault((claim.artifact_id, claim.row_id), []).append(claim)
         summaries: list[SecInstitutionalMaterializationCandidateSummary] = []
-        run_report_ids: dict[str, list[UUID]] = {}
+        selections: list[InstitutionalObservationClaimSelection] = []
+        run_report_ids: dict[str, set[UUID]] = {}
         for candidate in target.candidates:
-            summary = self._claim_candidate(
+            summary, candidate_selections = self._claim_candidate(
                 candidate=candidate,
                 target=target,
                 reports=reports,
                 artifacts=artifacts,
+                claims_by_row=claims_by_row,
                 snapshot_id=snapshot_id,
                 dataset_revision_id=dataset_revision_id,
                 snapshot_available_at=snapshot_available_at,
@@ -268,21 +318,52 @@ class SecInstitutionalObservationMaterializationApplication:
                 service=correspondences,
                 catalog_cusips=catalog_cusips,
                 recorded_at=recorded_at,
+                preflight=preflight,
             )
             summaries.append(summary)
+            selections.extend(candidate_selections)
             if summary.state == "processed":
-                run_report_ids.setdefault(candidate.asset_id, list(summary.report_ids))
-        runs = [
-            self._observe_asset(
+                run_report_ids.setdefault(candidate.asset_id, set()).update(summary.report_ids)
+        selections_by_asset: dict[str, list[InstitutionalObservationClaimSelection]] = {}
+        for selection in selections:
+            selections_by_asset.setdefault(selection.asset_id, []).append(selection)
+        reports_by_id = {report.report_id: report for report in reports}
+        parents: list[InstitutionalObservationParentContext] = []
+        for selection in selections:
+            report = reports_by_id.get(selection.report_id)
+            artifact = artifacts.get(selection.report_id)
+            row = (
+                next(
+                    (item for item in artifact.rows if item.row_id == selection.row_id),
+                    None,
+                )
+                if artifact is not None
+                else None
+            )
+            if report is None or artifact is None or row is None:
+                raise SecInstitutionalObservationMaterializationError(
+                    "selected claim parent is not available in the page"
+                )
+            parents.append(
+                InstitutionalObservationParentContext(report=report, artifact=artifact, row=row)
+            )
+        runs: list[SecInstitutionalMaterializationRunSummary] = []
+        outcomes: list[InstitutionalObservationSummary] = []
+        for asset_id, report_ids in sorted(run_report_ids.items()):
+            run, outcome = self._observe_asset(
                 asset_id=asset_id,
                 manager_cik=target.manager_cik,
-                report_ids=tuple(dict.fromkeys(report_ids)),
+                report_ids=tuple(sorted(report_ids, key=str)),
+                selections=tuple(selections_by_asset.get(asset_id, ())),
+                parents=tuple(parents),
                 known_at=request.known_at,
                 observations=observations,
+                claim_service=correspondences,
+                preflight=preflight,
             )
-            for asset_id, report_ids in sorted(run_report_ids.items())
-        ]
-        return summaries, runs
+            runs.append(run)
+            outcomes.append(outcome)
+        return summaries, runs, selections, outcomes
 
     def _claim_candidate(
         self,
@@ -291,6 +372,7 @@ class SecInstitutionalObservationMaterializationApplication:
         target: MaterializationTarget,
         reports,
         artifacts,
+        claims_by_row: dict[tuple[UUID, UUID], list[SecInstitutionalRowCorrespondence]],
         snapshot_id: UUID,
         dataset_revision_id: UUID,
         snapshot_available_at: datetime,
@@ -298,8 +380,12 @@ class SecInstitutionalObservationMaterializationApplication:
         service: SecInstitutionalRowCorrespondenceService,
         catalog_cusips: dict[str, str],
         recorded_at: datetime,
-    ) -> SecInstitutionalMaterializationCandidateSummary:
-        """Create or reuse one claim per exact CUSIP row of every visible report."""
+        preflight: bool,
+    ) -> tuple[
+        SecInstitutionalMaterializationCandidateSummary,
+        tuple[InstitutionalObservationClaimSelection, ...],
+    ]:
+        """Select one strictly verified claim per exact CUSIP row and report."""
         base = {
             "candidate_id": candidate.candidate_id,
             "asset_id": candidate.asset_id,
@@ -309,20 +395,28 @@ class SecInstitutionalObservationMaterializationApplication:
             "report_period": target.report_period,
         }
         if not reports:
-            return SecInstitutionalMaterializationCandidateSummary(
-                **base, state="missing_report", reason_code=None, skipped_by_reason={}
+            return (
+                SecInstitutionalMaterializationCandidateSummary(
+                    **base, state="missing_report", reason_code=None, skipped_by_reason={}
+                ),
+                (),
             )
         if not artifacts:
-            return SecInstitutionalMaterializationCandidateSummary(
-                **base,
-                state="not_enriched",
-                report_ids=tuple(report.report_id for report in reports),
-                skipped_by_reason={},
+            return (
+                SecInstitutionalMaterializationCandidateSummary(
+                    **base,
+                    state="not_enriched",
+                    report_ids=tuple(report.report_id for report in reports),
+                    skipped_by_reason={},
+                ),
+                (),
             )
         created = reused = ambiguous = matched = unmatched = examined = 0
         claim_ids: list[UUID] = []
         artifact_ids: list[UUID] = []
+        selections: list[InstitutionalObservationClaimSelection] = []
         skipped: dict[str, int] = {}
+        failure: str | None = None
         try:
             for report in reports:
                 artifact = artifacts.get(report.report_id)
@@ -333,70 +427,119 @@ class SecInstitutionalObservationMaterializationApplication:
                     if row.cusip != candidate.cusip:
                         continue
                     examined += 1
-                    claim = SecInstitutionalRowCorrespondence.claim(
-                        asset_id=candidate.asset_id,
-                        cusip=row.cusip,
-                        title_of_class=row.title_of_class,
-                        report_period=target.report_period,
-                        manager_cik=target.manager_cik,
-                        report_id=report.report_id,
-                        artifact_id=artifact.artifact_id,
-                        row_id=row.row_id,
-                        universe_snapshot_id=snapshot_id,
-                        dataset_revision_id=dataset_revision_id,
-                        candidate_id=candidate.candidate_id,
-                        available_at=max(snapshot_available_at, artifact.available_at),
-                        recorded_at=recorded_at,
-                    )
-                    service.verify_lineage(claim)
-                    service.verify_catalog_binding(claim, catalog_cusips=catalog_cusips)
-                    existing = repository.get(claim.correspondence_id)
-                    if existing is None:
-                        repository.save(claim)
-                        created += 1
-                    elif not same_evidence(existing, claim):
+                    claims = claims_by_row.get((artifact.artifact_id, row.row_id), ())
+                    resolution = service.resolve_verified_claims(claims)
+                    if resolution.state in {"conflicting_content", "invalid"}:
                         ambiguous += 1
-                        skipped["claim_identity_conflicts"] = (
-                            skipped.get("claim_identity_conflicts", 0) + 1
+                        unmatched += 1
+                        failure = failure or f"claim_{resolution.state}"
+                        skipped[f"claim_{resolution.state}"] = (
+                            skipped.get(f"claim_{resolution.state}", 0) + 1
                         )
                         continue
-                    else:
+                    if resolution.state == "verified":
+                        verified_ids = tuple(item.correspondence_id for item in resolution.verified)
+                        selected = resolution.selected
+                        service.verify_catalog_binding(selected, catalog_cusips=catalog_cusips)
                         reused += 1
+                    else:
+                        proposed = SecInstitutionalRowCorrespondence.claim(
+                            asset_id=candidate.asset_id,
+                            cusip=row.cusip,
+                            title_of_class=row.title_of_class,
+                            report_period=target.report_period,
+                            manager_cik=target.manager_cik,
+                            report_id=report.report_id,
+                            artifact_id=artifact.artifact_id,
+                            row_id=row.row_id,
+                            universe_snapshot_id=snapshot_id,
+                            dataset_revision_id=dataset_revision_id,
+                            candidate_id=candidate.candidate_id,
+                            available_at=max(snapshot_available_at, artifact.available_at),
+                            recorded_at=recorded_at,
+                        )
+                        service.verify_lineage(proposed)
+                        service.verify_catalog_binding(proposed, catalog_cusips=catalog_cusips)
+                        if preflight:
+                            selected = proposed
+                            created += 1
+                        else:
+                            existing = repository.get(proposed.correspondence_id)
+                            if existing is not None:
+                                if not same_evidence(existing, proposed):
+                                    raise SecInstitutionalObservationMaterializationError(
+                                        "row correspondence identity conflicts"
+                                    )
+                                if service.classify_lineage(existing).state != "verified":
+                                    raise SecInstitutionalObservationMaterializationError(
+                                        "persisted row correspondence is not verified"
+                                    )
+                                selected = existing
+                                reused += 1
+                            else:
+                                repository.save(proposed)
+                                selected = proposed
+                                created += 1
+                        verified_ids = (selected.correspondence_id,)
                     matched += 1
-                    claim_ids.append(claim.correspondence_id)
+                    if selected.correspondence_id not in claim_ids:
+                        claim_ids.append(selected.correspondence_id)
+                    selections.append(
+                        InstitutionalObservationClaimSelection(
+                            asset_id=candidate.asset_id,
+                            manager_cik=target.manager_cik,
+                            report_id=report.report_id,
+                            artifact_id=artifact.artifact_id,
+                            row_id=row.row_id,
+                            correspondence=selected,
+                            verified_claim_ids=verified_ids,
+                        )
+                    )
         except Exception as error:
-            return SecInstitutionalMaterializationCandidateSummary(
+            return (
+                SecInstitutionalMaterializationCandidateSummary(
+                    **base,
+                    state="failed",
+                    reason_code=f"{type(error).__name__}: {error}",
+                    report_ids=tuple(report.report_id for report in reports),
+                    artifact_ids=tuple(artifact_ids),
+                    rows_examined=examined,
+                    rows_matched=matched,
+                    rows_unmatched=examined - matched,
+                    claims_created=created,
+                    claims_reused=reused,
+                    claims_ambiguous=ambiguous,
+                    claim_ids=tuple(claim_ids),
+                    skipped_by_reason=skipped,
+                ),
+                tuple(selections),
+            )
+        unmatched = examined - matched
+        if failure is not None:
+            state = "failed"
+        elif matched:
+            state = "processed"
+        else:
+            state = "missing_rows"
+        if unmatched and failure is None:
+            skipped["cusip_mismatch"] = unmatched
+        return (
+            SecInstitutionalMaterializationCandidateSummary(
                 **base,
-                state="failed",
-                reason_code=type(error).__name__,
+                state=state,
+                reason_code=failure,
                 report_ids=tuple(report.report_id for report in reports),
                 artifact_ids=tuple(artifact_ids),
                 rows_examined=examined,
                 rows_matched=matched,
-                rows_unmatched=examined - matched,
+                rows_unmatched=unmatched,
                 claims_created=created,
                 claims_reused=reused,
                 claims_ambiguous=ambiguous,
                 claim_ids=tuple(claim_ids),
                 skipped_by_reason=skipped,
-            )
-        unmatched = examined - matched
-        state = "processed" if matched else "missing_rows"
-        if unmatched:
-            skipped["cusip_mismatch"] = unmatched
-        return SecInstitutionalMaterializationCandidateSummary(
-            **base,
-            state=state,
-            report_ids=tuple(report.report_id for report in reports),
-            artifact_ids=tuple(artifact_ids),
-            rows_examined=examined,
-            rows_matched=matched,
-            rows_unmatched=unmatched,
-            claims_created=created,
-            claims_reused=reused,
-            claims_ambiguous=ambiguous,
-            claim_ids=tuple(claim_ids),
-            skipped_by_reason=skipped,
+            ),
+            tuple(selections),
         )
 
     def _observe_asset(
@@ -405,22 +548,35 @@ class SecInstitutionalObservationMaterializationApplication:
         asset_id: str,
         manager_cik: str,
         report_ids: tuple[UUID, ...],
+        selections: tuple[InstitutionalObservationClaimSelection, ...],
+        parents: tuple[InstitutionalObservationParentContext, ...],
         known_at: datetime,
         observations: InstitutionalObservationService,
-    ) -> SecInstitutionalMaterializationRunSummary:
+        claim_service: SecInstitutionalRowCorrespondenceService,
+        preflight: bool,
+    ) -> tuple[SecInstitutionalMaterializationRunSummary, InstitutionalObservationSummary]:
         """Complete the integrated observation layer for one asset and manager in batches."""
         created = reused = linked = unlinked = 0
         skipped: dict[str, int] = {}
+        witnesses: list[MaterializationObservationWitness] = []
         try:
             for start in range(0, len(report_ids), MAX_REPORT_IDS_PER_OBSERVATION_REQUEST):
                 batch = report_ids[start : start + MAX_REPORT_IDS_PER_OBSERVATION_REQUEST]
+                request = InstitutionalObservationRequest(
+                    asset_id=asset_id,
+                    manager_cik=manager_cik,
+                    report_ids=batch,
+                    known_at=known_at,
+                )
+                context = observations.plan_normalization(
+                    request,
+                    tuple(item for item in selections if item.report_id in set(batch)),
+                    write_allowed=not preflight,
+                    parents=parents,
+                    claim_service=claim_service,
+                )
                 outcome = observations.normalize(
-                    InstitutionalObservationRequest(
-                        asset_id=asset_id,
-                        manager_cik=manager_cik,
-                        report_ids=batch,
-                        known_at=known_at,
-                    )
+                    request, context=context, claim_service=claim_service
                 )
                 created += outcome.observations_created
                 reused += outcome.observations_reused
@@ -428,29 +584,58 @@ class SecInstitutionalObservationMaterializationApplication:
                 unlinked += outcome.rows_unlinked
                 for reason, count in outcome.skipped_by_reason.items():
                     skipped[reason] = skipped.get(reason, 0) + count
+                witnesses.extend(
+                    MaterializationObservationWitness(**item.model_dump())
+                    for item in outcome.observation_witnesses
+                )
         except Exception as error:
-            return SecInstitutionalMaterializationRunSummary(
+            return (
+                SecInstitutionalMaterializationRunSummary(
+                    asset_id=asset_id,
+                    manager_cik=manager_cik,
+                    report_ids=report_ids,
+                    state="failed",
+                    reason_code=f"{type(error).__name__}: {error}",
+                    rows_linked=linked,
+                    rows_unlinked=unlinked,
+                    observations_created=created,
+                    observations_reused=reused,
+                    skipped_by_reason=skipped,
+                    observation_witnesses=tuple(witnesses),
+                ),
+                InstitutionalObservationSummary(
+                    asset_id=asset_id,
+                    known_at=known_at,
+                    normalized_at=known_at,
+                    reports_examined=len(report_ids),
+                    reports_missing=0,
+                    reports_not_enriched=0,
+                    rows_examined=linked + unlinked,
+                    rows_linked=linked,
+                    rows_unlinked=unlinked,
+                    values_examined=linked,
+                    observations_generated=created + reused,
+                    observations_created=created,
+                    observations_reused=reused,
+                    skipped_by_reason=skipped,
+                    observation_witnesses=tuple(),
+                    observation_references=tuple(),
+                ),
+            )
+        return (
+            SecInstitutionalMaterializationRunSummary(
                 asset_id=asset_id,
                 manager_cik=manager_cik,
                 report_ids=report_ids,
-                state="failed",
-                reason_code=type(error).__name__,
+                state="processed",
                 rows_linked=linked,
                 rows_unlinked=unlinked,
                 observations_created=created,
                 observations_reused=reused,
                 skipped_by_reason=skipped,
-            )
-        return SecInstitutionalMaterializationRunSummary(
-            asset_id=asset_id,
-            manager_cik=manager_cik,
-            report_ids=report_ids,
-            state="processed",
-            rows_linked=linked,
-            rows_unlinked=unlinked,
-            observations_created=created,
-            observations_reused=reused,
-            skipped_by_reason=skipped,
+                observation_witnesses=tuple(witnesses),
+            ),
+            outcome,
         )
 
     def _now(self) -> datetime:
@@ -487,6 +672,59 @@ def _resolve_snapshot(storage, known_at: datetime):
             "manager universe dataset revision is not available at the requested cut"
         )
     return snapshot, revision
+
+
+def _verify_context_traceability(
+    *,
+    storage,
+    selections: tuple[InstitutionalObservationClaimSelection, ...],
+    outcomes: tuple[InstitutionalObservationSummary, ...],
+    known_at: datetime,
+    preflight: bool,
+) -> bool:
+    """Verify concrete field-to-observation links for every selected row at the cut."""
+    references: dict[tuple[UUID, UUID, str], list] = {}
+    for outcome in outcomes:
+        for item in outcome.observation_references:
+            references.setdefault((item.artifact_id, item.row_id, item.field_name), []).append(item)
+    semantics = InstitutionalSemanticsRepository(storage.raw_records)
+    for selection in selections:
+        artifact = semantics.get(selection.artifact_id)
+        if artifact is None:
+            return False
+        row = next((item for item in artifact.rows if item.row_id == selection.row_id), None)
+        if row is None:
+            return False
+        verified_ids = set(selection.verified_claim_ids) or {
+            selection.correspondence.correspondence_id
+        }
+        candidates = normalize_row(
+            artifact,
+            row,
+            selection.correspondence,
+            normalized_at=known_at,
+        )
+        for candidate in candidates:
+            compatible = [
+                item
+                for item in references.get(
+                    (
+                        selection.artifact_id,
+                        selection.row_id,
+                        candidate.field_name,
+                    ),
+                    (),
+                )
+                if item.claim_id in verified_ids
+                and item.asset_id == selection.asset_id
+                and item.manager_cik == selection.manager_cik
+                and item.report_id == selection.report_id
+            ]
+            if not compatible:
+                return False
+            if not preflight and not any(item.persisted for item in compatible):
+                return False
+    return True
 
 
 def _verify_traceability(
