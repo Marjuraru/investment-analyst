@@ -15,9 +15,13 @@ from investment_analyst.evidence.instrument_correspondence.models import Instrum
 from investment_analyst.evidence.instrument_correspondence.repository import (
     InstrumentCorrespondenceRepository,
 )
+from investment_analyst.evidence.sec_institutional_correspondence.models import (
+    SecInstitutionalRowCorrespondence,
+)
 from investment_analyst.evidence.sec_institutional_observations.compatibility import (
     InstitutionalObservationCompatibilityError,
     _unambiguous_new_york_utc,
+    compare_equivalent_reconstruction,
     compare_reconstruction,
     parse_record_key,
 )
@@ -509,4 +513,70 @@ def test_monetary_threshold_crossing_is_rejected(tmp_path: Path) -> None:
             report=report,
             row=row,
             correspondence=correspondence,
+        )
+
+
+def test_equivalent_verified_claims_reuse_the_same_economics(tmp_path: Path) -> None:
+    now = datetime(2025, 2, 16, 12, tzinfo=UTC)
+    accepted = datetime(2025, 2, 14, 23, tzinfo=UTC)
+    report, artifact, _ = _seed(
+        tmp_path,
+        accepted=accepted,
+        report_date=datetime(2024, 12, 31).date(),
+        now=now,
+    )
+    row = artifact.rows[0]
+    dataset_revision_id, candidate_id = uuid4(), uuid4()
+
+    def claim(available_at: datetime):
+        return SecInstitutionalRowCorrespondence.claim(
+            asset_id="equity:us:aapl",
+            cusip=row.cusip,
+            title_of_class=row.title_of_class,
+            report_period=report.report_period,
+            manager_cik=report.manager_cik,
+            report_id=report.report_id,
+            artifact_id=artifact.artifact_id,
+            row_id=row.row_id,
+            universe_snapshot_id=uuid4(),
+            dataset_revision_id=dataset_revision_id,
+            candidate_id=candidate_id,
+            available_at=available_at,
+            recorded_at=now,
+        )
+
+    old_claim = claim(artifact.available_at)
+    current_claim = claim(now)
+    existing = next(
+        item
+        for item in normalize_row(artifact, row, old_claim, normalized_at=now)
+        if item.field_name == "institutional_reported_fair_value"
+    )
+    candidate = next(
+        item
+        for item in normalize_row(artifact, row, current_claim, normalized_at=now)
+        if item.field_name == "institutional_reported_fair_value"
+    )
+    compare_equivalent_reconstruction(
+        existing,
+        candidate,
+        existing_key=parse_record_key(existing),
+        candidate_key=parse_record_key(candidate),
+        original_claim=old_claim,
+        current_claim=current_claim,
+        artifact=artifact,
+        report=report,
+        row=row,
+    )
+    with pytest.raises(InstitutionalObservationCompatibilityError, match="economic or identity"):
+        compare_equivalent_reconstruction(
+            existing.model_copy(update={"value": existing.value + 1}),
+            candidate,
+            existing_key=parse_record_key(existing),
+            candidate_key=parse_record_key(candidate),
+            original_claim=old_claim,
+            current_claim=current_claim,
+            artifact=artifact,
+            report=report,
+            row=row,
         )

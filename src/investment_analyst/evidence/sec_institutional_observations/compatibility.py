@@ -165,6 +165,164 @@ def compare_reconstruction(
     return tuple(note for note in COMPATIBILITY_NOTE_ORDER if note in notes)
 
 
+def compare_witnessed_reconstruction(
+    existing: NormalizedObservation,
+    candidate: NormalizedObservation,
+    *,
+    existing_key: dict[str, str | None],
+    candidate_key: dict[str, str | None],
+    original_claim: SecInstitutionalRowCorrespondence,
+    current_claim: SecInstitutionalRowCorrespondence,
+    artifact: InstitutionalHoldingsSemantics,
+    report: InstitutionalHoldingsReport,
+    row: InstitutionalSemanticsRow,
+) -> None:
+    """Prove that a stale original claim and a current verified claim cover the same row.
+
+    The only admitted differences are the original/current claim identities and the availability
+    derived from them, plus the bounded A1 metadata tolerances. The historical observation's
+    ``available_at`` is never rewritten and the old claim is never certified as current.
+    """
+    _compare_claim_linked_reconstruction(
+        existing,
+        candidate,
+        existing_key=existing_key,
+        candidate_key=candidate_key,
+        original_claim=original_claim,
+        current_claim=current_claim,
+        artifact=artifact,
+        report=report,
+        row=row,
+        require_original_older=True,
+    )
+
+
+def compare_equivalent_reconstruction(
+    existing: NormalizedObservation,
+    candidate: NormalizedObservation,
+    *,
+    existing_key: dict[str, str | None],
+    candidate_key: dict[str, str | None],
+    original_claim: SecInstitutionalRowCorrespondence,
+    current_claim: SecInstitutionalRowCorrespondence,
+    artifact: InstitutionalHoldingsSemantics,
+    report: InstitutionalHoldingsReport,
+    row: InstitutionalSemanticsRow,
+) -> None:
+    """Prove that two strictly verified equivalent claims cover the same row and fields."""
+    _compare_claim_linked_reconstruction(
+        existing,
+        candidate,
+        existing_key=existing_key,
+        candidate_key=candidate_key,
+        original_claim=original_claim,
+        current_claim=current_claim,
+        artifact=artifact,
+        report=report,
+        row=row,
+        require_original_older=False,
+    )
+
+
+def _compare_claim_linked_reconstruction(
+    existing: NormalizedObservation,
+    candidate: NormalizedObservation,
+    *,
+    existing_key: dict[str, str | None],
+    candidate_key: dict[str, str | None],
+    original_claim: SecInstitutionalRowCorrespondence,
+    current_claim: SecInstitutionalRowCorrespondence,
+    artifact: InstitutionalHoldingsSemantics,
+    report: InstitutionalHoldingsReport,
+    row: InstitutionalSemanticsRow,
+    require_original_older: bool,
+) -> None:
+    _verify_parents(artifact, report, row, original_claim)
+    _verify_parents(artifact, report, row, current_claim)
+    _verify_key(existing_key, existing, artifact, report, row, original_claim)
+    _verify_key(candidate_key, candidate, artifact, report, row, current_claim)
+    accepted_at = artifact.cover_revision.document.filing.accepted_at
+    if datetime.fromisoformat(candidate_key["filing_accepted_at"]) != accepted_at:
+        raise InstitutionalObservationCompatibilityError(
+            "claim-linked candidate acceptance differs from its filing"
+        )
+    for name in (
+        "asset_id",
+        "cusip",
+        "title_of_class",
+        "report_period",
+        "manager_cik",
+        "report_id",
+        "artifact_id",
+        "row_id",
+        "dataset_revision_id",
+        "candidate_id",
+        "policy_version",
+        "schema_version",
+    ):
+        if getattr(original_claim, name) != getattr(current_claim, name):
+            raise InstitutionalObservationCompatibilityError(
+                "claim-linked claims disagree on their row, dataset or candidate"
+            )
+    if original_claim.correspondence_id == current_claim.correspondence_id:
+        raise InstitutionalObservationCompatibilityError(
+            "claim-linked reconstruction requires distinct claim identities"
+        )
+    if require_original_older and original_claim.available_at >= current_claim.available_at:
+        raise InstitutionalObservationCompatibilityError(
+            "witnessed original claim is not temporally older than the current proof"
+        )
+    if existing.available_at != max(original_claim.available_at, artifact.available_at):
+        raise InstitutionalObservationCompatibilityError(
+            "historical observation availability differs from its original claim"
+        )
+    if candidate.available_at != max(current_claim.available_at, artifact.available_at):
+        raise InstitutionalObservationCompatibilityError(
+            "current reconstruction availability differs from its current claim"
+        )
+    if existing.observation_id == candidate.observation_id:
+        raise InstitutionalObservationCompatibilityError(
+            "claim-linked reconstruction must use distinct observation identities"
+        )
+    for name in (
+        "asset_id",
+        "raw_record_id",
+        "field_name",
+        "value",
+        "unit",
+        "frequency",
+        "period_end",
+        "quality",
+        "transformation_version",
+    ):
+        if getattr(existing, name) != getattr(candidate, name):
+            raise InstitutionalObservationCompatibilityError(
+                "claim-linked reconstruction changes an economic or identity field"
+            )
+    if (
+        existing.source.source_id != candidate.source.source_id
+        or existing.source.raw_uri != candidate.source.raw_uri
+        or existing.source.checksum_sha256 != candidate.source.checksum_sha256
+    ):
+        raise InstitutionalObservationCompatibilityError(
+            "claim-linked reconstruction changes its source documents"
+        )
+    if any(
+        existing_key[name] != candidate_key[name]
+        for name in RECORD_KEY_FIELDS - {"correspondence_id", "filing_accepted_at"}
+    ):
+        raise InstitutionalObservationCompatibilityError(
+            "claim-linked reconstruction changes a lineage field"
+        )
+    if existing_key["filing_accepted_at"] != candidate_key["filing_accepted_at"]:
+        _verify_legacy_acceptance(
+            old_text=existing_key["filing_accepted_at"],
+            new_text=candidate_key["filing_accepted_at"],
+            current=accepted_at,
+            row=row,
+        )
+
+
 def _verify_parents(
     artifact: InstitutionalHoldingsSemantics,
     report: InstitutionalHoldingsReport,
@@ -346,5 +504,7 @@ __all__ = [
     "CompatibilityNote",
     "InstitutionalObservationCompatibilityError",
     "compare_reconstruction",
+    "compare_equivalent_reconstruction",
+    "compare_witnessed_reconstruction",
     "parse_record_key",
 ]

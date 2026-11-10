@@ -238,15 +238,15 @@ siguiente PLAN y V1-U4 permanece `UNKNOWN`.
 13F que explica los 58 conflictos reproducidos (46 por hora de aceptación NY mal etiquetada y 12 por
 reloj de recuperación) sin reescribir la observación histórica. El smoke real BTC/SOL del
 2026-11-10 se abstuvo (`inputs_unavailable`, sin probabilidad) y reutilizó el mismo bundle; no es
-señal ni evidencia predictiva. La materialización 13F autorizada añadió observaciones legítimas de
-GOOGL/NKE/MOG.A, pero la trazabilidad multiactivo falló en las páginas cuyo snapshot fue reparado
-temporalmente a una disponibilidad posterior: los claims históricos conservan la disponibilidad
-anterior y el materializador deriva identidades nuevas. Esa causa raíz exige una enmienda de alcance
-de PLAN y no se acepta como recorrido completo. Veredicto: **V1 NO ACEPTADA**; V1-U4 y V1-U3 siguen
-`UNKNOWN`, V1-U2 no acredita acuse y la captura prospectiva sigue sujeta al calendario. La siguiente
-decisión es la enmienda/fix de trazabilidad 13F o la aceptación explícita de las observaciones
-pendientes; no se abre un cuarto bloque automático. `PREDICTIVE-RESEARCH` permanece `NEXT`,
-`FUNDAMENTALS-COVERAGE` y `ASSET-EXPANSION` siguen `PLANNED` y `DATA-CHASSIS` permanece `DONE`.
+señal ni evidencia predictiva. La enmienda A5 reparó la trazabilidad multiactivo con una resolución
+compartida y un witness efímero: seis páginas con preflight 0/0, dos pasadas productivas 0/0, 96
+witnesses, 243 claims y 338 observaciones con hashes idénticos y DB/WAL/workspace sin delta. El
+witness no corrige la disponibilidad antigua; los claims duplicados se conservan append-only.
+Veredicto: **V1 NO ACEPTADA** por V1-U3/V1-U4 `UNKNOWN`, el acuse no acreditado y la captura
+prospectiva sujeta al calendario. La siguiente decisión es la aceptación explícita de las
+observaciones pendientes o la captura prospectiva; no se abre un cuarto bloque automático.
+`PREDICTIVE-RESEARCH` permanece `NEXT`, `FUNDAMENTALS-COVERAGE` y `ASSET-EXPANSION` siguen
+`PLANNED` y `DATA-CHASSIS` permanece `DONE`.
 
 La secuencia táctica, el registro de objetivos V1-U1–V1-U6 y la disciplina de crecimiento viven en
 [`basic_functional_release_plan.md`](basic_functional_release_plan.md).

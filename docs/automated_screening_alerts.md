@@ -648,14 +648,13 @@ de aceptación antigua mal etiquetada UTC que, interpretada en `America/New_York
 convierte exactamente a la hora documental del mismo filing; cualquier otra diferencia sigue
 conflicto. Los 58 conflictos reproducidos (46 de aceptación y 12 de recuperación) se leen con
 `compatibility_notes`, conservando el objeto original y sin reescribir ni duplicar sus 212
-observaciones objetivo. La materialización offline autorizada añadió observaciones de
-GOOGL/NKE/MOG.A y repitió sin crear nada, pero la trazabilidad de las páginas multiactivo cayó
-porque el snapshot reparado temporalmente usa una disponibilidad posterior a la de los claims
-históricos y el materializador deriva identidades nuevas. Los claims duplicados son append-only y no
-se borran; ese recorrido queda pendiente de enmienda de PLAN y no se presenta como reparación
-completa. El canal externo sigue en su preferencia actual (`disabled`), no se envían mensajes ni se
-acusa en nombre del usuario: V1-U2 no acredita acuse y el veredicto es **V1 NO ACEPTADA**. No hay
-señal, recomendación ni ejecución.
+observaciones objetivo. La enmienda A5 resolvió la selección compartida: las seis páginas se
+preflightaron READ_ONLY con 0 claims y 0 observaciones previstas, y dos pasadas productivas con un
+único writer dieron 0/0 nuevas, 243 claims y 338 observaciones con hashes idénticos, 96 witnesses y
+`traceability_verified=true`; DB/WAL/workspace no cambiaron. El witness es efímero, no certifica la
+disponibilidad antigua y los claims duplicados se conservan append-only. El canal externo sigue en
+su preferencia actual (`disabled`), no se envían mensajes ni se acusa en nombre del usuario: V1-U2
+no acredita acuse y el veredicto es **V1 NO ACEPTADA**. No hay señal, recomendación ni ejecución.
 
 ## Validación
 

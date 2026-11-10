@@ -45,9 +45,22 @@ from investment_analyst.core.models import RawRecord, SourceReference
 from investment_analyst.evidence.sec_documents.models import normalize_cik
 from investment_analyst.evidence.sec_institutional_correspondence.models import (
     ROW_CORRESPONDENCE_SCHEMA_VERSION,
+    SecInstitutionalRowCorrespondence,
+)
+from investment_analyst.evidence.sec_institutional_correspondence.repository import (
+    SecInstitutionalRowCorrespondenceRepository,
+)
+from investment_analyst.evidence.sec_institutional_holdings.repository import (
+    InstitutionalHoldingsRepository,
 )
 from investment_analyst.evidence.sec_institutional_observations.definitions import (
     SOURCE_ID as OBSERVATION_SOURCE_ID,
+)
+from investment_analyst.evidence.sec_institutional_observations.normalizer import (
+    normalize_row,
+)
+from investment_analyst.evidence.sec_institutional_semantics.repository import (
+    InstitutionalSemanticsRepository,
 )
 from investment_analyst.evidence.sec_institutional_universe.repository import (
     SecInstitutionalUniverseRepository,
@@ -558,3 +571,83 @@ def test_materialize_with_storage_reuses_single_writer_connection(tmp_path: Path
         assert result.observations_created == 2
         assert result.traceability_verified is True
         assert storage.observations.count() == 2
+
+
+def test_preflight_witnesses_a_stale_claim_without_writing(tmp_path: Path) -> None:
+    location, universe, known_at, _, _, acquisition = _prepared(tmp_path, manager_limit=1)
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        snapshot = SecInstitutionalUniverseRepository(
+            storage.raw_records, storage.documents
+        ).get_snapshot(universe.snapshot_id)
+        report = InstitutionalHoldingsRepository(storage.raw_records).get_report(
+            acquisition.managers[0].report_ids[0]
+        )
+        artifact = InstitutionalSemanticsRepository(storage.raw_records).get_for_parent(report)
+        candidate = next(
+            item
+            for item in snapshot.candidates
+            if item.is_selected
+            and item.manager_cik == report.manager_cik
+            and item.report_period == report.report_period
+            and item.asset_id == "equity:us:aapl"
+        )
+        row = next(item for item in artifact.rows if item.cusip == candidate.cusip)
+        stale_claim = SecInstitutionalRowCorrespondence.claim(
+            asset_id=candidate.asset_id,
+            cusip=row.cusip,
+            title_of_class=row.title_of_class,
+            report_period=report.report_period,
+            manager_cik=report.manager_cik,
+            report_id=report.report_id,
+            artifact_id=artifact.artifact_id,
+            row_id=row.row_id,
+            universe_snapshot_id=snapshot.snapshot_id,
+            dataset_revision_id=snapshot.dataset_revision_id,
+            candidate_id=candidate.candidate_id,
+            available_at=artifact.available_at,
+            recorded_at=known_at,
+        )
+        SecInstitutionalRowCorrespondenceRepository(storage.raw_records).save(stale_claim)
+        for observation in normalize_row(artifact, row, stale_claim, normalized_at=known_at):
+            storage.observations.save(observation)
+        claims_before = storage.raw_records.count(schema_version=ROW_CORRESPONDENCE_SCHEMA_VERSION)
+        observations_before = storage.observations.count()
+
+    application = SecInstitutionalObservationMaterializationApplication(
+        ApplicationRuntime.create_default()
+    )
+    request = SecInstitutionalObservationMaterializationRequest(known_at=known_at, manager_limit=1)
+    preflight = application.materialize(request, location=location, preflight=True)
+    assert preflight.mode == "preflight"
+    assert preflight.claims_created == 1
+    assert preflight.observations_created == 0
+    assert preflight.observations_reused == 2
+    assert len(preflight.observation_witnesses) == 2
+    assert preflight.observation_references
+    assert preflight.traceability_verified is True
+    with LocalStorage(StoragePaths.from_root(tmp_path), read_only=True) as storage:
+        assert (
+            storage.raw_records.count(schema_version=ROW_CORRESPONDENCE_SCHEMA_VERSION)
+            == claims_before
+        )
+        assert storage.observations.count() == observations_before
+
+    productive = application.materialize(request, location=location)
+    assert productive.mode == "materialized"
+    assert productive.claims_created == 1
+    assert productive.observations_created == 0
+    assert productive.observations_reused == 2
+    assert len(productive.observation_witnesses) == 2
+    assert productive.traceability_verified is True
+    second = application.materialize(request, location=location)
+    assert second.claims_created == 0
+    assert second.observations_created == 0
+    assert second.observations_reused == 2
+    assert len(second.observation_witnesses) == 2
+    assert second.traceability_verified is True
+    with LocalStorage(StoragePaths.from_root(tmp_path), read_only=True) as storage:
+        assert (
+            storage.raw_records.count(schema_version=ROW_CORRESPONDENCE_SCHEMA_VERSION)
+            == claims_before + 1
+        )
+        assert storage.observations.count() == observations_before

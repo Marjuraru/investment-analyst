@@ -15,7 +15,7 @@ from uuid import UUID
 
 from pydantic import ConfigDict, Field, model_validator
 
-from investment_analyst.core.models.base import ContractModel
+from investment_analyst.core.models.base import ContractModel, NonEmptyStr, UTCDateTime
 from investment_analyst.evidence.sec_institutional_correspondence.models import (
     SecInstitutionalRowCorrespondence,
 )
@@ -58,6 +58,66 @@ class RowCorrespondenceResolution(_Strict):
         return self
 
 
+class ClaimLineageClassification(_Strict):
+    """Strict content verification plus an explicit temporal classification.
+
+    ``verify_lineage`` remains strict: only ``verified`` is accepted as persisted authority. A
+    ``stale_availability`` claim has complete, verified parents and content but an availability
+    earlier than the exact maximum its *current* recovered snapshot declares; it is evidence of the
+    temporal defect, never a historical certification.
+    """
+
+    state: Literal["verified", "stale_availability", "invalid"]
+    expected_available_at: UTCDateTime | None = None
+    reason: NonEmptyStr | None = None
+
+    @model_validator(mode="after")
+    def shape(self) -> ClaimLineageClassification:
+        if self.state == "verified" and self.reason is not None:
+            raise ValueError("verified lineage cannot carry a failure reason")
+        if self.state == "invalid" and self.reason is None:
+            raise ValueError("invalid lineage requires a reason")
+        if self.state != "invalid" and self.expected_available_at is None:
+            raise ValueError("verified or stale lineage requires its expected availability")
+        return self
+
+
+class VerifiedRowCorrespondenceResolution(_Strict):
+    """Selection of one strictly verified claim among equivalent persisted proofs."""
+
+    state: Literal["verified", "stale_only", "absent", "conflicting_content", "invalid"]
+    selected: SecInstitutionalRowCorrespondence | None = None
+    verified: tuple[SecInstitutionalRowCorrespondence, ...] = ()
+    stale: tuple[SecInstitutionalRowCorrespondence, ...] = ()
+    considered: int = Field(default=0, ge=0)
+    reason: NonEmptyStr | None = None
+
+    @model_validator(mode="after")
+    def shape(self) -> VerifiedRowCorrespondenceResolution:
+        if (self.state == "verified") != (self.selected is not None):
+            raise ValueError("only a verified resolution carries the selected claim")
+        if self.selected is not None and self.selected not in self.verified:
+            raise ValueError("selected claim must belong to the verified set")
+        if self.state == "absent" and self.considered != 0:
+            raise ValueError("an absent resolution cannot consider evidence")
+        if self.state == "stale_only" and not self.stale:
+            raise ValueError("stale_only requires at least one stale claim")
+        if self.state in {"conflicting_content", "invalid"} and self.reason is None:
+            raise ValueError("a conflict or invalid resolution requires a reason")
+        identifier_sets = (
+            {item.correspondence_id for item in self.verified},
+            {item.correspondence_id for item in self.stale},
+        )
+        if any(
+            len(values) != len(items)
+            for values, items in zip(identifier_sets, (self.verified, self.stale), strict=True)
+        ):
+            raise ValueError("resolution claims must be unique")
+        if identifier_sets[0] & identifier_sets[1]:
+            raise ValueError("verified and stale claim sets must be disjoint")
+        return self
+
+
 def _order(item: SecInstitutionalRowCorrespondence) -> tuple[datetime, str]:
     return (item.available_at, str(item.correspondence_id))
 
@@ -91,13 +151,163 @@ class SecInstitutionalRowCorrespondenceService:
         self._universe = SecInstitutionalUniverseRepository(storage.raw_records, storage.documents)
         self._holdings = InstitutionalHoldingsRepository(storage.raw_records)
         self._semantics = InstitutionalSemanticsRepository(storage.raw_records)
+        self._snapshot_cache: dict[UUID, object] = {}
+        self._revision_cache: dict[UUID, object] = {}
+        self._report_cache: dict[UUID, object] = {}
+        self._artifact_cache: dict[UUID, object] = {}
+        self._content_cache: dict[UUID, object] = {}
 
     def verify_lineage(self, claim: SecInstitutionalRowCorrespondence) -> None:
         """Verify one claim against the persisted universe, filing, semantics and row."""
-        snapshot = self._universe.get_snapshot(claim.universe_snapshot_id)
+        _, expected_available = self._verify_content(claim)
+        if claim.available_at != expected_available:
+            raise SecInstitutionalRowCorrespondenceError(
+                "row correspondence availability is not the exact maximum of its parents"
+            )
+
+    def classify_lineage(
+        self, claim: SecInstitutionalRowCorrespondence
+    ) -> ClaimLineageClassification:
+        """Classify complete content as verified, temporally stale, or invalid.
+
+        The strict ``verify_lineage`` contract is unchanged: only ``verified`` is authority. A stale
+        claim is retained solely to explain an already-persisted observation; it never certifies the
+        old availability or replaces a current verified proof.
+        """
+        try:
+            artifact, expected_available = self._verify_content(claim)
+        except SecInstitutionalRowCorrespondenceError as error:
+            return ClaimLineageClassification(state="invalid", reason=str(error))
+        if claim.available_at == expected_available:
+            return ClaimLineageClassification(
+                state="verified", expected_available_at=expected_available
+            )
+        if artifact.available_at <= claim.available_at < expected_available:
+            return ClaimLineageClassification(
+                state="stale_availability", expected_available_at=expected_available
+            )
+        return ClaimLineageClassification(
+            state="invalid",
+            expected_available_at=expected_available,
+            reason="row correspondence availability is inconsistent with its parents",
+        )
+
+    def resolve_verified_claims(
+        self, claims: Sequence[SecInstitutionalRowCorrespondence]
+    ) -> VerifiedRowCorrespondenceResolution:
+        """Select one strictly verified proof from equivalent claims for the same row.
+
+        Different assets, classes, periods, managers, reports, artifacts, rows, datasets or
+        candidates remain conflicts. Claims from different snapshots may be equivalent only when
+        their dataset and candidate identities coincide and every parent/content field matches.
+        """
+        ordered = tuple(claims)
+        if not ordered:
+            return VerifiedRowCorrespondenceResolution(state="absent")
+        identities = {
+            (
+                item.asset_id,
+                item.cusip,
+                item.title_of_class,
+                item.report_period,
+                item.manager_cik,
+                item.report_id,
+                item.artifact_id,
+                item.row_id,
+            )
+            for item in ordered
+        }
+        if len(identities) != 1:
+            return VerifiedRowCorrespondenceResolution(
+                state="conflicting_content",
+                considered=len(ordered),
+                reason="row correspondence claims disagree on row identity or content",
+            )
+        if len({(item.dataset_revision_id, item.candidate_id) for item in ordered}) != 1:
+            return VerifiedRowCorrespondenceResolution(
+                state="conflicting_content",
+                considered=len(ordered),
+                reason="row correspondence claims disagree on dataset or candidate identity",
+            )
+        classifications = {item.correspondence_id: self.classify_lineage(item) for item in ordered}
+        invalid = [
+            (item, classifications[item.correspondence_id])
+            for item in ordered
+            if classifications[item.correspondence_id].state == "invalid"
+        ]
+        if invalid:
+            return VerifiedRowCorrespondenceResolution(
+                state="invalid",
+                considered=len(ordered),
+                reason=invalid[0][1].reason or "row correspondence claim is invalid",
+            )
+        verified = tuple(
+            sorted(
+                (
+                    item
+                    for item in ordered
+                    if classifications[item.correspondence_id].state == "verified"
+                ),
+                key=_order,
+            )
+        )
+        stale = tuple(
+            sorted(
+                (
+                    item
+                    for item in ordered
+                    if classifications[item.correspondence_id].state == "stale_availability"
+                ),
+                key=_order,
+            )
+        )
+        if verified:
+            return VerifiedRowCorrespondenceResolution(
+                state="verified",
+                selected=verified[0],
+                verified=verified,
+                stale=stale,
+                considered=len(ordered),
+            )
+        if stale:
+            return VerifiedRowCorrespondenceResolution(
+                state="stale_only", stale=stale, considered=len(ordered)
+            )
+        return VerifiedRowCorrespondenceResolution(
+            state="invalid",
+            considered=len(ordered),
+            reason="row correspondence claims have no verified or stale lineage",
+        )
+
+    def _verify_content(self, claim: SecInstitutionalRowCorrespondence):
+        """Verify every parent and content field, reusing execution-scoped parents."""
+        cached = self._content_cache.get(claim.correspondence_id)
+        if cached is not None:
+            if isinstance(cached, SecInstitutionalRowCorrespondenceError):
+                raise cached
+            return cached
+        try:
+            result = self._verify_content_uncached(claim)
+        except SecInstitutionalRowCorrespondenceError as error:
+            self._content_cache[claim.correspondence_id] = error
+            raise
+        self._content_cache[claim.correspondence_id] = result
+        return result
+
+    def _verify_content_uncached(self, claim: SecInstitutionalRowCorrespondence):
+        snapshot = self._snapshot_cache.get(claim.universe_snapshot_id)
         if snapshot is None:
-            raise SecInstitutionalRowCorrespondenceError("row correspondence snapshot is missing")
-        revision = self._universe.get_dataset_revision(snapshot.dataset_revision_id)
+            snapshot = self._universe.get_snapshot(claim.universe_snapshot_id)
+            if snapshot is None:
+                raise SecInstitutionalRowCorrespondenceError(
+                    "row correspondence snapshot is missing"
+                )
+            self._snapshot_cache[claim.universe_snapshot_id] = snapshot
+        revision = self._revision_cache.get(snapshot.dataset_revision_id)
+        if revision is None:
+            revision = self._universe.get_dataset_revision(snapshot.dataset_revision_id)
+            if revision is not None:
+                self._revision_cache[snapshot.dataset_revision_id] = revision
         if revision is None or revision.content_sha256 != snapshot.dataset_sha256:
             raise SecInstitutionalRowCorrespondenceError(
                 "row correspondence dataset lineage is invalid"
@@ -132,7 +342,7 @@ class SecInstitutionalRowCorrespondenceService:
             raise SecInstitutionalRowCorrespondenceError(
                 "row correspondence candidate conflicts with the claim"
             )
-        report = self._holdings.get_report(claim.report_id)
+        report = self._cached_report(claim.report_id)
         if (
             report is None
             or report.manager_cik != claim.manager_cik
@@ -141,7 +351,7 @@ class SecInstitutionalRowCorrespondenceService:
             raise SecInstitutionalRowCorrespondenceError(
                 "row correspondence report is missing or conflicts"
             )
-        artifact = self._semantics.get(claim.artifact_id)
+        artifact = self._cached_artifact(claim.artifact_id)
         if (
             artifact is None
             or artifact.parent_report_id != claim.report_id
@@ -161,11 +371,21 @@ class SecInstitutionalRowCorrespondenceService:
             raise SecInstitutionalRowCorrespondenceError(
                 "row correspondence row content conflicts with the claim"
             )
-        expected_available = max(snapshot.available_at, artifact.available_at)
-        if claim.available_at != expected_available:
+        if claim.available_at < artifact.available_at:
             raise SecInstitutionalRowCorrespondenceError(
-                "row correspondence availability is not the exact maximum of its parents"
+                "row correspondence availability precedes its artifact"
             )
+        return artifact, max(snapshot.available_at, artifact.available_at)
+
+    def _cached_report(self, report_id: UUID):
+        if report_id not in self._report_cache:
+            self._report_cache[report_id] = self._holdings.get_report(report_id)
+        return self._report_cache[report_id]
+
+    def _cached_artifact(self, artifact_id: UUID):
+        if artifact_id not in self._artifact_cache:
+            self._artifact_cache[artifact_id] = self._semantics.get(artifact_id)
+        return self._artifact_cache[artifact_id]
 
     def verify_catalog_binding(
         self, claim: SecInstitutionalRowCorrespondence, *, catalog_cusips: Mapping[str, str]
@@ -191,10 +411,27 @@ class SecInstitutionalRowCorrespondenceService:
             )
         )
 
+    def resolve_verified(
+        self,
+        *,
+        artifact_id: UUID,
+        row_id: UUID,
+        known_at: datetime,
+        asset_id: str | None = None,
+    ) -> VerifiedRowCorrespondenceResolution:
+        """Select the strictly verified proof for one row at one cut."""
+        return self.resolve_verified_claims(
+            self._repository.list(
+                known_at=known_at, asset_id=asset_id, artifact_id=artifact_id, row_id=row_id
+            )
+        )
+
 
 __all__ = [
+    "ClaimLineageClassification",
     "RowCorrespondenceResolution",
     "SecInstitutionalRowCorrespondenceError",
     "SecInstitutionalRowCorrespondenceService",
+    "VerifiedRowCorrespondenceResolution",
     "resolve_visible_claims",
 ]
