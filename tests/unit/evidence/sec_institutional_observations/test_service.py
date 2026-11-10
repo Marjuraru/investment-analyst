@@ -1,5 +1,6 @@
 import hashlib
 import json
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -21,6 +22,10 @@ from investment_analyst.evidence.sec_institutional_observations.service import (
     InstitutionalObservationLineageError,
     InstitutionalObservationService,
 )
+from investment_analyst.evidence.sec_institutional_semantics.repository import (
+    InstitutionalSemanticsRepository,
+    InstitutionalSemanticsRepositoryError,
+)
 from investment_analyst.evidence.sec_institutional_semantics.service import (
     InstitutionalHoldingsSemanticsService,
     InstitutionalSemanticsEnrichRequest,
@@ -33,6 +38,7 @@ from investment_analyst.providers.institutional_holdings import (
     sec_institutional_holdings_pipeline,
 )
 from investment_analyst.storage import LocalStorage, StoragePaths
+from investment_analyst.storage.serialization import canonical_json_bytes, sha256_hex
 
 _NOW = datetime(2025, 2, 16, tzinfo=UTC)
 _COVER = b"""<edgarSubmission><submissionType>13F-HR</submissionType><filingManager>
@@ -45,6 +51,16 @@ _TABLE = b"""<informationTable><infoTable><nameOfIssuer>APPLE INC</nameOfIssuer>
 </infoTable><infoTable><nameOfIssuer>APPLE INC</nameOfIssuer><titleOfClass>COM</titleOfClass>
 <cusip>037833100</cusip><value>60</value><shrsOrPrnAmt><sshPrnamt>20</sshPrnamt>
 <sshPrnamtType>PRN</sshPrnamtType></shrsOrPrnAmt></infoTable></informationTable>"""
+_TABLE_WITH_UNREFERENCED_ROW = b"""<informationTable><infoTable>
+<nameOfIssuer>APPLE INC</nameOfIssuer><titleOfClass>COM</titleOfClass>
+<cusip>037833100</cusip><value>50</value><shrsOrPrnAmt><sshPrnamt>10</sshPrnamt>
+<sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable><infoTable>
+<nameOfIssuer>APPLE INC</nameOfIssuer><titleOfClass>COM</titleOfClass>
+<cusip>037833100</cusip><value>60</value><shrsOrPrnAmt><sshPrnamt>20</sshPrnamt>
+<sshPrnamtType>PRN</sshPrnamtType></shrsOrPrnAmt></infoTable><infoTable>
+<nameOfIssuer>MICROSOFT CORP</nameOfIssuer><titleOfClass>COM</titleOfClass>
+<cusip>594918104</cusip><value>70</value><shrsOrPrnAmt><sshPrnamt>30</sshPrnamt>
+<sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable></informationTable>"""
 
 
 class _Submissions:
@@ -84,6 +100,9 @@ class _Submissions:
 class _Documents:
     retrieved_at = datetime(2025, 2, 15, tzinfo=UTC)
 
+    def __init__(self, table: bytes = _TABLE) -> None:
+        self._table = table
+
     def fetch_manifest(self, document):
         del document
         return SecAccessionManifest(
@@ -95,7 +114,7 @@ class _Documents:
         )
 
     def fetch(self, document):
-        content = _COVER if document.name == "primary_doc.xml" else _TABLE
+        content = _COVER if document.name == "primary_doc.xml" else self._table
         return SecPrimaryDocumentResponse(
             content=content,
             sha256=hashlib.sha256(content).hexdigest(),
@@ -105,9 +124,15 @@ class _Documents:
         )
 
 
-def _seed(storage: LocalStorage, *, enrich: bool = True, title_of_class: str = "COM"):
+def _seed(
+    storage: LocalStorage,
+    *,
+    enrich: bool = True,
+    title_of_class: str = "COM",
+    table: bytes = _TABLE,
+):
     report = sec_institutional_holdings_pipeline.SecInstitutionalHoldingsPipeline(
-        storage, _Submissions(), _Documents()
+        storage, _Submissions(), _Documents(table)
     ).run(
         sec_institutional_holdings_pipeline.SecInstitutionalHoldingsImportRequest(
             filer_cik="1067983", forms=("13F-HR",)
@@ -471,3 +496,167 @@ def test_manager_query_selects_before_hydrating_foreign_observations(
             )
         )
     assert result.total_matching == 4
+
+
+def _normalized_fixture(storage: LocalStorage, *, table: bytes = _TABLE):
+    report, _ = _seed(storage, table=table)
+    InstitutionalObservationService(storage, clock=lambda: _NOW + timedelta(hours=1)).normalize(
+        InstitutionalObservationRequest(
+            asset_id="equity:us:aapl",
+            manager_cik="1067983",
+            report_ids=(report.report_id,),
+            known_at=_NOW,
+        )
+    )
+    return report
+
+
+def test_summary_matches_full_views_for_every_page_and_filter(tmp_path: Path) -> None:
+    root = StoragePaths.from_root(tmp_path)
+    with LocalStorage(root) as storage:
+        report = _normalized_fixture(storage)
+
+    queries = [
+        InstitutionalObservationQuery(
+            asset_id="equity:us:aapl",
+            known_at=_NOW + timedelta(days=1),
+            offset=offset,
+            limit=2,
+        )
+        for offset in (0, 2, 4)
+    ] + [
+        InstitutionalObservationQuery(
+            asset_id="equity:us:aapl",
+            known_at=_NOW + timedelta(days=1),
+            manager_cik="1067983",
+            limit=10,
+        ),
+        InstitutionalObservationQuery(
+            asset_id="equity:us:aapl",
+            known_at=_NOW + timedelta(days=1),
+            report_id=report.report_id,
+            limit=10,
+        ),
+        InstitutionalObservationQuery(
+            asset_id="equity:us:aapl",
+            known_at=_NOW + timedelta(days=1),
+            cusip="037833100",
+            limit=10,
+        ),
+        InstitutionalObservationQuery(
+            asset_id="equity:us:aapl",
+            known_at=_NOW + timedelta(days=1),
+            field_name="institutional_reported_shares",
+            limit=10,
+        ),
+    ]
+    with LocalStorage(root, read_only=True) as storage:
+        service = InstitutionalObservationService(storage)
+        for query in queries:
+            full = service.query(query)
+            summary = service.query_summary(query)
+            assert summary.schema_version == "institutional-observation-summary-v1"
+            assert summary.total_matching == full.total_matching
+            assert summary.truncated == full.truncated
+            assert [item.observation.observation_id for item in summary.observations] == [
+                view.observation.observation_id for view in full.observations
+            ]
+            for item, view in zip(summary.observations, full.observations, strict=True):
+                assert item.observation == view.observation
+                assert item.report.report_id == view.report.report_id
+                assert item.report.manager_cik == view.report.manager_cik
+                assert item.report.report_period == view.report.report_period
+                assert item.row.row_id == view.row.row_id
+                assert item.row.cusip == view.row.cusip
+                assert item.row.title_of_class == view.row.title_of_class
+                assert item.artifact_reference.artifact_id == view.artifact.artifact_id
+                assert item.artifact_reference.raw_record_id == view.artifact.raw_record_id
+                assert (
+                    item.artifact_reference.cover_revision_id
+                    == view.artifact.cover_revision.revision_id
+                )
+                assert (
+                    item.artifact_reference.cover_content_sha256
+                    == view.artifact.cover_revision.content_sha256
+                )
+                assert (
+                    item.artifact_reference.information_table_revision_id
+                    == view.artifact.information_table_revision.revision_id
+                )
+                assert (
+                    item.artifact_reference.information_table_content_sha256
+                    == view.artifact.information_table_revision.content_sha256
+                )
+                assert item.correspondence_id == view.correspondence.correspondence_id
+                assert item.compatibility_notes == view.compatibility_notes
+
+
+def test_summary_rejects_corruption_in_an_unreferenced_artifact_row(tmp_path: Path) -> None:
+    root = StoragePaths.from_root(tmp_path)
+    with LocalStorage(root) as storage:
+        report = _normalized_fixture(storage, table=_TABLE_WITH_UNREFERENCED_ROW)
+        artifact = InstitutionalSemanticsRepository(storage.raw_records).get_for_parent(report)
+        assert artifact is not None
+        raw = storage.raw_records.get(artifact.raw_record_id)
+        payload = deepcopy(raw.payload)
+        payload["artifact"]["rows"][-1]["row_id"] = str(uuid4())
+        corrupted = raw.model_copy(update={"payload": payload})
+        document = canonical_json_bytes(corrupted)
+        checksum = sha256_hex(document)
+        row = storage.store.connection.execute(
+            "SELECT relative_path FROM raw_record_index WHERE record_id = ?",
+            [str(raw.record_id)],
+        ).fetchone()
+        assert row is not None
+        (storage.paths.raw_dir / row[0]).write_bytes(document)
+        storage.store.connection.execute(
+            "UPDATE raw_record_index SET checksum_sha256 = ?, document_json = ? "
+            "WHERE record_id = ?",
+            [checksum, document.decode("utf-8"), str(raw.record_id)],
+        )
+
+    query = InstitutionalObservationQuery(
+        asset_id="equity:us:aapl",
+        known_at=_NOW + timedelta(days=1),
+        limit=1,
+    )
+    with (
+        LocalStorage(root, read_only=True) as storage,
+        pytest.raises(InstitutionalSemanticsRepositoryError),
+    ):
+        InstitutionalObservationService(storage).query(query)
+    with (
+        LocalStorage(root, read_only=True) as storage,
+        pytest.raises(InstitutionalSemanticsRepositoryError),
+    ):
+        InstitutionalObservationService(storage).query_summary(query)
+
+
+def test_summary_rejects_an_observation_corruption_outside_the_page(tmp_path: Path) -> None:
+    root = StoragePaths.from_root(tmp_path)
+    with LocalStorage(root) as storage:
+        _normalized_fixture(storage)
+        observation = storage.observations.list(asset_id="equity:us:aapl")[0]
+        storage.observations.save(
+            observation.model_copy(
+                update={
+                    "observation_id": uuid4(),
+                    "value": observation.value + 1,
+                }
+            )
+        )
+    query = InstitutionalObservationQuery(
+        asset_id="equity:us:aapl",
+        known_at=_NOW + timedelta(days=1),
+        limit=1,
+    )
+    with (
+        LocalStorage(root, read_only=True) as storage,
+        pytest.raises(InstitutionalObservationLineageError),
+    ):
+        InstitutionalObservationService(storage).query(query)
+    with (
+        LocalStorage(root, read_only=True) as storage,
+        pytest.raises(InstitutionalObservationLineageError),
+    ):
+        InstitutionalObservationService(storage).query_summary(query)

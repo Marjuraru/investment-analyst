@@ -268,6 +268,7 @@ from investment_analyst.evidence.sec_documents.timeline_models import (
 from investment_analyst.evidence.sec_institutional_observations.models import (
     InstitutionalObservationQuery,
     InstitutionalObservationQueryResult,
+    InstitutionalObservationSummaryQueryResult,
 )
 from investment_analyst.providers.beneficial_ownership.sec_beneficial_ownership_pipeline import (
     SecBeneficialOwnershipPipeline,
@@ -1036,6 +1037,18 @@ class InvestmentAnalystApplication:
     ) -> InstitutionalObservationQueryResult:
         """Execute a point-in-time institutional 13F observations query."""
         return CazatiburonesInstitutionalObservationsApplication(self._runtime).query(
+            query=query,
+            location=location,
+        )
+
+    def query_cazatiburones_institutional_observation_summary(
+        self,
+        query: InstitutionalObservationQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> InstitutionalObservationSummaryQueryResult:
+        """Execute a compact point-in-time institutional 13F observations query."""
+        return CazatiburonesInstitutionalObservationsApplication(self._runtime).query_summary(
             query=query,
             location=location,
         )

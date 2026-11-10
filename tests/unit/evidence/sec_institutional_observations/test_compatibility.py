@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -19,11 +20,15 @@ from investment_analyst.evidence.sec_institutional_correspondence.models import 
     SecInstitutionalRowCorrespondence,
 )
 from investment_analyst.evidence.sec_institutional_observations.compatibility import (
+    ArtifactRowIndex,
     InstitutionalObservationCompatibilityError,
     _unambiguous_new_york_utc,
     compare_equivalent_reconstruction,
+    compare_prepared_reconstruction,
     compare_reconstruction,
+    index_artifact_rows,
     parse_record_key,
+    prepare_reconstruction,
 )
 from investment_analyst.evidence.sec_institutional_observations.models import (
     InstitutionalObservationQuery,
@@ -579,4 +584,118 @@ def test_equivalent_verified_claims_reuse_the_same_economics(tmp_path: Path) -> 
             artifact=artifact,
             report=report,
             row=row,
+        )
+
+
+def test_artifact_row_index_rejects_divergent_duplicate_identities(tmp_path: Path) -> None:
+    now = datetime(2025, 2, 16, 12, tzinfo=UTC)
+    _, artifact, _ = _seed(
+        tmp_path,
+        accepted=datetime(2025, 2, 14, 23, tzinfo=UTC),
+        report_date=date(2024, 12, 31),
+        now=now,
+    )
+    first = artifact.rows[0]
+    identical = artifact.model_copy(update={"rows": (first, first)}, deep=True)
+    indexed = index_artifact_rows(identical)
+    assert indexed.artifact_id == artifact.artifact_id
+    assert indexed.rows[first.row_id] == first
+
+    divergent = first.model_copy(update={"quantity": first.quantity + Decimal("1")})
+    with pytest.raises(InstitutionalObservationCompatibilityError, match="ambiguous"):
+        index_artifact_rows(artifact.model_copy(update={"rows": (first, divergent)}, deep=True))
+
+
+def test_prepared_reconstruction_matches_direct_comparison(tmp_path: Path) -> None:
+    now = datetime(2025, 2, 16, 12, tzinfo=UTC)
+    report, artifact, correspondence = _seed(
+        tmp_path,
+        accepted=datetime(2025, 2, 14, 23, tzinfo=UTC),
+        report_date=date(2024, 12, 31),
+        now=now,
+    )
+    row = artifact.rows[0]
+    row_index = index_artifact_rows(artifact)
+    for observation in normalize_row(artifact, row, correspondence, normalized_at=now):
+        key = parse_record_key(observation)
+        prepared = prepare_reconstruction(
+            candidate=observation,
+            candidate_key=key,
+            artifact=artifact,
+            report=report,
+            row=row,
+            correspondence=correspondence,
+            row_index=row_index,
+        )
+        expected = compare_reconstruction(
+            observation,
+            observation,
+            existing_key=key,
+            candidate_key=key,
+            artifact=artifact,
+            report=report,
+            row=row,
+            correspondence=correspondence,
+            row_index=row_index,
+        )
+        assert compare_prepared_reconstruction(observation, key, prepared) == expected
+        tampered = observation.model_copy(update={"value": observation.value + 1})
+        with pytest.raises(InstitutionalObservationCompatibilityError):
+            compare_prepared_reconstruction(tampered, key, prepared)
+        with pytest.raises(InstitutionalObservationCompatibilityError):
+            compare_reconstruction(
+                tampered,
+                observation,
+                existing_key=key,
+                candidate_key=key,
+                artifact=artifact,
+                report=report,
+                row=row,
+                correspondence=correspondence,
+                row_index=row_index,
+            )
+
+
+def test_row_index_is_never_trusted_without_artifact_and_content_agreement(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2025, 2, 16, 12, tzinfo=UTC)
+    report, artifact, correspondence = _seed(
+        tmp_path,
+        accepted=datetime(2025, 2, 14, 23, tzinfo=UTC),
+        report_date=date(2024, 12, 31),
+        now=now,
+    )
+    row = artifact.rows[0]
+    observation = next(
+        item
+        for item in normalize_row(artifact, row, correspondence, normalized_at=now)
+        if item.field_name == "institutional_reported_fair_value"
+    )
+    key = parse_record_key(observation)
+    foreign = ArtifactRowIndex(artifact_id=uuid4(), rows={row.row_id: row})
+    with pytest.raises(InstitutionalObservationCompatibilityError, match="another artifact"):
+        prepare_reconstruction(
+            candidate=observation,
+            candidate_key=key,
+            artifact=artifact,
+            report=report,
+            row=row,
+            correspondence=correspondence,
+            row_index=foreign,
+        )
+    divergent = row.model_copy(update={"quantity": row.quantity + Decimal("1")})
+    mismatched = ArtifactRowIndex(
+        artifact_id=artifact.artifact_id,
+        rows={row.row_id: divergent},
+    )
+    with pytest.raises(InstitutionalObservationCompatibilityError, match="row lineage"):
+        prepare_reconstruction(
+            candidate=observation,
+            candidate_key=key,
+            artifact=artifact,
+            report=report,
+            row=row,
+            correspondence=correspondence,
+            row_index=mismatched,
         )

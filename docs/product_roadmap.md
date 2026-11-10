@@ -1,8 +1,10 @@
 # Hoja de ruta estratégica del producto
 
-> Estado vigente 2026-11-09: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
+> Estado vigente 2026-11-10: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
 > `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` conservando su deuda y evidencia, sin declararse `DONE`.
-> La readiness operativa v2 se registra en
+> La lectura 13F compacta de `V1-13F-READ-PERFORMANCE`/#436 avanza `PREDICTIVE-RESEARCH` sin
+> cerrarlo; V1 sigue **NO ACEPTADA** y V1-U4/V1-U5 permanecen `UNKNOWN`. La readiness operativa v2
+> se registra en
 > [`v2_operational_readiness.md`](v2_operational_readiness.md): avanza prerrequisitos de interfaz,
 > lectura, limpieza y entrega, sin declarar cobertura fundamental nueva ni cerrar la ruta. La
 > adopción operacional de `FUNDAMENTALS-COVERAGE-OPERATIONS`/#373 se registra abajo; no cambia el
@@ -125,6 +127,26 @@ abstenerse legítimamente (`artifact_not_available`/`inputs_unavailable`) y se r
 retrofechar. `PREDICTIVE-RESEARCH` permanece `NEXT` y el siguiente esperado era el 3/3
 `SHADOW-AND-V1-RELEASE`, todavía sin Issue en ese corte (`HISTORICAL_REFERENCE`; #434 ya está activo
 y el veredicto de este bloque figura más abajo).
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
+
+### V1-13F-READ-PERFORMANCE: lectura compacta y recuperación (2026-11-10)
+
+`V1-13F-READ-PERFORMANCE`/#436 (`ADVANCES`, sin cierre) corrige la apertura fría y la memoria del
+recorrido 13F sin ampliar la capacidad financiera. El mismo endpoint conserva `FULL` y añade
+`projection=summary` con `institutional-observation-summary-v1`; el candidato sigue validando cada
+artefacto completo y todas sus filas, cada claim y cada observación del universo antes de paginar,
+pero procesa un artefacto/lote acotado, construye un mapa efímero por artefacto y libera el objeto
+pesado. La UI pide la proyección compacta, muestra unidad y notas de compatibilidad y conserva
+paginación y navegación. Evidencia live AAPL página 200 de 1.494: SUMMARY frío 23,320 s, calientes
+0,487/0,498/0,441 s, 507.183 B, RSS HWM 734.120 KiB; FULL conserva su contrato sin ese SLA. El
+servicio existente se recuperó y una parada en scratch terminó en 811 ms sin SIGKILL; la unidad
+desplegada quedó `active`, HTTP 200 y con el workspace `70c64668-1738-4dfe-ba1f-7e72026bb7fe`. La
+preview PIT BTC/SOL de 2026-11-10 12:00Z devolvió `inputs_unavailable` y no se modificó el corte.
+La bandeja local permanece como único canal por decisión humana; el canal externo queda diferido y
+no acreditado. `V1-U4` y `V1-U5` siguen `UNKNOWN`, V1 sigue **NO ACEPTADA**, `DATA-CHASSIS`
+permanece `DONE`, `FUNDAMENTALS-COVERAGE` y `ASSET-EXPANSION` siguen `PLANNED`,
+`PREDICTIVE-RESEARCH` es el único `NEXT` y no se crea un cuarto bloque automático de features.
 
 `route_transition:PREDICTIVE-RESEARCH:ADVANCES`
 

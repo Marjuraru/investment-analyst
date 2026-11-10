@@ -628,6 +628,28 @@ declarada. El transporte probado no equivale a una entrega financiera actual ni 
 la aceptación de alertas externas queda como gate explícito para el bloque final y no se cambia
 ningún default hoy.
 
+**Lectura 13F compacta (2026-11-10).** `GET /api/v1/cazatiburones/institutional-observations`
+admite `projection=summary` sobre el mismo selector PIT y devuelve
+`institutional-observation-summary-v1` con observación completa, reporte/fila compactos,
+`artifact_reference`, `correspondence_id` y notas de compatibilidad; la ausencia de `projection`
+conserva `FULL` byte y semánticamente. El candidato verifica cada artefacto completo y todas sus
+filas, cada claim y cada observación del universo antes de paginar; sólo conserva resultados
+compactos y libera el artefacto pesado entre lotes. Probe live AAPL 2026-11-09T21:30:00Z, página
+200 de 1.494: HTTP SUMMARY frío 23,320 s, calientes 0,487/0,498/0,441 s, 507.183 B y RSS HWM
+734.120 KiB; FULL no recibe ese SLA. La parada del servicio candidato en scratch terminó en
+811 ms sin SIGKILL y la unidad desplegada se restituyó `active` con HTTP 200 y el workspace
+`70c64668-1738-4dfe-ba1f-7e72026bb7fe`. Es una medida del candidato, no de la release desplegada;
+la entrega local postmerge repite el smoke afectado. No se añadieron candidatos, señales ni
+recomendaciones.
+
+**Decisión local-only (2026-11-10).** El usuario decidió mantener sólo la bandeja local. La
+verificación read-only encontró 6 elementos de candidatos y 3 institucionales en
+`channel=local_app`, 0 acuses y `windows_toast` con `enabled=false`, `enabled_at=null`; no se
+activó ningún toast, no se envió ningún canal externo y no se acusó lectura en nombre del usuario.
+Telegram, correo y resumen diario quedan diferidos por decisión humana: no son una entrega
+acreditada ni un requisito de implementación de este Work Block. La bandeja existente conserva su
+alcance local y sus transiciones auditadas; no se fabrican candidatos financieros para llenarla.
+
 **Recorrido de navegador.** Chromium real sobre `http://127.0.0.1:8765` verificó Mesa (5
 candidatos, 3 institucionales, 0 actividad; 40/40 activos de cobertura al expandir la tabla, con
 las seis filas BVL bloqueadas) y los perfiles del tablero Activo: BTC cripto con Mercado+Derivados;

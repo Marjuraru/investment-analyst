@@ -549,14 +549,21 @@ function renderCazatiburonesInstitutionalObservations(payload, offset, limit) {
       cazatiburonesProgressiveVisibleCounts.set("institutional-observations", visibleCount);
       for (const view of observations.slice(0, visibleCount)) {
         const row = createElement("div", "cazatiburones-row");
+        const compatibilityNotes = Array.isArray(view.compatibility_notes)
+          ? view.compatibility_notes
+          : [];
         row.innerHTML =
           `<p class="eyebrow">${view.report.manager_cik} · ${view.report.report_id}</p>` +
           `<dl>` +
           `<dt>CUSIP</dt><dd>${view.row.cusip}</dd>` +
           `<dt>Campo</dt><dd>${view.observation.field_name}</dd>` +
           `<dt>Valor as-filed</dt><dd><span class="figure">${formatNumber(view.observation.value)}</span></dd>` +
+          `<dt>Unidad</dt><dd>${view.observation.unit}</dd>` +
           `<dt>Disponible desde</dt><dd>${formatInstant(view.observation.available_at)}</dd>` +
-          `</dl>`;
+          `</dl>` +
+          (compatibilityNotes.length > 0
+            ? `<p class="collection-status">Compatibilidad: ${compatibilityNotes.join(", ")}</p>`
+            : "");
         container.append(row);
       }
       const renderedCount = cazatiburonesProgressiveVisibleCounts.get("institutional-observations");
@@ -732,6 +739,7 @@ async function loadCazatiburonesBoard(assetId = cazatiburonesSelectedAssetId) {
     known_at: knownAt,
     offset: String(offset),
     limit: String(limit),
+    projection: "summary",
   });
   const timelineParameters = new URLSearchParams({ known_at: knownAt });
   timelineParameters.append("asset_id", assetId);

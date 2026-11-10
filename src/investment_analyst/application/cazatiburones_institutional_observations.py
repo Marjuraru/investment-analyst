@@ -6,6 +6,7 @@ from investment_analyst.evidence.sec_institutional_observations.models import (
     InstitutionalObservationQueryResult,
     InstitutionalObservationRequest,
     InstitutionalObservationSummary,
+    InstitutionalObservationSummaryQueryResult,
 )
 from investment_analyst.evidence.sec_institutional_observations.service import (
     InstitutionalObservationService,
@@ -36,3 +37,11 @@ class CazatiburonesInstitutionalObservationsApplication:
             location, access_mode=WorkspaceAccessMode.READ_ONLY
         ) as storage:
             return InstitutionalObservationService(storage).query(query)
+
+    def query_summary(
+        self, query: InstitutionalObservationQuery, *, location: StorageLocationRequest
+    ) -> InstitutionalObservationSummaryQueryResult:
+        with self._runtime.open_storage(
+            location, access_mode=WorkspaceAccessMode.READ_ONLY
+        ) as storage:
+            return InstitutionalObservationService(storage).query_summary(query)

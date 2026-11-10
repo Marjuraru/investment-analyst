@@ -1,7 +1,9 @@
 # Plan de cierre de la versión básica funcional
 
-> Estado vigente 2026-11-09: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
-> `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` conservando su deuda y evidencia. La readiness operativa
+> Estado vigente 2026-11-10: `DATA-CHASSIS` está `DONE` y `PREDICTIVE-RESEARCH` es el único `NEXT`.
+> `FUNDAMENTALS-COVERAGE` pasa a `PLANNED` conservando su deuda y evidencia. La lectura 13F compacta
+> de `V1-13F-READ-PERFORMANCE`/#436 avanza `PREDICTIVE-RESEARCH` sin cerrarlo; V1 sigue **NO
+> ACEPTADA** y V1-U4/V1-U5 permanecen `UNKNOWN`. La readiness operativa
 > v2 ([`v2_operational_readiness.md`](v2_operational_readiness.md)) avanza sus prerrequisitos de
 > interfaz, lectura, limpieza y entrega; no declara cobertura fundamental nueva ni cierra la ruta.
 > La adopción operacional de `FUNDAMENTALS-COVERAGE-OPERATIONS`/#373 se registra abajo y no cambia
@@ -923,7 +925,7 @@ escenario se repite si el cambio no lo afecta.
 | V1-U2 entrega | `UNKNOWN` → `5/5 recepciones outbox; 0/5 acuses; 0 entregas externas; demora UNKNOWN` | eventos y segundos | candidatos elegibles de un ciclo, outbox y un canal | elegible→outbox→acuse completo; cero duplicados por evento en replay/reanudación; demora mediana y máxima con tamaño muestral | outbox/bandeja y recibos existentes; el acuse de transporte no equivale a lectura humana |
 | V1-U3 utilidad descriptiva | `UNKNOWN` → `UNKNOWN` | detecciones | detecciones y horizonte declarados, misma versión de regla | frecuencia y duplicación; resultado posterior por detección/horizonte sólo cuando exista módulo autorizado | replay acotado y evidencia persistida; descartado por humano no equivale a falso positivo financiero |
 | V1-U4 predicción | `UNKNOWN` → `UNKNOWN` | métrica de validación | hipótesis, universo y horizonte fijados antes del experimento | comparación fuera de muestra con baseline, incertidumbre/calibración pertinente y estabilidad | label, umbral de promoción y tolerancia se fijan antes; hoy no existe modelo validado ni porcentaje de avance |
-| V1-U5 tiempo y memoria | `UNKNOWN` → `n=4 (1 fría + 3 calientes): frío 29,717 s; calientes 3,660/3,671/3,969 s; mediana global 3,820 s; máximo 29,717 s; 166.766 B; RSS HWM 700.044 KiB; shadow n=2: 0,81/0,71 s; RSS 122.616/123.376 KiB; bundle 9.850 B` | segundos y bytes | misma release, proceso/cgroup, universo, corte e inputs | mediana y máximo con tamaño muestral; demoras separadas fuente→adquisición→evaluación→entrega | colector existente; no p95 con pocas muestras ni pico de vida atribuido a un job; los límites vigentes se heredan y cualquier SLA nuevo queda para el PLAN de implementación |
+| V1-U5 tiempo y memoria | `UNKNOWN` → `n=4 (1 fría + 3 calientes): frío 29,717 s; calientes 3,660/3,671/3,969 s; mediana global 3,820 s; máximo 29,717 s; 166.766 B; RSS HWM 700.044 KiB; shadow n=2: 0,81/0,71 s; RSS 122.616/123.376 KiB; bundle 9.850 B; V1-13F-READ-PERFORMANCE/#436 (2026-11-10, candidato, AAPL página 200): SUMMARY frío 23,320 s, calientes 0,487/0,498/0,441 s, 507.183 B, RSS HWM 734.120 KiB; FULL sin SLA; parada 811 ms sin SIGKILL` | segundos y bytes | misma release, proceso/cgroup, universo, corte e inputs | mediana y máximo con tamaño muestral; demoras separadas fuente→adquisición→evaluación→entrega | colector existente; no p95 con pocas muestras ni pico de vida atribuido a un job; los límites vigentes se heredan y cualquier SLA nuevo queda para el PLAN de implementación |
 | V1-U6 espacio | `UNKNOWN` → `DB 719.859.712 B sin WAL; workspace 4.186.378.256 B; WSL libre 937.054.720.000 B; host 23.128.629.248 B; delta 13F autorizado +201.844 B con DB/WAL sin cambio; reparación A5 0 B adicional; shadow 9.850 B; marginal/proyección UNKNOWN` | bytes | host y WSL medidos por separado; DB+WAL y almacenamiento físico restante | coste marginal por lote; proyección 30/90 días declarada estimación | colector y reportes existentes; adquisición inicial, ordinaria, revisiones, derivados, logs, backup, releases y scratch separados; día no observado no es cero y un checkpoint no es adquisición |
 
 ### SHADOW-AND-V1-RELEASE: veredicto finito (2026-11-10)
@@ -963,6 +965,34 @@ veredicto **V1 NO ACEPTADA**. La entrega técnica no se convierte en aceptación
   (2) activación/acuse del canal externo y lectura humana, decisión del usuario; (3) validación
   predictiva V1-U4 `UNKNOWN`, sin entrenamiento, promoción ni holdout. No hay cuarto bloque
   automático ni fecha prometida.
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
+
+### V1-13F-READ-PERFORMANCE: lectura compacta y recuperación (2026-11-10)
+
+`V1-13F-READ-PERFORMANCE`/#436 (`ADVANCES`, sin cierre) conserva `FULL` y añade
+`projection=summary` (`institutional-observation-summary-v1`) al mismo endpoint 13F. SUMMARY valida
+cada artefacto completo y todas sus filas, cada claim y cada observación del universo antes de
+paginar; procesa un artefacto/lote acotado por memoria, usa un mapa efímero por artefacto y
+conserva sólo resultados compactos. La UI pide summary, muestra unidad y notas de compatibilidad y
+mantiene navegación, paginación y render progresivo. Evidencia live AAPL página 200 de 1.494:
+frío 23,320 s, calientes 0,487/0,498/0,441 s, 507.183 B, RSS HWM 734.120 KiB; FULL sin SLA. La
+parada del servicio candidato en scratch terminó en 811 ms sin SIGKILL; la unidad desplegada se
+restituyó `active`, HTTP 200 y workspace `70c64668-1738-4dfe-ba1f-7e72026bb7fe`.
+
+La preview PIT BTC/SOL de `decision_date=2026-11-10`, `known_at=2026-11-10T12:00:00Z` devolvió
+`inputs_unavailable` (cierre 2026-11-09 ausente; RSI/MACD ausentes) y no se modificó el corte. La
+bandeja local es el único canal por decisión humana del 2026-11-10; 6 candidatos y 3
+institucionales permanecen en `channel=local_app`, con 0 acuses, y `windows_toast` sigue
+`enabled=false`. Telegram, correo y resumen diario quedan diferidos, no acreditados y fuera de este
+bloque.
+
+**Pendientes finitos:** (1) smoke postmerge de la release nueva para SUMMARY y navegador real
+AAPL+AMD; (2) captura prospectiva cripto con labels maduros, sujeta al calendario; (3) validación
+predictiva V1-U4 `UNKNOWN`, sin entrenamiento, promoción ni holdout; (4) canal externo diferido por
+decisión humana. No hay cuarto bloque automático de features ni fecha prometida. `V1-U4` y `V1-U5`
+siguen `UNKNOWN`, V1 sigue **NO ACEPTADA**, `PREDICTIVE-RESEARCH` es el único `NEXT`,
+`FUNDAMENTALS-COVERAGE` y `ASSET-EXPANSION` siguen `PLANNED` y `DATA-CHASSIS` permanece `DONE`.
 
 `route_transition:PREDICTIVE-RESEARCH:ADVANCES`
 
