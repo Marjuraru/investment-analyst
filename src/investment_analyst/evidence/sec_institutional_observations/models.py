@@ -1,6 +1,7 @@
 """Typed requests and accounting for the institutional-observation service."""
 
-from typing import Literal
+from datetime import date
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -406,6 +407,86 @@ class InstitutionalObservationQueryResult(_Strict):
     def page(self) -> "InstitutionalObservationQueryResult":
         if self.total_matching < len(self.observations):
             raise ValueError("query counts are invalid")
+        return self
+
+
+Sha256Hex = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+_SUMMARY_NOTE_ORDER: tuple[str, ...] = (
+    "replayed_retrieval_time",
+    "legacy_acceptance_timezone",
+)
+
+
+class InstitutionalObservationSummaryReport(_Strict):
+    """Compact, verified report identity for one summary row."""
+
+    report_id: UUID
+    manager_cik: NonEmptyStr
+    report_period: date | None
+
+    @field_validator("manager_cik")
+    @classmethod
+    def report_cik(cls, value: str) -> str:
+        return normalize_cik(value)
+
+
+class InstitutionalObservationSummaryRow(_Strict):
+    """Compact, verified original information-table row identity."""
+
+    row_id: UUID
+    cusip: NonEmptyStr
+    title_of_class: NonEmptyStr
+
+
+class InstitutionalObservationArtifactReference(_Strict):
+    """Verified immutable references to one semantic artifact and its revisions."""
+
+    artifact_id: UUID
+    raw_record_id: UUID
+    cover_revision_id: UUID
+    cover_content_sha256: Sha256Hex
+    information_table_revision_id: UUID
+    information_table_content_sha256: Sha256Hex
+
+
+class InstitutionalObservationSummaryItem(_Strict):
+    """One verified observation with compact referenced parents."""
+
+    observation: NormalizedObservation
+    report: InstitutionalObservationSummaryReport
+    row: InstitutionalObservationSummaryRow
+    artifact_reference: InstitutionalObservationArtifactReference
+    correspondence_id: UUID
+    compatibility_notes: tuple[
+        Literal["replayed_retrieval_time", "legacy_acceptance_timezone"], ...
+    ] = ()
+
+    @field_validator("compatibility_notes")
+    @classmethod
+    def ordered_unique_notes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("compatibility notes must not repeat")
+        expected = tuple(note for note in _SUMMARY_NOTE_ORDER if note in value)
+        if tuple(value) != expected:
+            raise ValueError("compatibility notes must preserve canonical order")
+        return value
+
+
+class InstitutionalObservationSummaryQueryResult(_Strict):
+    """Compact page of verified observations under the isolated summary contract."""
+
+    schema_version: Literal["institutional-observation-summary-v1"] = (
+        "institutional-observation-summary-v1"
+    )
+    observations: tuple[InstitutionalObservationSummaryItem, ...]
+    total_matching: int = Field(ge=0)
+    truncated: bool
+
+    @model_validator(mode="after")
+    def page(self) -> "InstitutionalObservationSummaryQueryResult":
+        if self.total_matching < len(self.observations):
+            raise ValueError("summary query counts are invalid")
         return self
 
 

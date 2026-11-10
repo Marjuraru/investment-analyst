@@ -222,6 +222,7 @@ from investment_analyst.evidence.sec_documents.timeline_models import (
 from investment_analyst.evidence.sec_institutional_observations.models import (
     InstitutionalObservationQuery,
     InstitutionalObservationQueryResult,
+    InstitutionalObservationSummaryQueryResult,
 )
 from investment_analyst.frontend import local_web as local_web_module
 from investment_analyst.frontend.local_web import (
@@ -492,6 +493,11 @@ class _FakeApplication:
         self.institutional_observation_queries: list[InstitutionalObservationQuery] = []
         self.institutional_observation_locations: list[StorageLocationRequest] = []
         self.institutional_observation_result: InstitutionalObservationQueryResult | None = None
+        self.institutional_observation_summary_queries: list[InstitutionalObservationQuery] = []
+        self.institutional_observation_summary_locations: list[StorageLocationRequest] = []
+        self.institutional_observation_summary_result: (
+            InstitutionalObservationSummaryQueryResult | None
+        ) = None
         self.universe_coverage_requests: list[UniverseCoverageRequest] = []
         self.universe_coverage_locations: list[StorageLocationRequest] = []
         self.universe_coverage_result: UniverseCoverageResult | None = None
@@ -1280,6 +1286,22 @@ class _FakeApplication:
         if self.institutional_observation_result is not None:
             return self.institutional_observation_result
         return InstitutionalObservationQueryResult(
+            observations=(),
+            total_matching=0,
+            truncated=False,
+        )
+
+    def query_cazatiburones_institutional_observation_summary(
+        self,
+        query: InstitutionalObservationQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> InstitutionalObservationSummaryQueryResult:
+        self.institutional_observation_summary_queries.append(query)
+        self.institutional_observation_summary_locations.append(location)
+        if self.institutional_observation_summary_result is not None:
+            return self.institutional_observation_summary_result
+        return InstitutionalObservationSummaryQueryResult(
             observations=(),
             total_matching=0,
             truncated=False,
@@ -5046,6 +5068,106 @@ def test_cazatiburones_institutional_observations_endpoint_is_asset_scoped_and_p
     assert recorded.offset == 10
     assert recorded.limit == 50
     assert application.institutional_observation_locations[0].workspace == tmp_path / "workspace"
+
+
+def test_cazatiburones_institutional_observations_summary_projection(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    query = urlencode(
+        [
+            ("asset_id", "equity:us:aapl"),
+            ("known_at", "2026-07-16T15:47:00Z"),
+            ("offset", "0"),
+            ("limit", "200"),
+            ("projection", "summary"),
+        ]
+    )
+    with _server(web) as (_, root):
+        status, payload, _ = _json_request(
+            Request(f"{root}/api/v1/cazatiburones/institutional-observations?{query}")
+        )
+    assert status == 200
+    assert payload["schema_version"] == "institutional-observation-summary-v1"
+    assert payload["observations"] == []
+    assert payload["total_matching"] == 0
+    assert payload["truncated"] is False
+    assert len(application.institutional_observation_summary_queries) == 1
+    assert application.institutional_observation_queries == []
+    recorded = application.institutional_observation_summary_queries[0]
+    assert recorded.asset_id == "equity:us:aapl"
+    assert recorded.offset == 0
+    assert recorded.limit == 200
+
+
+def test_cazatiburones_institutional_observations_rejects_unknown_projection(
+    tmp_path: Path,
+) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    web = AaplLocalWebApplication(controller, None)
+    with _server(web) as (_, root):
+        query = urlencode(
+            [
+                ("asset_id", "equity:us:aapl"),
+                ("known_at", "2026-07-16T15:47:00Z"),
+                ("projection", "compact"),
+            ]
+        )
+        status, payload, _ = _json_request(
+            Request(f"{root}/api/v1/cazatiburones/institutional-observations?{query}")
+        )
+        assert status == 400
+        assert payload["error"]["code"] == "invalid_request"
+        status, payload, _ = _json_request(
+            Request(
+                f"{root}/api/v1/cazatiburones/institutional-observations"
+                "?asset_id=equity:us:aapl&known_at=2026-07-16T15:47:00Z"
+                "&projection=full&projection=summary"
+            )
+        )
+        assert status == 400
+        assert payload["error"]["code"] == "invalid_request"
+
+
+def test_institutional_projection_is_part_of_the_read_cache_key(tmp_path: Path) -> None:
+    application = _FakeApplication()
+    controller = AaplLocalController(
+        _FakeRunner(),
+        application,
+        workspace=tmp_path / "workspace",
+        alpaca_credentials=AlpacaCredentials(api_key="test-key", secret_key="test-secret"),
+        sec_identity=SecEdgarIdentity("Investment Analyst tests@example.com"),
+    )
+    query = InstitutionalObservationQuery(
+        asset_id="equity:us:aapl",
+        known_at=datetime(2026, 7, 16, 15, 47, tzinfo=UTC),
+        offset=0,
+        limit=10,
+    )
+    full = controller.cazatiburones_institutional_observations_request(query, projection="full")
+    summary = controller.cazatiburones_institutional_observations_request(
+        query, projection="summary"
+    )
+    controller.cazatiburones_institutional_observations_request(query, projection="full")
+    assert isinstance(full, InstitutionalObservationQueryResult)
+    assert isinstance(summary, InstitutionalObservationSummaryQueryResult)
+    assert len(application.institutional_observation_queries) == 1
+    assert len(application.institutional_observation_summary_queries) == 1
 
 
 def test_cazatiburones_endpoints_reject_unsupported_parameters_and_missing_known_at(

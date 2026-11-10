@@ -12,7 +12,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
-from typing import Protocol, TypeVar, cast
+from typing import Literal, Protocol, TypeVar, cast
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
@@ -275,6 +275,7 @@ from investment_analyst.evidence.sec_documents.timeline_models import (
 from investment_analyst.evidence.sec_institutional_observations.models import (
     InstitutionalObservationQuery,
     InstitutionalObservationQueryResult,
+    InstitutionalObservationSummaryQueryResult,
 )
 from investment_analyst.providers.fundamentals.sec_edgar import SecEdgarIdentity
 from investment_analyst.providers.fundamentals.sec_fact_models import ASSET_ID as APPLE_ASSET_ID
@@ -657,6 +658,15 @@ class _ApplicationOperations(Protocol):
         location: StorageLocationRequest,
     ) -> InstitutionalObservationQueryResult:
         """Execute a point-in-time institutional 13F observations query."""
+        ...
+
+    def query_cazatiburones_institutional_observation_summary(
+        self,
+        query: InstitutionalObservationQuery,
+        *,
+        location: StorageLocationRequest,
+    ) -> InstitutionalObservationSummaryQueryResult:
+        """Execute a compact point-in-time institutional 13F observations query."""
         ...
 
     def query_listed_market_chart(
@@ -1687,7 +1697,9 @@ class AaplLocalController:
     def cazatiburones_institutional_observations_request(
         self,
         query: InstitutionalObservationQuery,
-    ) -> InstitutionalObservationQueryResult:
+        *,
+        projection: Literal["full", "summary"] = "full",
+    ) -> InstitutionalObservationQueryResult | InstitutionalObservationSummaryQueryResult:
         """Query persisted institutional observations without writes."""
         signature_query = ReadDependencyQuery(
             family=ReadDependencyFamily.INSTITUTIONAL,
@@ -1695,11 +1707,20 @@ class AaplLocalController:
             asset_ids=(query.asset_id,),
             known_at=query.known_at,
             selector=(
-                f"manager={query.manager_cik or ''};report={query.report_id or ''};"
+                f"projection={projection};manager={query.manager_cik or ''};"
+                f"report={query.report_id or ''};"
                 f"cusip={query.cusip or ''};field={query.field_name or ''};"
                 f"offset={query.offset};limit={query.limit}"
             ),
         )
+        if projection == "summary":
+            return self._signed_read(
+                signature_query,
+                lambda: self._application.query_cazatiburones_institutional_observation_summary(
+                    query,
+                    location=StorageLocationRequest(workspace=self._workspace),
+                ),
+            )
         return self._signed_read(
             signature_query,
             lambda: self._application.query_cazatiburones_institutional_observations(
@@ -3119,6 +3140,7 @@ class AaplLocalWebApplication:
             "field_name",
             "offset",
             "limit",
+            "projection",
         }
         if set(parameters) - allowed:
             raise ValueError("institutional observations query contains unsupported parameters")
@@ -3134,6 +3156,14 @@ class AaplLocalWebApplication:
         offset = int(offset_raw) if offset_raw is not None else 0
         limit_raw = _one_parameter(parameters, "limit", required=False)
         limit = int(limit_raw) if limit_raw is not None else 1000
+        projection_raw = _one_parameter(parameters, "projection", required=False)
+        projection: Literal["full", "summary"]
+        if projection_raw is None or projection_raw == "full":
+            projection = "full"
+        elif projection_raw == "summary":
+            projection = "summary"
+        else:
+            raise ValueError("projection must be full or summary")
 
         query = InstitutionalObservationQuery(
             asset_id=asset_id,
@@ -3145,9 +3175,10 @@ class AaplLocalWebApplication:
             offset=offset,
             limit=limit,
         )
-        return self._controller.cazatiburones_institutional_observations_request(query).model_dump(
-            mode="json"
-        )
+        return self._controller.cazatiburones_institutional_observations_request(
+            query,
+            projection=projection,
+        ).model_dump(mode="json")
 
     def valuation(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Validate latest-annual or explicit selected-filing valuation."""

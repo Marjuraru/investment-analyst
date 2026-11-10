@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from datetime import datetime
 from uuid import UUID
 
@@ -112,6 +112,52 @@ class InstrumentCorrespondenceRepository:
             )
         except RecordNotFoundError:
             return None
+
+    def get_many(
+        self,
+        correspondence_ids: Collection[UUID],
+        *,
+        known_at: datetime,
+        asset_id: str | None = None,
+    ) -> dict[UUID, InstrumentCorrespondence]:
+        """Hydrate only the requested visible correspondences in one bounded batch."""
+        ordered_ids = tuple(dict.fromkeys(correspondence_ids))
+        if not ordered_ids:
+            return {}
+        visible_raw_ids = set(
+            self._raw_records.list_record_ids(
+                asset_id=asset_id,
+                source_id=INSTRUMENT_CORRESPONDENCE_SOURCE_ID,
+                schema_version=INSTRUMENT_CORRESPONDENCE_SCHEMA_VERSION,
+                available_to=known_at,
+            )
+        )
+        selected = {
+            correspondence_id: InstrumentCorrespondence.expected_raw_record_id(correspondence_id)
+            for correspondence_id in ordered_ids
+        }
+        wanted = [
+            (correspondence_id, raw_record_id)
+            for correspondence_id, raw_record_id in selected.items()
+            if raw_record_id in visible_raw_ids
+        ]
+        if not wanted:
+            return {}
+        records = self._raw_records.get_many(tuple(raw_record_id for _, raw_record_id in wanted))
+        resolved: dict[UUID, InstrumentCorrespondence] = {}
+        for correspondence_id, raw_record_id in wanted:
+            try:
+                item = correspondence_from_raw_record(records[raw_record_id])
+            except KeyError as error:
+                raise InstrumentCorrespondenceRepositoryError(
+                    "instrument correspondence is missing"
+                ) from error
+            if item.correspondence_id != correspondence_id:
+                raise InstrumentCorrespondenceRepositoryError(
+                    "instrument correspondence identity conflicts"
+                )
+            resolved[correspondence_id] = item
+        return resolved
 
     def save(
         self, item: InstrumentCorrespondence, *, catalog_version: int, declared_by: str

@@ -13,7 +13,10 @@ availability and document hash to remain identical:
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -66,6 +69,117 @@ RECORD_KEY_FIELDS = frozenset(
 _NEW_YORK = ZoneInfo("America/New_York")
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactRowIndex:
+    """Ephemeral row map derived from one already-validated artifact."""
+
+    artifact_id: UUID
+    rows: Mapping[UUID, InstitutionalSemanticsRow]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedReconstruction:
+    """Candidate-side checks proved once per material row, claim and field."""
+
+    artifact: InstitutionalHoldingsSemantics
+    report: InstitutionalHoldingsReport
+    row: InstitutionalSemanticsRow
+    correspondence: InstrumentCorrespondence | SecInstitutionalRowCorrespondence
+    candidate: NormalizedObservation
+    candidate_key: Mapping[str, str | None]
+    accepted_at: datetime
+
+
+def index_artifact_rows(artifact: InstitutionalHoldingsSemantics) -> ArtifactRowIndex:
+    """Build one row map without accepting divergent duplicate row identities."""
+    indexed: dict[UUID, InstitutionalSemanticsRow] = {}
+    for row in artifact.rows:
+        existing = indexed.get(row.row_id)
+        if existing is None:
+            indexed[row.row_id] = row
+        elif existing != row:
+            raise InstitutionalObservationCompatibilityError(
+                "institutional observation artifact row identity is ambiguous"
+            )
+    return ArtifactRowIndex(
+        artifact_id=artifact.artifact_id,
+        rows=MappingProxyType(indexed),
+    )
+
+
+def prepare_reconstruction(
+    *,
+    candidate: NormalizedObservation,
+    candidate_key: Mapping[str, str | None],
+    artifact: InstitutionalHoldingsSemantics,
+    report: InstitutionalHoldingsReport,
+    row: InstitutionalSemanticsRow,
+    correspondence: InstrumentCorrespondence | SecInstitutionalRowCorrespondence,
+    row_index: ArtifactRowIndex,
+) -> PreparedReconstruction:
+    """Prove all candidate-side lineage and acceptance checks exactly once."""
+    _verify_parents(artifact, report, row, correspondence, row_index)
+    if correspondence.asset_id != candidate.asset_id:
+        raise InstitutionalObservationCompatibilityError(
+            "institutional observation asset conflicts with its correspondence"
+        )
+    _verify_key(candidate_key, candidate, artifact, report, row, correspondence)
+    accepted_at = artifact.cover_revision.document.filing.accepted_at
+    if datetime.fromisoformat(candidate_key["filing_accepted_at"]) != accepted_at:
+        raise InstitutionalObservationCompatibilityError(
+            "institutional observation candidate acceptance differs from its filing"
+        )
+    return PreparedReconstruction(
+        artifact=artifact,
+        report=report,
+        row=row,
+        correspondence=correspondence,
+        candidate=candidate,
+        candidate_key=MappingProxyType(dict(candidate_key)),
+        accepted_at=accepted_at,
+    )
+
+
+def compare_prepared_reconstruction(
+    existing: NormalizedObservation,
+    existing_key: Mapping[str, str | None],
+    prepared: PreparedReconstruction,
+) -> tuple[CompatibilityNote, ...]:
+    """Compare one persisted observation with its already-proved reconstruction."""
+    artifact = prepared.artifact
+    report = prepared.report
+    row = prepared.row
+    correspondence = prepared.correspondence
+    candidate = prepared.candidate
+    if correspondence.asset_id != existing.asset_id:
+        raise InstitutionalObservationCompatibilityError(
+            "institutional observation asset conflicts with its correspondence"
+        )
+    _verify_key(existing_key, existing, artifact, report, row, correspondence)
+    restored = existing.model_copy(update={"normalized_at": candidate.normalized_at})
+    if restored == candidate:
+        return ()
+    _require_equal_material(existing, candidate, existing_key, prepared.candidate_key)
+    notes: list[CompatibilityNote] = []
+    if existing.source.retrieved_at != candidate.source.retrieved_at:
+        notes.append("replayed_retrieval_time")
+    old_accepted = existing_key["filing_accepted_at"]
+    new_accepted = prepared.candidate_key["filing_accepted_at"]
+    if old_accepted != new_accepted:
+        _verify_legacy_acceptance(
+            old_text=cast(str, old_accepted),
+            new_text=cast(str, new_accepted),
+            current=prepared.accepted_at,
+            row=row,
+        )
+        notes.append("legacy_acceptance_timezone")
+    if not notes:
+        raise InstitutionalObservationCompatibilityError(
+            "institutional observation content conflicts"
+        )
+    return tuple(note for note in COMPATIBILITY_NOTE_ORDER if note in notes)
+
+
 class InstitutionalObservationCompatibilityError(StorageError):
     """A replay differs from the persisted observation outside the admitted tolerances."""
 
@@ -112,12 +226,13 @@ def compare_reconstruction(
     existing: NormalizedObservation,
     candidate: NormalizedObservation,
     *,
-    existing_key: dict[str, str | None],
-    candidate_key: dict[str, str | None],
+    existing_key: Mapping[str, str | None],
+    candidate_key: Mapping[str, str | None],
     artifact: InstitutionalHoldingsSemantics,
     report: InstitutionalHoldingsReport,
     row: InstitutionalSemanticsRow,
     correspondence: InstrumentCorrespondence | SecInstitutionalRowCorrespondence,
+    row_index: ArtifactRowIndex | None = None,
 ) -> tuple[CompatibilityNote, ...]:
     """Return the admitted compatibility notes or fail on any unproved difference.
 
@@ -126,7 +241,7 @@ def compare_reconstruction(
     timestamp must be UTC-labelled, its naive wall time must localize unambiguously in
     America/New_York and convert exactly to the current documentary acceptance instant.
     """
-    _verify_parents(artifact, report, row, correspondence)
+    _verify_parents(artifact, report, row, correspondence, row_index)
     if (
         correspondence.asset_id != existing.asset_id
         or correspondence.asset_id != candidate.asset_id
@@ -169,8 +284,8 @@ def compare_witnessed_reconstruction(
     existing: NormalizedObservation,
     candidate: NormalizedObservation,
     *,
-    existing_key: dict[str, str | None],
-    candidate_key: dict[str, str | None],
+    existing_key: Mapping[str, str | None],
+    candidate_key: Mapping[str, str | None],
     original_claim: SecInstitutionalRowCorrespondence,
     current_claim: SecInstitutionalRowCorrespondence,
     artifact: InstitutionalHoldingsSemantics,
@@ -201,8 +316,8 @@ def compare_equivalent_reconstruction(
     existing: NormalizedObservation,
     candidate: NormalizedObservation,
     *,
-    existing_key: dict[str, str | None],
-    candidate_key: dict[str, str | None],
+    existing_key: Mapping[str, str | None],
+    candidate_key: Mapping[str, str | None],
     original_claim: SecInstitutionalRowCorrespondence,
     current_claim: SecInstitutionalRowCorrespondence,
     artifact: InstitutionalHoldingsSemantics,
@@ -228,8 +343,8 @@ def _compare_claim_linked_reconstruction(
     existing: NormalizedObservation,
     candidate: NormalizedObservation,
     *,
-    existing_key: dict[str, str | None],
-    candidate_key: dict[str, str | None],
+    existing_key: Mapping[str, str | None],
+    candidate_key: Mapping[str, str | None],
     original_claim: SecInstitutionalRowCorrespondence,
     current_claim: SecInstitutionalRowCorrespondence,
     artifact: InstitutionalHoldingsSemantics,
@@ -328,6 +443,7 @@ def _verify_parents(
     report: InstitutionalHoldingsReport,
     row: InstitutionalSemanticsRow,
     correspondence: InstrumentCorrespondence | SecInstitutionalRowCorrespondence,
+    row_index: ArtifactRowIndex | None = None,
 ) -> None:
     if (
         artifact.parent_report_id != report.report_id
@@ -338,10 +454,21 @@ def _verify_parents(
         raise InstitutionalObservationCompatibilityError(
             "institutional observation report lineage conflicts"
         )
-    if row not in artifact.rows:
-        raise InstitutionalObservationCompatibilityError(
-            "institutional observation row lineage conflicts"
-        )
+    if row_index is None:
+        if row not in artifact.rows:
+            raise InstitutionalObservationCompatibilityError(
+                "institutional observation row lineage conflicts"
+            )
+    else:
+        if row_index.artifact_id != artifact.artifact_id:
+            raise InstitutionalObservationCompatibilityError(
+                "institutional observation artifact row index belongs to another artifact"
+            )
+        indexed = row_index.rows.get(row.row_id)
+        if indexed is None or indexed != row:
+            raise InstitutionalObservationCompatibilityError(
+                "institutional observation row lineage conflicts"
+            )
     if isinstance(correspondence, SecInstitutionalRowCorrespondence):
         if (
             correspondence.report_id != report.report_id
@@ -414,8 +541,8 @@ def _verify_key(
 def _require_equal_material(
     existing: NormalizedObservation,
     candidate: NormalizedObservation,
-    existing_key: dict[str, str | None],
-    candidate_key: dict[str, str | None],
+    existing_key: Mapping[str, str | None],
+    candidate_key: Mapping[str, str | None],
 ) -> None:
     for name in (
         "observation_id",
@@ -501,10 +628,15 @@ def _unambiguous_new_york_utc(value: datetime) -> datetime | None:
 __all__ = [
     "COMPATIBILITY_NOTE_ORDER",
     "RECORD_KEY_FIELDS",
+    "ArtifactRowIndex",
     "CompatibilityNote",
     "InstitutionalObservationCompatibilityError",
-    "compare_reconstruction",
+    "PreparedReconstruction",
     "compare_equivalent_reconstruction",
+    "compare_prepared_reconstruction",
+    "compare_reconstruction",
     "compare_witnessed_reconstruction",
+    "index_artifact_rows",
     "parse_record_key",
+    "prepare_reconstruction",
 ]

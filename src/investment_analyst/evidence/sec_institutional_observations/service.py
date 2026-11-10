@@ -1,7 +1,8 @@
 """PIT persistence for linked institutional observations."""
 
 from collections import Counter
-from collections.abc import Collection
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -38,14 +39,20 @@ from investment_analyst.evidence.sec_institutional_semantics.repository import (
 from investment_analyst.storage import RecordNotFoundError, StorageError
 
 from .compatibility import (
+    ArtifactRowIndex,
     InstitutionalObservationCompatibilityError,
+    PreparedReconstruction,
     compare_equivalent_reconstruction,
+    compare_prepared_reconstruction,
     compare_reconstruction,
     compare_witnessed_reconstruction,
+    index_artifact_rows,
     parse_record_key,
+    prepare_reconstruction,
 )
 from .definitions import SOURCE_ID
 from .models import (
+    InstitutionalObservationArtifactReference,
     InstitutionalObservationClaimSelection,
     InstitutionalObservationEquivalentReuse,
     InstitutionalObservationNormalizationContext,
@@ -55,12 +62,25 @@ from .models import (
     InstitutionalObservationReference,
     InstitutionalObservationRequest,
     InstitutionalObservationSummary,
+    InstitutionalObservationSummaryItem,
+    InstitutionalObservationSummaryQueryResult,
+    InstitutionalObservationSummaryReport,
+    InstitutionalObservationSummaryRow,
     InstitutionalObservationView,
     InstitutionalObservationWitness,
 )
 from .normalizer import normalize_row
 
 _OBSERVATION_SELECTION_BATCH_SIZE = 256
+
+
+@dataclass(frozen=True, slots=True)
+class _QueryContext:
+    observations: tuple[NormalizedObservation, ...]
+    keys: Mapping[UUID, Mapping[str, str | None]]
+    artifact_ids: tuple[UUID, ...]
+    correspondences: Mapping[UUID, InstrumentCorrespondence | SecInstitutionalRowCorrespondence]
+    reports: Mapping[UUID, InstitutionalHoldingsReport]
 
 
 class InstitutionalObservationLineageError(StorageError):
@@ -924,7 +944,7 @@ class InstitutionalObservationService:
         manager_cik: str,
         known_at: datetime,
         field_name: str | None = None,
-    ) -> tuple[object, ...]:
+    ) -> tuple[NormalizedObservation, ...]:
         """Return exactly the manager's observations at one cut before hydrating models.
 
         Identity selection by the closed-set ``manager_cik`` precedes hydration:
@@ -964,14 +984,14 @@ class InstitutionalObservationService:
     def observation_ids_for_references(
         self,
         observation_ids: Collection[UUID],
-    ) -> dict[UUID, object]:
+    ) -> dict[UUID, NormalizedObservation]:
         """Hydrate exactly the declared observation references without scanning history."""
         ordered_ids = tuple(dict.fromkeys(observation_ids))
         if not ordered_ids:
             return {}
         from investment_analyst.storage.errors import RecordNotFoundError
 
-        resolved: dict[UUID, object] = {}
+        resolved: dict[UUID, NormalizedObservation] = {}
         for offset in range(0, len(ordered_ids), _OBSERVATION_SELECTION_BATCH_SIZE):
             batch_ids = ordered_ids[offset : offset + _OBSERVATION_SELECTION_BATCH_SIZE]
             try:
@@ -992,71 +1012,248 @@ class InstitutionalObservationService:
     def query(self, query: InstitutionalObservationQuery) -> InstitutionalObservationQueryResult:
         if not self._storage.read_only:
             raise StorageError("institutional observation query requires read-only storage")
-        if query.manager_cik is not None:
-            observations = tuple(
-                self.list_for_manager(
-                    asset_id=query.asset_id,
-                    manager_cik=query.manager_cik,
-                    known_at=query.known_at,
-                    field_name=query.field_name,
-                )
-            )
-        else:
-            observations = tuple(
-                self._storage.observations.list(
-                    asset_id=query.asset_id,
-                    source_id=SOURCE_ID,
-                    field_name=query.field_name,
-                    available_to=query.known_at,
-                )
-            )
-        keys = {item.observation_id: _record_key(item) for item in observations}
-        artifact_ids = {UUID(key["artifact_id"]) for key in keys.values()}
-        correspondence_ids = {UUID(key["correspondence_id"]) for key in keys.values()}
-        report_ids = {UUID(key["report_id"]) for key in keys.values()}
+        context = self._query_context(query)
         artifacts = _resolve_all(
-            artifact_ids,
+            context.artifact_ids,
             InstitutionalSemanticsRepository(self._storage.raw_records).get,
             "artifact",
         )
-        correspondences = self._resolve_correspondences(correspondence_ids)
-        reports = _resolve_all(
-            report_ids,
-            InstitutionalHoldingsRepository(self._storage.raw_records).get_report,
-            "report",
-        )
+        grouped = _group_by_artifact(context)
+        verified_by_id: dict[UUID, InstitutionalObservationView] = {}
+        for artifact_id in context.artifact_ids:
+            artifact = artifacts[artifact_id]
+            row_index = index_artifact_rows(artifact)
+            candidates: dict[
+                tuple[UUID, UUID],
+                dict[str, tuple[NormalizedObservation, Mapping[str, str | None]]],
+            ] = {}
+            for observation in grouped.get(artifact_id, ()):
+                key = context.keys[observation.observation_id]
+                report = context.reports[UUID(str(key["report_id"]))]
+                correspondence = context.correspondences[UUID(str(key["correspondence_id"]))]
+                row = row_index.rows.get(UUID(str(key["row_id"])))
+                if row is None:
+                    raise InstitutionalObservationLineageError(
+                        "institutional observation row is missing"
+                    )
+                verified_by_id[observation.observation_id] = _verified_view(
+                    observation,
+                    key,
+                    artifact=artifact,
+                    report=report,
+                    row=row,
+                    correspondence=correspondence,
+                    row_index=row_index,
+                    candidates=candidates,
+                    normalized_at=query.known_at,
+                )
+            del row_index, candidates
         verified = tuple(
-            _verified_view(
-                observation,
-                keys[observation.observation_id],
-                artifacts,
-                reports,
-                correspondences,
-            )
-            for observation in observations
+            verified_by_id[observation.observation_id] for observation in context.observations
         )
         matching = tuple(
             view
             for view in verified
-            if (query.report_id is None or view.report.report_id == query.report_id)
-            and (query.manager_cik is None or view.artifact.manager_cik == query.manager_cik)
-            and (query.cusip is None or view.row.cusip == query.cusip)
+            if _matches_query(
+                query,
+                report_id=view.report.report_id,
+                manager_cik=view.artifact.manager_cik,
+                cusip=view.row.cusip,
+            )
         )
         page = matching[query.offset : query.offset + query.limit]
-        return InstitutionalObservationQueryResult(
+        if len(matching) < len(page):
+            raise StorageError("institutional observation query counts are invalid")
+        return InstitutionalObservationQueryResult.model_construct(
             observations=page,
             total_matching=len(matching),
             truncated=query.offset + len(page) < len(matching),
         )
 
-    def _resolve_correspondences(self, ids) -> dict:
+    def query_summary(
+        self, query: InstitutionalObservationQuery
+    ) -> InstitutionalObservationSummaryQueryResult:
+        """Return a compact page after validating every artifact and observation once."""
+        if not self._storage.read_only:
+            raise StorageError("institutional observation query requires read-only storage")
+        context = self._query_context(query)
+        grouped = _group_by_artifact(context)
+        items: dict[UUID, InstitutionalObservationSummaryItem] = {}
+        semantics = InstitutionalSemanticsRepository(self._storage.raw_records)
+        for artifact_id in context.artifact_ids:
+            artifact = semantics.get(artifact_id)
+            if artifact is None:
+                raise InstitutionalObservationLineageError(
+                    "institutional observation artifact is missing"
+                )
+            row_index = index_artifact_rows(artifact)
+            candidates: dict[tuple[UUID, UUID], dict[str, PreparedReconstruction]] = {}
+            try:
+                for observation in grouped.get(artifact_id, ()):
+                    key = context.keys[observation.observation_id]
+                    report = context.reports[UUID(str(key["report_id"]))]
+                    correspondence = context.correspondences[UUID(str(key["correspondence_id"]))]
+                    row = row_index.rows.get(UUID(str(key["row_id"])))
+                    if row is None:
+                        raise InstitutionalObservationLineageError(
+                            "institutional observation row is missing"
+                        )
+                    cache_key = (row.row_id, correspondence.correspondence_id)
+                    prepared_by_field = candidates.get(cache_key)
+                    if prepared_by_field is None:
+                        try:
+                            prepared_by_field = {
+                                candidate.field_name: prepare_reconstruction(
+                                    candidate=candidate,
+                                    candidate_key=_record_key(candidate),
+                                    artifact=artifact,
+                                    report=report,
+                                    row=row,
+                                    correspondence=correspondence,
+                                    row_index=row_index,
+                                )
+                                for candidate in normalize_row(
+                                    artifact,
+                                    row,
+                                    correspondence,
+                                    normalized_at=query.known_at,
+                                )
+                            }
+                        except InstitutionalObservationCompatibilityError as error:
+                            raise InstitutionalObservationLineageError(str(error)) from error
+                        candidates[cache_key] = prepared_by_field
+                    prepared = prepared_by_field.get(observation.field_name)
+                    if prepared is None:
+                        raise InstitutionalObservationLineageError(
+                            "institutional observation content conflicts"
+                        )
+                    try:
+                        compatibility_notes = compare_prepared_reconstruction(
+                            observation,
+                            key,
+                            prepared,
+                        )
+                    except InstitutionalObservationCompatibilityError as error:
+                        raise InstitutionalObservationLineageError(str(error)) from error
+                    items[observation.observation_id] = InstitutionalObservationSummaryItem(
+                        observation=observation,
+                        report=InstitutionalObservationSummaryReport(
+                            report_id=report.report_id,
+                            manager_cik=report.manager_cik,
+                            report_period=report.report_period,
+                        ),
+                        row=InstitutionalObservationSummaryRow(
+                            row_id=row.row_id,
+                            cusip=row.cusip,
+                            title_of_class=row.title_of_class,
+                        ),
+                        artifact_reference=InstitutionalObservationArtifactReference(
+                            artifact_id=artifact.artifact_id,
+                            raw_record_id=artifact.raw_record_id,
+                            cover_revision_id=artifact.cover_revision.revision_id,
+                            cover_content_sha256=artifact.cover_revision.content_sha256,
+                            information_table_revision_id=(
+                                artifact.information_table_revision.revision_id
+                            ),
+                            information_table_content_sha256=(
+                                artifact.information_table_revision.content_sha256
+                            ),
+                        ),
+                        correspondence_id=correspondence.correspondence_id,
+                        compatibility_notes=compatibility_notes,
+                    )
+            finally:
+                del artifact, row_index, candidates
+        matching = tuple(
+            items[observation.observation_id]
+            for observation in context.observations
+            if _matches_query(
+                query,
+                report_id=items[observation.observation_id].report.report_id,
+                manager_cik=items[observation.observation_id].report.manager_cik,
+                cusip=items[observation.observation_id].row.cusip,
+            )
+        )
+        page = matching[query.offset : query.offset + query.limit]
+        return InstitutionalObservationSummaryQueryResult(
+            observations=page,
+            total_matching=len(matching),
+            truncated=query.offset + len(page) < len(matching),
+        )
+
+    def _select_observations(
+        self, query: InstitutionalObservationQuery
+    ) -> tuple[NormalizedObservation, ...]:
+        if query.manager_cik is not None:
+            return self.list_for_manager(
+                asset_id=query.asset_id,
+                manager_cik=query.manager_cik,
+                known_at=query.known_at,
+                field_name=query.field_name,
+            )
+        return tuple(
+            self._storage.observations.list(
+                asset_id=query.asset_id,
+                source_id=SOURCE_ID,
+                field_name=query.field_name,
+                available_to=query.known_at,
+            )
+        )
+
+    def _query_context(self, query: InstitutionalObservationQuery) -> _QueryContext:
+        observations = self._select_observations(query)
+        keys: dict[UUID, Mapping[str, str | None]] = {
+            item.observation_id: _record_key(item) for item in observations
+        }
+        artifact_ids = tuple(
+            sorted({UUID(str(key["artifact_id"])) for key in keys.values()}, key=str)
+        )
+        correspondence_ids = tuple(
+            sorted({UUID(str(key["correspondence_id"])) for key in keys.values()}, key=str)
+        )
+        report_ids = tuple(sorted({UUID(str(key["report_id"])) for key in keys.values()}, key=str))
+        correspondences = self._resolve_correspondences(
+            correspondence_ids,
+            known_at=query.known_at,
+            asset_id=query.asset_id,
+        )
+        reports = _resolve_all(
+            report_ids,
+            InstitutionalHoldingsRepository(self._storage.raw_records).get_report,
+            "report",
+        )
+        return _QueryContext(
+            observations=observations,
+            keys=keys,
+            artifact_ids=artifact_ids,
+            correspondences=correspondences,
+            reports=reports,
+        )
+
+    def _resolve_correspondences(
+        self,
+        ids: Collection[UUID],
+        *,
+        known_at: datetime,
+        asset_id: str,
+    ) -> dict[UUID, InstrumentCorrespondence | SecInstitutionalRowCorrespondence]:
         """Resolve each identifier against both repositories, requiring exactly one parent."""
         manual = InstrumentCorrespondenceRepository(self._storage.raw_records)
         row_claims = SecInstitutionalRowCorrespondenceRepository(self._storage.raw_records)
-        resolved = {}
+        declared_by_id = manual.get_many(
+            ids,
+            known_at=known_at,
+            asset_id=asset_id,
+        )
+        scoped_by_id = row_claims.get_many(
+            ids,
+            known_at=known_at,
+            asset_id=asset_id,
+        )
+        resolved: dict[UUID, InstrumentCorrespondence | SecInstitutionalRowCorrespondence] = {}
         for identifier in ids:
-            declared = manual.get(identifier)
-            scoped = row_claims.get(identifier)
+            declared = declared_by_id.get(identifier)
+            scoped = scoped_by_id.get(identifier)
             if (declared is None) == (scoped is None):
                 raise InstitutionalObservationLineageError(
                     "institutional observation correspondence parent is missing or duplicated"
@@ -1065,12 +1262,12 @@ class InstitutionalObservationService:
         return resolved
 
 
-def observation_lineage_key(observation) -> dict[str, str | None]:
+def observation_lineage_key(observation: NormalizedObservation) -> dict[str, str | None]:
     """Return the canonical lineage key of one institutional observation for verification."""
     return _record_key(observation)
 
 
-def _record_key(observation) -> dict[str, str | None]:
+def _record_key(observation: NormalizedObservation) -> dict[str, str | None]:
     if observation.source.source_id != SOURCE_ID:
         raise InstitutionalObservationLineageError("institutional observation source is invalid")
     try:
@@ -1079,8 +1276,12 @@ def _record_key(observation) -> dict[str, str | None]:
         raise InstitutionalObservationLineageError(str(error)) from error
 
 
-def _resolve_all(ids, resolver, kind: str):
-    resolved = {}
+def _resolve_all[Resolved](
+    ids: Collection[UUID],
+    resolver: Callable[[UUID], Resolved | None],
+    kind: str,
+) -> dict[UUID, Resolved]:
+    resolved: dict[UUID, Resolved] = {}
     for identifier in ids:
         item = resolver(identifier)
         if item is None:
@@ -1091,13 +1292,45 @@ def _resolve_all(ids, resolver, kind: str):
     return resolved
 
 
-def _verified_view(observation, key, artifacts, reports, correspondences):
-    artifact = artifacts[UUID(key["artifact_id"])]
-    report = reports[UUID(key["report_id"])]
-    correspondence = correspondences[UUID(key["correspondence_id"])]
-    row = next((item for item in artifact.rows if str(item.row_id) == key["row_id"]), None)
-    if row is None:
-        raise InstitutionalObservationLineageError("institutional observation row is missing")
+def _group_by_artifact(
+    context: _QueryContext,
+) -> dict[UUID, list[NormalizedObservation]]:
+    grouped: dict[UUID, list[NormalizedObservation]] = {}
+    for observation in context.observations:
+        artifact_id = UUID(str(context.keys[observation.observation_id]["artifact_id"]))
+        grouped.setdefault(artifact_id, []).append(observation)
+    return grouped
+
+
+def _matches_query(
+    query: InstitutionalObservationQuery,
+    *,
+    report_id: UUID,
+    manager_cik: str,
+    cusip: str,
+) -> bool:
+    return (
+        (query.report_id is None or report_id == query.report_id)
+        and (query.manager_cik is None or manager_cik == query.manager_cik)
+        and (query.cusip is None or cusip == query.cusip)
+    )
+
+
+def _verified_view(
+    observation: NormalizedObservation,
+    key: Mapping[str, str | None],
+    *,
+    artifact: InstitutionalHoldingsSemantics,
+    report: InstitutionalHoldingsReport,
+    row: InstitutionalSemanticsRow,
+    correspondence: InstrumentCorrespondence | SecInstitutionalRowCorrespondence,
+    row_index: ArtifactRowIndex,
+    candidates: dict[
+        tuple[UUID, UUID],
+        dict[str, tuple[NormalizedObservation, Mapping[str, str | None]]],
+    ],
+    normalized_at: datetime,
+) -> InstitutionalObservationView:
     if (
         observation.raw_record_id != artifact.raw_record_id
         or observation.asset_id != correspondence.asset_id
@@ -1120,32 +1353,39 @@ def _verified_view(observation, key, artifacts, reports, correspondences):
         or key["quantity_type"] != row.quantity_type
     ):
         raise InstitutionalObservationLineageError("institutional observation lineage conflicts")
-    expected = {
-        candidate.field_name: candidate
-        for candidate in normalize_row(
-            artifact, row, correspondence, normalized_at=observation.normalized_at
-        )
-    }.get(observation.field_name)
-    if expected is None or key["field_name"] != observation.field_name:
+    cache_key = (row.row_id, correspondence.correspondence_id)
+    prepared = candidates.get(cache_key)
+    if prepared is None:
+        prepared = {
+            candidate.field_name: (candidate, _record_key(candidate))
+            for candidate in normalize_row(
+                artifact, row, correspondence, normalized_at=normalized_at
+            )
+        }
+        candidates[cache_key] = prepared
+    entry = prepared.get(observation.field_name)
+    if entry is None or key["field_name"] != observation.field_name:
         raise InstitutionalObservationLineageError("institutional observation content conflicts")
+    expected, expected_key = entry
     try:
         compatibility_notes = compare_reconstruction(
             observation,
             expected,
             existing_key=key,
-            candidate_key=_record_key(expected),
+            candidate_key=expected_key,
             artifact=artifact,
             report=report,
             row=row,
             correspondence=correspondence,
+            row_index=row_index,
         )
     except InstitutionalObservationCompatibilityError as error:
         raise InstitutionalObservationLineageError(str(error)) from error
-    return InstitutionalObservationView(
+    return InstitutionalObservationView.model_construct(
         observation=observation,
         report=report,
         artifact=artifact,
         row=row,
         correspondence=correspondence,
-        compatibility_notes=compatibility_notes,
+        compatibility_notes=InstitutionalObservationView.ordered_unique_notes(compatibility_notes),
     )

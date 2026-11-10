@@ -75,6 +75,41 @@ def test_repository_roundtrip_and_idempotent_save(tmp_path: Path) -> None:
         assert storage.raw_records.count(schema_version=ROW_CORRESPONDENCE_SCHEMA_VERSION) == 1
 
 
+def test_get_many_hydrates_only_requested_visible_claims(tmp_path: Path) -> None:
+    artifact_id, row_id = uuid4(), uuid4()
+    visible = _claim(artifact_id=artifact_id, row_id=row_id)
+    foreign_asset = _claim(
+        artifact_id=uuid4(),
+        row_id=uuid4(),
+        asset_id="equity:us:amd",
+        cusip="007903107",
+    )
+    future = _claim(
+        artifact_id=uuid4(),
+        row_id=uuid4(),
+        available_at=datetime(2026, 8, 1, tzinfo=UTC),
+        recorded_at=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        repository = SecInstitutionalRowCorrespondenceRepository(storage.raw_records)
+        for claim in (visible, foreign_asset, future):
+            repository.save(claim)
+        resolved = repository.get_many(
+            (
+                visible.correspondence_id,
+                foreign_asset.correspondence_id,
+                future.correspondence_id,
+                uuid4(),
+            ),
+            known_at=_RECORDED_AT,
+            asset_id="equity:us:aapl",
+        )
+        assert resolved == {visible.correspondence_id: visible}
+        assert repository.get(visible.correspondence_id) == visible
+        assert repository.get(foreign_asset.correspondence_id) == foreign_asset
+        assert repository.get(future.correspondence_id) == future
+
+
 def test_repository_conflict_and_tamper_fail_closed(tmp_path: Path) -> None:
     artifact_id, row_id = uuid4(), uuid4()
     claim = _claim(artifact_id=artifact_id, row_id=row_id)

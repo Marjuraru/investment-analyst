@@ -32,6 +32,20 @@ lógica no tiene ramas por BTC o SOL. Equity/ETF, intradía, derivados, cross-se
 fuentes o perfiles quedan fuera con error explícito. El workspace se abre siempre en
 `READ_ONLY` en el modo PIT; el modo reconstruido no abre el workspace ni una conexión de escritura.
 
+## Reconciliación operativa (2026-11-10)
+
+La preview PIT preregistrada para `crypto:btc-usd` y `crypto:sol-usd` con
+`decision_date=2026-11-10` y `known_at=2026-11-10T12:00:00Z` devolvió `inputs_unavailable` en
+ambos: no había cierre de 2026-11-09 y faltaban RSI y MACD de 2026-11-10. La adquisición/inputs no
+llegaron antes del corte; no se modificó horario, corte ni dato y no se abrió el holdout. El shadow
+`test_only` de #434 y los estudios congelados siguen sin demostrar ventaja; V1-U4 permanece
+`UNKNOWN` y V1 sigue **NO ACEPTADA**. La siguiente condición observable es un cierre diario de D−1
+persistido y disponible antes de D 12:00Z y, después, los cinco cierres siguientes para la madurez
+del label; no se espera aquí ni se crea un cuarto bloque de features. La próxima decisión de
+investigación debe preregistrar hipótesis, datos/fuente/perfil, label, baselines, validación
+temporal, coste y criterio stop/go antes de cualquier entrenamiento; este bloque no autoriza
+entrenar, descargar modelos, abrir el holdout ni añadir activos o LLM.
+
 ## Experimento preregistrado (P0)
 
 | Campo | Valor fijo |

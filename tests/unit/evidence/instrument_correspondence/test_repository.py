@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from uuid import uuid4
 
 import pytest
 
@@ -44,3 +45,28 @@ def test_save_rejects_semantic_conflict_with_same_identity(tmp_path) -> None:
                 catalog_version=1,
                 declared_by="analyst-a",
             )
+
+
+def test_get_many_hydrates_only_requested_visible_declarations(tmp_path) -> None:
+    item = _declared()
+    future = InstrumentCorrespondence.declare(
+        asset_id="equity:us:aapl",
+        cusip="594918104",
+        title_of_class="COM",
+        effective_from=date(2020, 1, 1),
+        effective_to=None,
+        available_at=datetime(2025, 2, 20, tzinfo=UTC),
+        recorded_at=datetime(2025, 2, 20, tzinfo=UTC),
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        repository = InstrumentCorrespondenceRepository(storage.raw_records)
+        repository.save(item, catalog_version=1, declared_by="analyst-a")
+        repository.save(future, catalog_version=1, declared_by="analyst-a")
+        resolved = repository.get_many(
+            (item.correspondence_id, future.correspondence_id, uuid4()),
+            known_at=datetime(2025, 2, 16, tzinfo=UTC),
+            asset_id="equity:us:aapl",
+        )
+        assert resolved == {item.correspondence_id: item}
+        assert repository.get(item.correspondence_id) == item
+        assert repository.get(future.correspondence_id) == future
