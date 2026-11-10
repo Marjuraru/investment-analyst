@@ -410,3 +410,36 @@ def test_route_records_the_volatility_baseline_without_promotion() -> None:
     assert _route_status(items, "FUNDAMENTALS-COVERAGE") == "PLANNED"
     assert _route_status(items, "DATA-CHASSIS") == "DONE"
     assert "V1-U4" in release_plan and "UNKNOWN" in release_plan
+
+
+def test_route_records_model_inference_contract_without_promotion() -> None:
+    release_plan = (ROOT / "docs/basic_functional_release_plan.md").read_text(encoding="utf-8")
+    roadmap = (ROOT / "docs/product_roadmap.md").read_text(encoding="utf-8")
+    predictive = (ROOT / "docs/predictive_foundation.md").read_text(encoding="utf-8")
+
+    for text in (release_plan, roadmap, predictive):
+        assert "MODEL-INFERENCE-CONTRACT" in text
+        assert "route_transition:PREDICTIVE-RESEARCH:ADVANCES" in text
+        assert "artifact_not_available" in text
+        assert "inputs_unavailable" in text
+    for text in (release_plan, predictive):
+        assert "research-model-artifact-v1" in text
+        assert "research-model-inference-v1" in text
+        assert "model-explanation-packet-v1" in text
+        assert "test_output" in text
+        assert "16.384" in text
+        assert "65.536" in text
+    assert "constant-test-v1" in predictive
+    assert "constant_test_no_attribution" in predictive
+    assert "No entrenado ni calibrado" in predictive
+    assert "Sin validación predictiva" in predictive
+    assert "No es una recomendación" in predictive
+    assert "no promueve" in predictive
+    assert "SHADOW-AND-V1-RELEASE" in release_plan
+    assert "SHADOW-AND-V1-RELEASE" in roadmap
+    assert "V1-U4" in release_plan and "UNKNOWN" in release_plan
+    items = _route_items(release_plan)
+    _validate(items)
+    assert _route_status(items, "PREDICTIVE-RESEARCH") == "NEXT"
+    assert _route_status(items, "FUNDAMENTALS-COVERAGE") == "PLANNED"
+    assert _route_status(items, "DATA-CHASSIS") == "DONE"

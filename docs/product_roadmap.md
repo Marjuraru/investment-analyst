@@ -117,6 +117,16 @@ automáticamente otra fuente, activo, indicador, pantalla, modelo o LLM.
 
 `route_transition:PREDICTIVE-RESEARCH:ADVANCES`
 
+`MODEL-INFERENCE-CONTRACT`/#432 (`ADVANCES`) entrega el 2/3: la frontera aislada
+artefacto→compatibilidad→features PIT→adaptador→resultado/explicación→CLI con un único doble
+`constant-test-v1`. No entrena, no promueve un predictor, no abre el holdout, no adquiere datos y no
+genera señal ni recomendación. La integración scratch demuestra `test_output`; el smoke real puede
+abstenerse legítimamente (`artifact_not_available`/`inputs_unavailable`) y se reporta sin
+retrofechar. `PREDICTIVE-RESEARCH` permanece `NEXT` y el siguiente esperado es el 3/3
+`SHADOW-AND-V1-RELEASE`, todavía sin Issue.
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
+
 ## Dirección de V1 (2026-10-30)
 
 La V1 es el recorrido local `catálogo/watchlist → actualización incremental → análisis → candidato →
