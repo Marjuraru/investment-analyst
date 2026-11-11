@@ -150,6 +150,28 @@ permanece `DONE`, `FUNDAMENTALS-COVERAGE` y `ASSET-EXPANSION` siguen `PLANNED`,
 
 `route_transition:PREDICTIVE-RESEARCH:ADVANCES`
 
+### PREDICTIVE-RESEARCH-DECISION: decisión finita del próximo experimento (2026-11-11)
+
+`PREDICTIVE-RESEARCH-DECISION`/#438 (`ADVANCES`, sin cierre) convierte los estudios
+negativos y la carencia de evidencia en una decisión verificable: los tres runs
+sellados quedan STOP con su criterio, hashes y causa (baseline `fc4ea570…`,
+funding `8dbc6330…`, volatility `44b61556…`); la preview BTC/SOL de D=`2026-11-10`
+sigue `inputs_unavailable`; y la comparación de dos alternativas produce `NO_GO`
+para planificar un nuevo experimento hasta muestra PIT observada suficiente o una
+familia distinta con disponibilidad, licencia, PIT y coste verificados. La
+evidencia y la tabla viven en [`predictive_foundation.md`](predictive_foundation.md);
+la justificación y los límites, en
+[`research_information_strategy.md`](research_information_strategy.md); la secuencia
+condicionada y los objetivos V1, en
+[`basic_functional_release_plan.md`](basic_functional_release_plan.md). V1-U4
+permanece `UNKNOWN`, V1 sigue **NO ACEPTADA** y no se crea un cuarto bloque
+automático de features. El siguiente esperado finito es una decisión cerrada con
+condiciones verificables y cero Issues sucesores automáticos; una eventual
+implementación requiere otro PLAN con contrato y autorización propios.
+`PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`.
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
+
 ## Dirección de V1 (2026-10-30)
 
 La V1 es el recorrido local `catálogo/watchlist → actualización incremental → análisis → candidato →

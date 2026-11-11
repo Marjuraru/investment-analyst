@@ -357,3 +357,39 @@ que esperar alcance los pisos. `PREDICTIVE-RESEARCH` permanece `NEXT` y V1-U4 si
 siguiente decisión debe justificar con evidencia si otra hipótesis preregistrada o datos externos
 merecen un experimento, conservando costes, el holdout cerrado y la separación entre reconstrucción
 histórica y disponibilidad real.
+
+## Decisión de investigación (2026-11-11, `PREDICTIVE-RESEARCH-DECISION`/#438, `ADVANCES`)
+
+Con el marco de este documento, la [síntesis cripto 2026-08](research/crypto/crypto_research_synthesis_2026-08.md)
+§3.1–§3.2 y el [brief del planificador](research/crypto/crypto_planner_brief.md): las tres
+hipótesis evaluadas (dirección 5d, funding incremental, variación futura) cerraron como
+negativas bajo sus protocolos preregistrados y se conservan como STOP sin tuning ni
+reapertura (tabla, IDs, hashes, cortes, criterios y limitaciones en
+[`predictive_foundation.md`](predictive_foundation.md)).
+
+Comparación finita de dos alternativas y nada más:
+
+1. Confirmación independiente de variación con protocolo congelado y muestra nueva no
+   utilizada ni reservada. Rechazada como GO: no existe evidencia local documentada de
+   muestra realmente independiente y suficiente; el holdout reservado no puede
+   sustentarla y la descarga o inspección de muestras nuevas está prohibida en este
+   bloque. Exigiría además no relajar el criterio fallido (mejora positiva en cada
+   fold frente a `persistence_30d`).
+2. Conservar la captura PIT y no ejecutar otro experimento hasta contar con evidencia
+   suficiente. Adoptada: la preview prospectiva BTC/SOL de D=2026-11-10 sigue
+   `inputs_unavailable` sin diferencia frente al último recibo, y la historia
+   entrenable PIT observada sigue siendo de una sola muestra.
+
+Resultado obligatorio: `NO_GO` para planificar un nuevo experimento, con condiciones
+concretas de reapertura: muestra PIT observada suficiente (pisos 300/150/40/40 con
+clases) o una familia de datos/features distinta con disponibilidad, licencia, PIT y
+coste verificados, siempre con propuesta preregistrada propia en un PLAN posterior
+(pregunta, perfil/fuente, universo y fechas, objetivo/unidad/horizonte, candidato
+congelado, baselines, separación temporal/purga/embargo, métrica primaria,
+incertidumbre, tamaño mínimo, regla de rechazo original, límites de fits/tiempo/RSS
+y criterio stop/go). V1-U4 permanece `UNKNOWN`; un `NO_GO` no prueba imposibilidad
+general del ML, sólo rechaza estas hipótesis bajo sus protocolos. Sin porcentaje de
+progreso ni promesa de rentabilidad; el LLM sigue posterior/opcional y no resuelve la
+ausencia de evidencia cuantitativa. Evidencia histórica asumida y PIT observado
+siguen separados; activos y fuentes no se mezclan y ningún resultado retrospectivo se
+llama señal.
