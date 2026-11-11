@@ -1013,7 +1013,9 @@ La única secuencia condicionada es: conservar la captura PIT y no ejecutar otro
 experimento hasta muestra PIT observada suficiente o una familia distinta con
 disponibilidad, licencia, PIT y coste verificados, siempre mediante un PLAN
 posterior con propuesta preregistrada propia; cero Issues sucesores automáticos y
-ninguna autorización de ejecución implícita. Objetivos V1: V1-U4 permanece
+ninguna autorización de ejecución implícita. Decisión obligatoria: `NO_GO` para
+planificar un nuevo experimento, con las condiciones de reapertura registradas en
+[`predictive_foundation.md`](predictive_foundation.md). Objetivos V1: V1-U4 permanece
 `UNKNOWN`, V1-U1–U3/U5–U6 sin cambio, V1 sigue **NO ACEPTADA**. `PREDICTIVE-RESEARCH`
 sigue siendo el único `NEXT`; `FUNDAMENTALS-COVERAGE` y `ASSET-EXPANSION` siguen
 `PLANNED` y `DATA-CHASSIS` permanece `DONE`.
