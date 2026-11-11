@@ -996,6 +996,30 @@ siguen `UNKNOWN`, V1 sigue **NO ACEPTADA**, `PREDICTIVE-RESEARCH` es el único `
 
 `route_transition:PREDICTIVE-RESEARCH:ADVANCES`
 
+### PREDICTIVE-RESEARCH-DECISION — decisión finita del próximo experimento (2026-11-11, `ADVANCES`)
+
+`PREDICTIVE-RESEARCH-DECISION`/#438 relee los tres runs sellados con sus lectores
+vigentes (baseline `fc4ea570…` → `no_demonstrated_edge`; funding `8dbc6330…` →
+`no_demonstrated_increment`; volatility `44b61556…` → `no_demonstrated_increment`
+por el fold 2 frente a `persistence_30d`), confirma 0 fits, 0 accesos al holdout,
+0 proveedores y 0 escrituras, y publica la tabla STOP con condiciones de
+reconsideración en [`predictive_foundation.md`](predictive_foundation.md). La
+preview prospectiva BTC/SOL de D=`2026-11-10` (`inputs_unavailable`, sin diferencia
+frente al último recibo) se registra sin readiness adicional ni export. La
+justificación y los límites viven en
+[`research_information_strategy.md`](research_information_strategy.md).
+
+La única secuencia condicionada es: conservar la captura PIT y no ejecutar otro
+experimento hasta muestra PIT observada suficiente o una familia distinta con
+disponibilidad, licencia, PIT y coste verificados, siempre mediante un PLAN
+posterior con propuesta preregistrada propia; cero Issues sucesores automáticos y
+ninguna autorización de ejecución implícita. Objetivos V1: V1-U4 permanece
+`UNKNOWN`, V1-U1–U3/U5–U6 sin cambio, V1 sigue **NO ACEPTADA**. `PREDICTIVE-RESEARCH`
+sigue siendo el único `NEXT`; `FUNDAMENTALS-COVERAGE` y `ASSET-EXPANSION` siguen
+`PLANNED` y `DATA-CHASSIS` permanece `DONE`.
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
+
 ### Disciplina de crecimiento
 
 Cada ampliación presenta bytes iniciales y ordinarios, pico coexistente y reserva antes de escribir,

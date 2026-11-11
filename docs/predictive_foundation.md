@@ -1501,3 +1501,64 @@ explícitamente `research-historical-dataset-v1` y
 presentar la muestra como PIT observada. La conversión de Decimal-string al dtype del modelo ocurre
 sólo en ese futuro adaptador explícito, nunca en el núcleo. No se crea ahora una clase abstracta de
 entrenador, un fake predictor, un `ModelExplanationPacket` vacío ni infraestructura de plugins.
+
+## Decisión del próximo experimento (2026-11-11, `PREDICTIVE-RESEARCH-DECISION`/#438, `ADVANCES`)
+
+Este bloque no entrena, no abre el holdout, no adquiere datos y no promueve un predictor.
+Relee los tres runs sellados con sus lectores vigentes y fija una única decisión finita.
+
+### Registro de estudios (A1, sólo runs sellados, sin recomputar)
+
+Lectura read-only del 2026-11-11 con `read_ml_baseline_artifact`,
+`read_funding_ml_artifact` y `read_volatility_artifact`: sin predicciones por fila,
+sin candles históricos, sin holdout y sin fits nuevos.
+
+| Hipótesis | Resultado contra criterio original | Evidencia utilizable | Causa de rechazo | Estado | Condición independiente de reconsideración |
+| --- | --- | --- | --- | --- | --- |
+| Dirección 5d, 3 features técnicas (`crypto-historical-5d-baselines-v1`) | `no_demonstrated_edge`: logística +0,27 % frente a `p=0.5` y −0,32 % frente al prior, límites inferiores negativos; HGB negativo en ambas | Run `fc4ea570-4ffb-55fc-ac49-17d74c328d24`, protocolo `e7256118…`, dataset `d927c7f1…` (`16b89545…`), 6 fits de desarrollo, holdout `not_evaluated` con 0 accesos y 0 fits | Ningún candidato alcanza el 5 % frente a ambas referencias con límites positivos | STOP | Muestra PIT observada suficiente (300/150/40/40 con clases) evaluada con el mismo protocolo congelado |
+| Aporte incremental de funding (`crypto-historical-5d-funding-increment-v1`) | `no_demonstrated_increment`: Brier funding `0,250944…` frente a control técnico `0,249403…`, `p=0.5` y prior `0,248535…`; tres deltas negativos, ningún límite positivo | Run `8dbc6330-1ff2-51bc-b701-a65611afa495`, protocolo `653d026d…`, dataset `d927c7f1…` + bundle `fca740b8…` (`2c626662…`), 6 fits, holdout `not_evaluated` con 0 accesos y 0 fits | El brazo de funding no supera al control técnico ni en pooled ni en ningún fold individual | STOP | Familia de datos/features distinta con disponibilidad, cobertura y coste demostrados antes de comprometer entrenamiento, decidida por un PLAN propio |
+| Variación futura 5d (`crypto-historical-log-variation-5d-v1`) | `no_demonstrated_increment`: pooled +36,48 % / +8,49 % / +21,88 % con límites positivos, pero el fold 2 pierde −1,17 % frente a `persistence_30d` | Run `44b61556-c34e-5778-9f7f-af081a6cc195`, protocolo `6c4ca709…`, archivo `67ec4e68…` (`a5e3b4dc…`), 3 fits, período reservado `not_evaluated` con 0 evaluaciones | El criterio preregistrado exige mejora positiva en cada fold | STOP | Confirmación independiente con protocolo congelado sobre muestra nueva no utilizada ni reservada, sólo con evidencia local documentada de suficiencia |
+
+Los tres resultados negativos se conservan; ningún umbral, fold, semilla, ventana o
+baseline se modifica para rescatar una hipótesis. `strict_pit_verified=false` en los
+tres; ninguno satisface el gate PIT observado ni autoriza promoción. V1-U4 permanece
+`UNKNOWN`.
+
+### Condición prospectiva (A3, una consulta por activo, sin barrido)
+
+D fijado antes de consultar: `2026-11-10`, corte `2026-11-10T12:00:00Z` (último día
+UTC cuyo corte D 12:00Z había transcurrido al iniciar BUILD, `2026-11-11T02:13:00Z`).
+`research-feature-preview-v1` en `READ_ONLY` sobre el workspace
+`70c64668-1738-4dfe-ba1f-7e72026bb7fe`:
+
+- BTC: `inputs_unavailable`, `preview_id=e36b27af-f18d-59f9-aed9-5dd8cc56c100`;
+  cierre 2026-11-09 ausente, RSI/MACD ausentes.
+- SOL: `inputs_unavailable`, `preview_id=a1e18b70-f759-5a58-8337-2d18b593a71d`;
+  misma carencia.
+
+Sin diferencia frente al último recibo (#436, mismo D y corte): no se usa readiness
+de 7 días, no se exporta dataset ni se añaden mediciones. El journal del intervalo
+(`cycle-2026-11-10`) registra 0 intentos: servicio activo y programado
+(`scheduled_next_run_at=2026-11-11T11:00:00Z`), sin ciclo terminado antes del corte;
+no se infiere causa sólo del preview. Condición temporal pendiente: cierre de D−1
+persistido y disponible antes de D 12:00Z y, después, los cinco cierres siguientes
+para la madurez del label. Responsable operativo: mantener Windows/WSL/servicio
+activos antes de las 11:00 UTC. La bandeja local sigue siendo el único canal.
+
+### Decisión (A2): `NO_GO` para planificar un nuevo experimento
+
+Con el marco de [`research_information_strategy.md`](research_information_strategy.md),
+la [síntesis 2026-08](research/crypto/crypto_research_synthesis_2026-08.md) y el
+[brief del planificador](research/crypto/crypto_planner_brief.md): la confirmación
+independiente de variación exigiría muestra nueva no utilizada ni reservada con
+evidencia local documentada de suficiencia; no existe tal evidencia y la descarga o
+inspección de muestras nuevas está prohibida en este bloque. El holdout reservado no
+puede sustentar un GO. Conservar la captura PIT sin otro experimento es la única
+alternativa viable. `NO_GO` con condiciones: reapertura observable sólo ante muestra
+PIT observada suficiente o una familia de datos/features distinta con disponibilidad,
+licencia, PIT y coste verificados, siempre mediante un PLAN posterior con propuesta
+preregistrada propia. Este `NO_GO` documentado satisface el bloque; no cierra
+`PREDICTIVE-RESEARCH` ni la V1 predictiva. V1-U4 permanece `UNKNOWN`; no existe
+autorización de ejecución implícita.
+
+`route_transition:PREDICTIVE-RESEARCH:ADVANCES`
