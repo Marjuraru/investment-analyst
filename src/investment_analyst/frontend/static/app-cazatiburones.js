@@ -596,11 +596,18 @@ function renderCazatiburonesInstitutionalObservations(payload, offset, limit) {
     }
   };
   render();
+  const latestAvailable = observations
+    .map((view) => view?.observation?.available_at)
+    .filter(Boolean)
+    .sort()
+    .pop();
+  const chronoNote = latestAvailable ? ` · último disponible ${formatInstant(latestAvailable)}` : "";
   byId("cazatiburones-institutional-observations-summary").innerHTML =
     `<span class="figure">${formatInteger(observations.length)}</span> de ` +
     `<span class="figure">${formatInteger(payload.total_matching)}</span> filas as-filed ` +
     `· página offset <span class="figure">${formatInteger(offset)}</span> ` +
     `límite <span class="figure">${formatInteger(limit)}</span>` +
+    chronoNote +
     (payload.truncated ? " · truncado" : "");
 }
 
