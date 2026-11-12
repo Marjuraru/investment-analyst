@@ -1172,7 +1172,12 @@ _EXPECTED_BOARD_OF_SECTION = {
     "comparacion-mercado": "tecnico",
     "operacion": "sistema",
     "candidate-inbox-panel": "revisar",
-    "alert-inbox-panel": "revisar",
+    "alert-inbox-panel": "sistema",
+    "mesa-investor-section": "mesa",
+    "review-explore-panel": "revisar",
+    "sistema-incidencias": "sistema",
+    "sistema-verificacion": "sistema",
+    "sistema-investigacion": "sistema",
 }
 
 
@@ -1512,7 +1517,7 @@ def _check_deferred_inbox_and_valuation_loads_are_preserved(app_js: str) -> None
     board_loads = app_js[
         app_js.index("const BOARD_DEFERRED_LOADS") : app_js.index("const DEFAULT_BOARD_ID")
     ]
-    assert "revisar: Object.freeze([loadCandidateInbox, loadAlertInbox])" in board_loads
+    assert "revisar: Object.freeze([loadCandidateInbox, loadRevisarOverview])" in board_loads
     activate_body = _activate_board_body(app_js)
     assert "loadDeferredBoardData(resolvedId)" in activate_body
     assert "loadedBoardIds.has(boardId)" in app_js
@@ -1715,6 +1720,7 @@ _BASELINE_API_ROUTES = frozenset(
         "/api/v1/cazatiburones/notifications",
         "/api/v1/cazatiburones/universe-activity",
         "/api/v1/crypto-derivatives",
+        "/api/v1/investor-overview",
         "/api/v1/market-comparison",
         "/api/v1/market-patterns",
         "/api/v1/overview",
@@ -2537,16 +2543,19 @@ _BOARD_DEFERRED_LOADS_RE = re.compile(
     re.DOTALL,
 )
 _DEFERRED_LOAD_NAMES = (
+    "loadMesaInvestorOverview",
     "refreshOverview",
     "loadMesaAnalyticalNews",
     "loadMesaCazatiburonesNewsFamilies",
     "loadMesaIncidents",
     "loadMesaUniverseCoverage",
+    "loadActivoCurrentSubtab",
     "queryReport",
     "queryMarketChart",
     "queryFundamentalTrend",
     "queryFundamentalResearch",
     "loadCandidateInbox",
+    "loadRevisarOverview",
     "loadAlertInbox",
     "loadCazatiburonesUniverseIndex",
     "loadCazatiburonesBoard",
@@ -2621,20 +2630,16 @@ def _check_board_to_deferred_loads_table_covers_the_six_registered_boards(app_js
     }
     expected_loads = {
         "mesa": [
+            "loadMesaInvestorOverview",
             "refreshOverview",
             "loadMesaAnalyticalNews",
             "loadMesaCazatiburonesNewsFamilies",
-            "loadMesaIncidents",
-            "loadMesaUniverseCoverage",
         ],
         "activo": [
-            "queryReport",
-            "queryMarketChart",
-            "queryFundamentalTrend",
-            "queryFundamentalResearch",
+            "loadActivoCurrentSubtab",
         ],
         "tecnico": [],
-        "revisar": ["loadCandidateInbox", "loadAlertInbox"],
+        "revisar": ["loadCandidateInbox", "loadRevisarOverview"],
         "cazatiburones": ["loadCazatiburonesUniverseIndex"],
         "sistema": [],
     }
@@ -2677,7 +2682,7 @@ def test_activate_board_fires_exactly_the_declared_loads() -> None:
 
 def _check_revisar_and_cazatiburones_keep_their_current_triggers(app_js: str) -> None:
     assert _board_deferred_load_entry(app_js, "revisar").count("loadCandidateInbox") == 1
-    assert _board_deferred_load_entry(app_js, "revisar").count("loadAlertInbox") == 1
+    assert _board_deferred_load_entry(app_js, "revisar").count("loadRevisarOverview") == 1
     assert (
         _board_deferred_load_entry(app_js, "cazatiburones").count("loadCazatiburonesUniverseIndex")
         == 1
@@ -2875,13 +2880,14 @@ def _mesa_slice(index_html: str) -> str:
     return _board_slices(index_html)["mesa"]
 
 
+def _sistema_slice(index_html: str) -> str:
+    return _board_slices(index_html)["sistema"]
+
+
 def _check_mesa_presents_the_four_reading_layers_in_order(index_html: str) -> None:
     mesa = _mesa_slice(index_html)
     assert 'class="mesa-layout"' in mesa
-    main_start = mesa.index('class="mesa-main"')
-    aside_start = mesa.index('<aside class="mesa-aside"')
-    main = mesa[main_start:aside_start]
-    assert main.index('id="mesa-news-analytical"') < main.index('id="mesa-universe-table"')
+    assert mesa.index('id="mesa-news-analytical"') < mesa.index('id="mesa-investor-table"')
     assert "EN QUÉ CONFÍO" not in mesa
     assert 'id="app-sidebar"' not in mesa
     assert 'id="board-nav"' not in mesa
@@ -2893,19 +2899,17 @@ def test_mesa_presents_the_four_reading_layers_in_order() -> None:
 
 def _check_universe_matrix_is_the_last_layer(index_html: str) -> None:
     mesa = _mesa_slice(index_html)
-    main_start = mesa.index('class="mesa-main"')
-    aside_start = mesa.index('<aside class="mesa-aside"')
-    main = mesa[main_start:aside_start]
-    aside = mesa[aside_start:]
-    assert main.index('id="mesa-news-analytical"') < main.index('id="mesa-universe-table"')
-    assert 'id="mesa-incidents-list"' not in main
+    sistema = _sistema_slice(index_html)
+    assert mesa.index('id="mesa-news-analytical"') < mesa.index('id="mesa-investor-table"')
+    assert 'id="mesa-incidents-list"' not in mesa
     headings = (
+        'id="mesa-incidents-titulo"',
         'id="mesa-coverage-titulo"',
         'id="mesa-blocked-sources-titulo"',
-        'id="mesa-incidents-titulo"',
+        'id="mesa-universe-titulo"',
     )
-    assert [aside.index(heading) for heading in headings] == sorted(
-        aside.index(heading) for heading in headings
+    assert [sistema.index(heading) for heading in headings] == sorted(
+        sistema.index(heading) for heading in headings
     )
 
 
@@ -3030,7 +3034,7 @@ def test_no_combined_news_family_count() -> None:
 def _check_mesa_universe_coverage_requested_once_with_no_per_asset_parameter(app_js: str) -> None:
     assert app_js.count("/api/v1/universe-coverage") == 1
     mesa_loads = _board_deferred_load_entry(app_js, "mesa")
-    assert mesa_loads.count("loadMesaUniverseCoverage") == 1
+    assert mesa_loads.count("loadMesaUniverseCoverage") == 0
     load_body = _extract_js_function(app_js, "loadMesaUniverseCoverage")
     assert "selectedMarketAsset" not in load_body
     assert "asset_id" not in load_body
@@ -3099,15 +3103,15 @@ def test_present_past_freshness_renders_as_stale() -> None:
 
 
 def _check_unqueried_capabilities_are_declared_textually(index_html: str) -> None:
-    mesa = _mesa_slice(index_html)
-    assert 'id="mesa-universe-not-queried"' not in mesa
-    assert 'id="mesa-universe-limitations"' not in mesa
+    sistema = _sistema_slice(index_html)
+    assert 'id="mesa-universe-not-queried"' not in sistema
+    assert 'id="mesa-universe-limitations"' not in sistema
     for term in (
         "Cazatiburones, Documentos",
         "additional_capabilities_not_queried",
         "Limitaciones declaradas",
     ):
-        assert term not in mesa
+        assert term not in sistema
 
 
 def test_unqueried_capabilities_are_declared_textually() -> None:
@@ -3126,12 +3130,13 @@ def _check_universe_matrix_covers_exactly_the_four_queried_capabilities(
     assert match, "MESA_COVERAGE_CAPABILITY_KEYS must be declared"
     keys = re.findall(r'"([a-z_]+)"', match.group(1))
     assert keys == ["market", "fundamentals", "corporate_valuation"]
-    mesa = _mesa_slice(index_html)
-    header_start = mesa.index("<thead>")
-    header_end = mesa.index("</thead>")
-    headers = re.findall(r'<th scope="col">(.*?)</th>', mesa[header_start:header_end])
+    sistema = _sistema_slice(index_html)
+    table_start = sistema.index('id="mesa-universe-table"')
+    header_start = sistema.index("<thead>", table_start)
+    header_end = sistema.index("</thead>", header_start)
+    headers = re.findall(r'<th scope="col">(.*?)</th>', sistema[header_start:header_end])
     assert headers == ["Activo", "Dominio", "Mercado", "Fund.", "Valor.", "Última evidencia"]
-    assert "Registro BVL</th>" not in mesa
+    assert "Registro BVL</th>" not in sistema[header_start:header_end]
 
 
 def test_universe_matrix_covers_exactly_the_four_queried_capabilities() -> None:
@@ -3189,11 +3194,11 @@ _MESA_RESUMEN_CONTROL_IDS = (
 
 
 def _check_every_resumen_control_survives_relocation(index_html: str) -> None:
-    mesa = _mesa_slice(index_html)
+    sistema = _sistema_slice(index_html)
     for control_id in _MESA_RESUMEN_CONTROL_IDS:
         marker = f'id="{control_id}"'
         assert index_html.count(marker) == 1, f"id={control_id!r} must appear exactly once"
-        assert marker in mesa, f"id={control_id!r} must remain inside board mesa"
+        assert marker in sistema, f"id={control_id!r} must remain inside board sistema"
 
 
 def test_every_resumen_control_survives_relocation() -> None:
@@ -3245,7 +3250,6 @@ def test_design_system_documentation_declares_the_mesa_hierarchy() -> None:
 def _check_mesa_three_column_composition(index_html: str, styles_css: str) -> None:
     mesa = _mesa_slice(index_html)
     assert mesa.count('class="mesa-layout"') == 1
-    assert mesa.count('<aside class="mesa-aside"') == 1
     assert "grid-template-columns: minmax(0, 1fr) 340px;" in styles_css
     assert "@media (max-width: 1120px)" in styles_css
     assert ".mesa-layout {\n    grid-template-columns: 1fr;" in styles_css
@@ -3269,7 +3273,7 @@ def _check_compact_universe_matrix(index_html: str, app_js: str) -> None:
     _check_universe_matrix_covers_exactly_the_four_queried_capabilities(index_html, app_js)
     matrix_body = _extract_js_function(app_js, "renderMesaUniverseMatrix")
     assert "bvl_registry" not in matrix_body
-    assert 'class="mesa-universe-legend"' in _mesa_slice(index_html)
+    assert 'class="mesa-universe-legend"' in _sistema_slice(index_html)
 
 
 def test_universe_matrix_has_only_three_queried_analytical_domain_state_columns() -> None:
@@ -3311,10 +3315,10 @@ def test_latest_evidence_uses_only_queried_domain_availability() -> None:
 def _check_matrix_legend_and_accessible_marks(
     index_html: str, app_js: str, styles_css: str
 ) -> None:
-    mesa = _mesa_slice(index_html)
-    assert mesa.count('class="mesa-universe-legend"') == 1
+    sistema = _sistema_slice(index_html)
+    assert sistema.count('class="mesa-universe-legend"') == 1
     for label in ("Al día", "Vencida", "Sin evidencia", "Bloqueada", "No aplica"):
-        assert label in mesa
+        assert label in sistema
     markup = _extract_js_function(app_js, "mesaMatrixStateMarkup")
     assert 'role="img" aria-label="${label}"' in markup
     assert "visually-hidden" in markup
@@ -3344,7 +3348,8 @@ def test_cell_state_mapping_preserves_capability_evidence_age_order() -> None:
 
 
 def _check_matrix_absent_rows_span_six_columns(index_html: str, app_js: str) -> None:
-    assert '<tr><td colspan="6">Cargando…</td></tr>' in _mesa_slice(index_html)
+    expected = '<tr><td colspan="6">Abre esta sección para consultar.</td></tr>'
+    assert expected in _sistema_slice(index_html)
     render_absent = _extract_js_function(app_js, "renderMesaUniverseAbsentTable")
     render_matrix = _extract_js_function(app_js, "renderMesaUniverseMatrix")
     assert "cell.colSpan = 6;" in render_absent
@@ -3356,10 +3361,9 @@ def test_matrix_empty_and_error_rows_span_six_columns() -> None:
 
 
 def _check_bvl_summary_is_lateral_and_reuses_payload(index_html: str, app_js: str) -> None:
-    mesa = _mesa_slice(index_html)
-    assert mesa.count("Registro BVL") == 1
-    aside = mesa[mesa.index('<aside class="mesa-aside"') :]
-    assert aside.index("Registro BVL") < aside.index('id="mesa-incidents-titulo"')
+    sistema = _sistema_slice(index_html)
+    assert sistema.count("Registro BVL") == 1
+    assert sistema.index('id="mesa-incidents-titulo"') < sistema.index("Registro BVL")
     summary_body = _extract_js_function(app_js, "renderMesaBvlRegistrySummary")
     assert "asset.bvl_registry" in summary_body
     for key in (
@@ -3388,7 +3392,7 @@ def test_universe_limitations_are_not_rendered_in_the_matrix() -> None:
     matrix_body = _extract_js_function(APP_JS, "renderMesaUniverseMatrix")
     assert "asset.limitations" not in matrix_body
     assert "allLimitations" not in matrix_body
-    assert 'id="mesa-universe-limitations"' not in _mesa_slice(INDEX_HTML)
+    assert 'id="mesa-universe-limitations"' not in _sistema_slice(INDEX_HTML)
 
 
 def _check_compact_clock_keeps_one_desktop_row(index_html: str, styles_css: str) -> None:
@@ -4486,7 +4490,7 @@ def test_probe_ui9_absent_row_rule_catches_a_five_column_span() -> None:
 
 def test_probe_ui9_bvl_summary_rule_catches_a_second_label() -> None:
     _check_bvl_summary_is_lateral_and_reuses_payload(INDEX_HTML, APP_JS)
-    marker = '<aside class="mesa-aside" aria-label="Cobertura y fuentes bloqueadas">'
+    marker = '<section class="mesa-layer mesa-coverage" aria-labelledby="mesa-coverage-titulo">'
     assert marker in INDEX_HTML
     corrupted = INDEX_HTML.replace(marker, f"{marker}<p>Registro BVL</p>", 1)
     with pytest.raises(AssertionError):
@@ -4680,8 +4684,8 @@ def test_ui13_keeps_the_refresh_form_once_inside_sistema_and_makes_brand_the_sid
 
 
 def test_ui13_matrix_marks_preserve_mapping_and_row_density() -> None:
-    mesa = _board_slices(INDEX_HTML)["mesa"]
-    legend = re.search(r'<div id="mesa-universe-legend"[^>]*>(.*?)</div>', mesa, re.DOTALL)
+    sistema = _board_slices(INDEX_HTML)["sistema"]
+    legend = re.search(r'<div id="mesa-universe-legend"[^>]*>(.*?)</div>', sistema, re.DOTALL)
     assert legend and legend.group(1).count("Al día") == 1
     matrix_fn = _extract_js_function(APP_JS, "mesaMatrixStateMarkup")
     assert "mesa-matrix-state-${state}" in matrix_fn
@@ -4851,18 +4855,20 @@ def test_technical_keyboard_aria_and_submit_only_query_contract() -> None:
 
 def test_review_board_has_responsive_master_detail_with_two_semantic_groups() -> None:
     revisar = _board_slices(INDEX_HTML)["revisar"]
+    sistema = _board_slices(INDEX_HTML)["sistema"]
     for marker in (
+        'id="review-explore-panel"',
         'id="review-master-detail"',
         'id="review-master-list"',
         'id="candidate-inbox-panel"',
-        'id="alert-inbox-panel"',
         'id="review-detail-panel"',
         'id="review-detail"',
     ):
         assert marker in revisar
+    assert 'id="alert-inbox-panel"' in sistema
     assert "review-master-detail" in STYLES_CSS
     assert "grid-template-columns: 1fr;" in STYLES_CSS[STYLES_CSS.index(".review-master-detail") :]
-    assert "revisar: Object.freeze([loadCandidateInbox, loadAlertInbox])" in APP_JS
+    assert "revisar: Object.freeze([loadCandidateInbox, loadRevisarOverview])" in APP_JS
     assert 'api("/api/candidates?limit=50")' in APP_JS
     assert 'api("/api/alerts?limit=50")' in APP_JS
 
@@ -4994,7 +5000,7 @@ def test_technical_review_and_mesa_load_graphs_and_endpoints_are_unchanged() -> 
     _check_board_to_deferred_loads_table_covers_the_six_registered_boards(APP_JS)
     _check_no_new_capability_or_route_is_introduced_by_the_shell(APP_JS)
     assert "loadCandidateInbox" in _board_deferred_load_entry(APP_JS, "revisar")
-    assert "loadAlertInbox" in _board_deferred_load_entry(APP_JS, "revisar")
+    assert "loadRevisarOverview" in _board_deferred_load_entry(APP_JS, "revisar")
     assert "api(`/api/v1/market-comparison?" in APP_JS
 
 
@@ -5258,10 +5264,11 @@ def test_mesa_news_and_incidents_use_human_compact_rows_with_five_item_bound_and
     None
 ):
     mesa = _mesa_slice(INDEX_HTML)
+    sistema = _sistema_slice(INDEX_HTML)
     mesa_js = _read("app-mesa.js")
     for family in ("analytical", "institutional", "activity"):
         assert f'id="mesa-news-{family}-list"' in mesa
-    assert 'id="mesa-incidents-list"' in mesa
+    assert 'id="mesa-incidents-list"' in sistema
     for function_name in (
         "renderMesaAnalyticalNews",
         "renderMesaCazatiburonesNews",

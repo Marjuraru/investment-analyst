@@ -567,3 +567,407 @@ async function loadMesaUniverseCoverage() {
     if (sequence === mesaUniverseCoverageRequestSequence) body.setAttribute("aria-busy", "false");
   }
 }
+
+const MESA_INVESTOR_BATCH_SIZE = 10;
+const MESA_INVESTOR_MAX_UNIVERSE = 100;
+const mesaInvestorUiState = {
+  search: "",
+  assetClass: "all",
+  watchlist: "all",
+  verdict: "all",
+  sortBy: "name",
+  sortDir: "asc",
+  visibleLimit: MESA_INVESTOR_BATCH_SIZE,
+  expandedAssetIds: new Set(),
+  loadingAll: false,
+  cancelRequested: false,
+  requestSequence: 0,
+  controlsBound: false,
+};
+
+const MESA_VERDICT_LABELS = Object.freeze({
+  favorable: "Favorable",
+  neutral: "Neutral",
+  unfavorable: "Desfavorable",
+});
+
+const MESA_VALUE_STATE_LABELS = Object.freeze({
+  available: "Disponible",
+  missing: "Sin datos",
+  not_applicable: "No aplica",
+  not_configured: "Sin configurar",
+  not_supported: "No soportado",
+  insufficient_data: "Datos insuficientes",
+});
+
+function mesaCatalogEntries() {
+  return Object.values(marketAssets || {}).sort((a, b) => {
+    const byName = String(a.name || a.symbol || "").localeCompare(String(b.name || b.symbol || ""), LOCALE);
+    if (byName !== 0) return byName;
+    return String(a.asset_id).localeCompare(String(b.asset_id));
+  });
+}
+
+function mesaFilteredCatalogEntries() {
+  const query = mesaInvestorUiState.search.trim().toLowerCase();
+  const knownAt = byId("report-known-at")?.value.trim() || "";
+  return mesaCatalogEntries().filter((entry) => {
+    if (mesaInvestorUiState.assetClass !== "all" && entry.assetClass !== mesaInvestorUiState.assetClass) {
+      return false;
+    }
+    if (mesaInvestorUiState.watchlist === "watchlist" && !entry.inWatchlist) return false;
+    if (mesaInvestorUiState.watchlist === "favorite" && !entry.isFavorite) return false;
+    if (query) {
+      const hay = `${entry.symbol} ${entry.name} ${entry.asset_id}`.toLowerCase();
+      if (!hay.includes(query)) return false;
+    }
+    if (mesaInvestorUiState.verdict !== "all") {
+      const ov = getCachedInvestorOverviewAsset(entry.asset_id, knownAt);
+      const verdict = ov?.fundamental?.verdict || null;
+      if (mesaInvestorUiState.verdict === "applicable") {
+        if (!verdict) return false;
+      } else if (verdict !== mesaInvestorUiState.verdict) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
+function mesaMetricRawDecimal(ov, key) {
+  if (!ov) return null;
+  if (key === "close") return ov.market?.close?.state === "available" ? ov.market.close.value : null;
+  if (key === "change_1d") {
+    return ov.market?.change_1d?.state === "available" ? ov.market.change_1d.value : null;
+  }
+  if (key === "score") {
+    return ov.fundamental?.score?.state === "available" ? ov.fundamental.score.value : null;
+  }
+  if (key === "pe") {
+    return ov.valuation?.price_to_earnings?.state === "available"
+      ? ov.valuation.price_to_earnings.value
+      : null;
+  }
+  return null;
+}
+
+function mesaSortedEntries(entries) {
+  const knownAt = byId("report-known-at")?.value.trim() || "";
+  const { sortBy, sortDir } = mesaInvestorUiState;
+  const dir = sortDir === "desc" ? -1 : 1;
+  return [...entries].sort((a, b) => {
+    if (sortBy === "name") {
+      const cmp = String(a.symbol || a.name).localeCompare(String(b.symbol || b.name), LOCALE) * dir;
+      if (cmp !== 0) return cmp;
+      return String(a.asset_id).localeCompare(String(b.asset_id));
+    }
+    const ovA = getCachedInvestorOverviewAsset(a.asset_id, knownAt);
+    const ovB = getCachedInvestorOverviewAsset(b.asset_id, knownAt);
+    const valA = mesaMetricRawDecimal(ovA, sortBy);
+    const valB = mesaMetricRawDecimal(ovB, sortBy);
+    if (valA === null && valB === null) {
+      return String(a.asset_id).localeCompare(String(b.asset_id));
+    }
+    if (valA === null) return 1;
+    if (valB === null) return -1;
+    const cmp = compareDecimalStrings(valA, valB) * dir;
+    if (cmp !== 0) return cmp;
+    return String(a.asset_id).localeCompare(String(b.asset_id));
+  });
+}
+
+function renderInvestorValueCell(val, options = {}) {
+  const wrap = createElement("div", "mesa-value-cell");
+  if (!val) {
+    wrap.append(createElement("span", "mesa-value-pending", "Pendiente"));
+    return wrap;
+  }
+  if (val.state === "available" && val.value !== null) {
+    const formatted = options.percent
+      ? decimalScalePercent(val.value, 2)
+      : `${val.value}${options.unitSuffix || ""}`;
+    wrap.append(createElement("strong", "mesa-value-main", formatted));
+    if (options.subtext) {
+      wrap.append(createElement("small", "mesa-value-sub", options.subtext));
+    } else if (val.reference_at) {
+      wrap.append(createElement("small", "mesa-value-sub", String(val.reference_at).slice(0, 10)));
+    }
+    return wrap;
+  }
+  const label = MESA_VALUE_STATE_LABELS[val.state] || val.state;
+  const reason = Array.isArray(val.reason_codes) && val.reason_codes.length ? val.reason_codes[0] : "";
+  wrap.append(createElement("span", `mesa-value-absent state-${val.state}`, label));
+  if (reason) wrap.append(createElement("small", "mesa-value-sub", reason));
+  return wrap;
+}
+
+function renderMesaInvestorTable() {
+  const body = byId("mesa-investor-table-body");
+  if (!body) return;
+  const knownAt = byId("report-known-at")?.value.trim() || "";
+  const filtered = mesaSortedEntries(mesaFilteredCatalogEntries());
+  const visible = filtered.slice(0, mesaInvestorUiState.visibleLimit);
+  const loadedCount = filtered.filter((e) => Boolean(getCachedInvestorOverviewAsset(e.asset_id, knownAt))).length;
+
+  const statusEl = byId("mesa-investor-status");
+  if (statusEl) {
+    statusEl.textContent = `Datos cargados ${loadedCount}/${filtered.length} · Mostrando ${visible.length} de ${filtered.length}`;
+  }
+  const winEl = byId("mesa-investor-window");
+  if (winEl && investorOverviewState.windows) {
+    const w = investorOverviewState.windows;
+    winEl.textContent = `Ventana mercado ${w.market_start}..${w.market_end} · fundamental anual ${w.fundamental_start}..${w.fundamental_end}`;
+  }
+  const showMoreBtn = byId("mesa-show-more-btn");
+  if (showMoreBtn) {
+    showMoreBtn.classList.toggle("hidden", visible.length >= filtered.length);
+  }
+  const loadAllBtn = byId("mesa-load-all-btn");
+  const cancelBtn = byId("mesa-cancel-load-btn");
+  if (loadAllBtn) loadAllBtn.disabled = mesaInvestorUiState.loadingAll || loadedCount >= Math.min(filtered.length, MESA_INVESTOR_MAX_UNIVERSE);
+  if (cancelBtn) cancelBtn.classList.toggle("hidden", !mesaInvestorUiState.loadingAll);
+
+  body.replaceChildren();
+  if (visible.length === 0) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 6;
+    td.textContent = "Ningún activo coincide con los filtros actuales.";
+    tr.append(td);
+    body.append(tr);
+    return;
+  }
+
+  for (const entry of visible) {
+    const ov = getCachedInvestorOverviewAsset(entry.asset_id, knownAt);
+    const tr = document.createElement("tr");
+    tr.dataset.assetId = entry.asset_id;
+
+    // 1. Activo / clase
+    const tdAsset = document.createElement("td");
+    const assetBtn = createContextualNavigationButton(
+      `${entry.symbol} · ${entry.name}`,
+      { board: "activo", assetId: entry.asset_id, subtab: "mercado" },
+      "link-button mesa-asset-link",
+    );
+    tdAsset.append(assetBtn, createElement("small", "mesa-value-sub", `${entry.assetClass} · ${entry.exchange}`));
+
+    // 2. Último cierre conocido
+    const tdClose = document.createElement("td");
+    tdClose.append(
+      renderInvestorValueCell(ov?.market?.close, {
+        unitSuffix: ov?.market?.currency ? ` ${ov.market.currency}` : "",
+      }),
+    );
+
+    // 3. Var 1d
+    const tdChange = document.createElement("td");
+    tdChange.append(renderInvestorValueCell(ov?.market?.change_1d, { percent: true }));
+
+    // 4. Diagnóstico fundamental
+    const tdScore = document.createElement("td");
+    if (ov?.fundamental?.score?.state === "available") {
+      const scoreVal = ov.fundamental.score.value;
+      const verdict = MESA_VERDICT_LABELS[ov.fundamental.verdict] || ov.fundamental.verdict || "";
+      const wrap = createElement("div", "mesa-score-cell");
+      wrap.append(createElement("strong", "", `${scoreVal}/100 ${verdict ? `· ${verdict}` : ""}`));
+      const bar = createElement("div", "mesa-score-bar");
+      bar.setAttribute("role", "progressbar");
+      bar.setAttribute("aria-valuemin", "0");
+      bar.setAttribute("aria-valuemax", "100");
+      bar.setAttribute("aria-valuenow", String(scoreVal));
+      const fill = createElement("span", "mesa-score-fill");
+      const clamped = Math.max(0, Math.min(100, Number(scoreVal) || 0));
+      fill.style.width = `${clamped}%`;
+      bar.append(fill);
+      wrap.append(bar);
+      tdScore.append(wrap);
+    } else {
+      tdScore.append(renderInvestorValueCell(ov?.fundamental?.score));
+    }
+
+    // 5. P/E anual
+    const tdPe = document.createElement("td");
+    const peSub = ov?.valuation?.annual_period_end ? String(ov.valuation.annual_period_end).slice(0, 10) : "";
+    tdPe.append(renderInvestorValueCell(ov?.valuation?.price_to_earnings, { subtext: peSub }));
+
+    // 6. Detalle / acciones
+    const tdActions = document.createElement("td");
+    const expandBtn = createElement(
+      "button",
+      "button secondary compact",
+      mesaInvestorUiState.expandedAssetIds.has(entry.asset_id) ? "Ocultar" : "Detalle",
+    );
+    expandBtn.type = "button";
+    expandBtn.addEventListener("click", () => {
+      if (mesaInvestorUiState.expandedAssetIds.has(entry.asset_id)) {
+        mesaInvestorUiState.expandedAssetIds.delete(entry.asset_id);
+      } else {
+        mesaInvestorUiState.expandedAssetIds.add(entry.asset_id);
+      }
+      renderMesaInvestorTable();
+    });
+    tdActions.append(expandBtn);
+
+    tr.append(tdAsset, tdClose, tdChange, tdScore, tdPe, tdActions);
+    body.append(tr);
+
+    if (mesaInvestorUiState.expandedAssetIds.has(entry.asset_id) && ov) {
+      const detailTr = document.createElement("tr");
+      detailTr.className = "mesa-investor-detail-row";
+      const detailTd = document.createElement("td");
+      detailTd.colSpan = 6;
+      const grid = createElement("div", "mesa-detail-grid");
+      grid.append(
+        createElement("span", "", `P/B: ${ov.valuation?.price_to_book?.value ?? (MESA_VALUE_STATE_LABELS[ov.valuation?.price_to_book?.state] || "—")}`),
+        createElement("span", "", `EV/EBITDA: ${ov.valuation?.enterprise_value_to_ebitda?.value ?? (MESA_VALUE_STATE_LABELS[ov.valuation?.enterprise_value_to_ebitda?.state] || "—")}`),
+        createElement("span", "", `Margen neto: ${ov.fundamental?.net_margin?.value ? decimalScalePercent(ov.fundamental.net_margin.value, 2) : (MESA_VALUE_STATE_LABELS[ov.fundamental?.net_margin?.state] || "—")}`),
+        createElement("span", "", `Pasivos/Activos: ${ov.fundamental?.liabilities_to_assets?.value ?? (MESA_VALUE_STATE_LABELS[ov.fundamental?.liabilities_to_assets?.state] || "—")}`),
+      );
+      if (Array.isArray(ov.limitations) && ov.limitations.length) {
+        grid.append(createElement("small", "mesa-detail-limitations", `Limitaciones: ${ov.limitations.join(" · ")}`));
+      }
+      const links = createElement("div", "mesa-detail-links");
+      links.append(
+        createContextualNavigationButton(
+          "Abrir activo",
+          { board: "activo", assetId: entry.asset_id, subtab: "mercado" },
+          "button primary compact",
+        ),
+        createContextualNavigationButton(
+          "Ver fuentes y método",
+          { board: "activo", assetId: entry.asset_id, subtab: entry.hasValuation ? "valoracion" : "mercado" },
+          "button secondary compact",
+        ),
+      );
+      detailTd.append(grid, links);
+      detailTr.append(detailTd);
+      body.append(detailTr);
+    }
+  }
+}
+
+function bindMesaInvestorControls() {
+  if (mesaInvestorUiState.controlsBound) return;
+  mesaInvestorUiState.controlsBound = true;
+  byId("mesa-search")?.addEventListener("input", (e) => {
+    mesaInvestorUiState.search = e.target.value;
+    mesaInvestorUiState.visibleLimit = MESA_INVESTOR_BATCH_SIZE;
+    renderMesaInvestorTable();
+  });
+  byId("mesa-filter-class")?.addEventListener("change", (e) => {
+    mesaInvestorUiState.assetClass = e.target.value;
+    mesaInvestorUiState.visibleLimit = MESA_INVESTOR_BATCH_SIZE;
+    renderMesaInvestorTable();
+  });
+  byId("mesa-filter-watchlist")?.addEventListener("change", (e) => {
+    mesaInvestorUiState.watchlist = e.target.value;
+    mesaInvestorUiState.visibleLimit = MESA_INVESTOR_BATCH_SIZE;
+    renderMesaInvestorTable();
+  });
+  byId("mesa-filter-verdict")?.addEventListener("change", (e) => {
+    mesaInvestorUiState.verdict = e.target.value;
+    mesaInvestorUiState.visibleLimit = MESA_INVESTOR_BATCH_SIZE;
+    renderMesaInvestorTable();
+  });
+  for (const btn of document.querySelectorAll(".mesa-sort-btn")) {
+    btn.addEventListener("click", () => {
+      const col = btn.dataset.mesaSort;
+      if (mesaInvestorUiState.sortBy === col) {
+        mesaInvestorUiState.sortDir = mesaInvestorUiState.sortDir === "asc" ? "desc" : "asc";
+      } else {
+        mesaInvestorUiState.sortBy = col;
+        mesaInvestorUiState.sortDir = "asc";
+      }
+      renderMesaInvestorTable();
+    });
+  }
+  byId("mesa-show-more-btn")?.addEventListener("click", async () => {
+    mesaInvestorUiState.visibleLimit += MESA_INVESTOR_BATCH_SIZE;
+    renderMesaInvestorTable();
+    await loadMesaInvestorVisibleBatch();
+  });
+  byId("mesa-load-all-btn")?.addEventListener("click", () => {
+    void loadMesaInvestorSelectedUniverse();
+  });
+  byId("mesa-cancel-load-btn")?.addEventListener("click", () => {
+    mesaInvestorUiState.cancelRequested = true;
+  });
+}
+
+async function loadMesaInvestorVisibleBatch() {
+  const knownAt = byId("report-known-at")?.value.trim() || "";
+  if (!knownAt) return;
+  const seq = ++mesaInvestorUiState.requestSequence;
+  const visible = mesaSortedEntries(mesaFilteredCatalogEntries())
+    .slice(0, mesaInvestorUiState.visibleLimit)
+    .map((e) => e.asset_id);
+  const missing = visible.filter((id) => !getCachedInvestorOverviewAsset(id, knownAt));
+  if (missing.length === 0) {
+    renderMesaInvestorTable();
+    return;
+  }
+  for (let i = 0; i < missing.length; i += MESA_INVESTOR_BATCH_SIZE) {
+    if (seq !== mesaInvestorUiState.requestSequence) return;
+    await fetchInvestorOverviewBatch(missing.slice(i, i + MESA_INVESTOR_BATCH_SIZE), knownAt);
+    if (seq !== mesaInvestorUiState.requestSequence) return;
+    renderMesaInvestorTable();
+  }
+}
+
+async function loadMesaInvestorSelectedUniverse() {
+  const knownAt = byId("report-known-at")?.value.trim() || "";
+  if (!knownAt || mesaInvestorUiState.loadingAll) return;
+  mesaInvestorUiState.loadingAll = true;
+  mesaInvestorUiState.cancelRequested = false;
+  renderMesaInvestorTable();
+  try {
+    const targets = mesaFilteredCatalogEntries()
+      .slice(0, MESA_INVESTOR_MAX_UNIVERSE)
+      .map((e) => e.asset_id)
+      .filter((id) => !getCachedInvestorOverviewAsset(id, knownAt));
+    for (let i = 0; i < targets.length; i += MESA_INVESTOR_BATCH_SIZE) {
+      if (mesaInvestorUiState.cancelRequested) break;
+      await fetchInvestorOverviewBatch(targets.slice(i, i + MESA_INVESTOR_BATCH_SIZE), knownAt);
+      renderMesaInvestorTable();
+    }
+  } finally {
+    mesaInvestorUiState.loadingAll = false;
+    mesaInvestorUiState.cancelRequested = false;
+    renderMesaInvestorTable();
+  }
+}
+
+async function loadMesaInvestorOverview() {
+  bindMesaInvestorControls();
+  renderMesaInvestorTable();
+  await loadMesaInvestorVisibleBatch();
+}
+
+function renderActivoCompactHeader(ov) {
+  const container = byId("asset-compact-header");
+  if (!container || !ov) return;
+  container.replaceChildren();
+  const grid = createElement("div", "asset-compact-grid");
+  const marketCard = createElement("div", "asset-compact-domain");
+  marketCard.append(
+    createElement("small", "", "Último cierre conocido"),
+    renderInvestorValueCell(ov.market?.close, { unitSuffix: ov.market?.currency ? ` ${ov.market.currency}` : "" }),
+  );
+  const fundCard = createElement("div", "asset-compact-domain");
+  fundCard.append(
+    createElement("small", "", "Diagnóstico fundamental"),
+    ov.fundamental?.score?.state === "available"
+      ? createElement("strong", "", `${ov.fundamental.score.value}/100 · ${MESA_VERDICT_LABELS[ov.fundamental.verdict] || ov.fundamental.verdict || ""}`)
+      : renderInvestorValueCell(ov.fundamental?.score),
+  );
+  const valCard = createElement("div", "asset-compact-domain");
+  valCard.append(
+    createElement("small", "", "P/E anual"),
+    renderInvestorValueCell(ov.valuation?.price_to_earnings, {
+      subtext: ov.valuation?.annual_period_end ? String(ov.valuation.annual_period_end).slice(0, 10) : "",
+    }),
+  );
+  grid.append(marketCard, fundCard, valCard);
+  container.append(grid);
+}

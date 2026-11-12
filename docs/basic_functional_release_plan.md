@@ -8,6 +8,16 @@
 > interfaz, lectura, limpieza y entrega; no declara cobertura fundamental nueva ni cierra la ruta.
 > La adopción operacional de `FUNDAMENTALS-COVERAGE-OPERATIONS`/#373 se registra abajo y no cambia
 > el estado `PLANNED` de la fila.
+>
+> `INVESTOR-WORKFLOW-UX`/#440 (`ADVANCES`, sin cierre) reorganiza la interfaz local alrededor del
+> flujo del inversor conservando los seis tableros (`sistema` al final) y añade el endpoint
+> `GET /api/v1/investor-overview` (`investor-overview-v1`, lotes `<=10`, `READ_ONLY`, PIT
+> `available_at <= known_at`, `Decimal` exacto). Mesa carga lotes cancelables con filtros y
+> ordenación decimal por cadena (nulos al final); Activo aplica limpieza síncrona previa al primer
+> `await`, `AbortController` y despacho por subpestaña activa sin fan-out, además de encabezado
+> compacto y gráfico de márgenes de 4 años; Revisar incorpora «Explorar valores» con filtros AND
+> decimales; cobertura detallada, alertas operativas y paneles ML/PIT se consolidan en
+> `#board-sistema`. La fila `PREDICTIVE-RESEARCH` permanece `NEXT` y V1 sigue **NO ACEPTADA**.
 
 
 > `FUNDAMENTALS-SEC-PROVENANCE`/#365 (`ADVANCES`, sin cierre) integra la evidencia local de

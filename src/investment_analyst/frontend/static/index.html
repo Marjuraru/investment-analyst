@@ -156,139 +156,77 @@
               </div>
                   </section>
 
-                  <section class="mesa-layer mesa-universe" aria-labelledby="mesa-universe-titulo">
-              <div class="section-intro">
-                <div>
-                  <p class="eyebrow">UNIVERSO</p>
-                  <h3 id="mesa-universe-titulo">Cobertura consultada</h3>
+                  <section id="mesa-investor-section" class="mesa-layer mesa-universe" aria-labelledby="mesa-investor-titulo">
+                    <div class="section-intro">
+                      <div>
+                        <p class="eyebrow">MESA DE ANÁLISIS</p>
+                        <h3 id="mesa-investor-titulo">Universo y lectura compacta</h3>
+                      </div>
+                    </div>
+                    <div class="mesa-investor-controls" aria-label="Filtros locales de Mesa">
+                      <label class="field" for="mesa-search">
+                        <span>Buscar activo</span>
+                        <input id="mesa-search" type="search" autocomplete="off" placeholder="Ticker o nombre">
+                      </label>
+                      <label class="field" for="mesa-filter-class">
+                        <span>Clase</span>
+                        <select id="mesa-filter-class">
+                          <option value="all">Todas</option>
+                          <option value="equity">Acciones / ADR</option>
+                          <option value="etf">ETF</option>
+                          <option value="crypto">Cripto</option>
+                        </select>
+                      </label>
+                      <label class="field" for="mesa-filter-watchlist">
+                        <span>Seguimiento</span>
+                        <select id="mesa-filter-watchlist">
+                          <option value="all">Todo el catálogo</option>
+                          <option value="watchlist">Watchlist</option>
+                          <option value="favorite">Favoritos</option>
+                        </select>
+                      </label>
+                      <label class="field" for="mesa-filter-verdict">
+                        <span>Veredicto fundamental</span>
+                        <select id="mesa-filter-verdict">
+                          <option value="all">Todos</option>
+                          <option value="applicable">Sólo aplicables</option>
+                          <option value="favorable">Favorable</option>
+                          <option value="neutral">Neutral</option>
+                          <option value="unfavorable">Desfavorable</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div class="mesa-investor-toolbar">
+                      <p id="mesa-investor-status" class="collection-status" role="status" aria-live="polite">Catálogo listo; cargando lote visible…</p>
+                      <p id="mesa-investor-window" class="mesa-universe-window">—</p>
+                      <div class="mesa-investor-actions">
+                        <button id="mesa-load-all-btn" class="button secondary compact" type="button">Cargar datos del universo seleccionado</button>
+                        <button id="mesa-cancel-load-btn" class="button secondary compact hidden" type="button">Cancelar</button>
+                      </div>
+                    </div>
+                    <div class="universe-matrix-scroll">
+                      <table class="universe-matrix-table mesa-investor-table" id="mesa-investor-table" aria-describedby="mesa-investor-status mesa-investor-window">
+                        <caption class="visually-hidden">Resumen compacto por activo: último cierre conocido, variación, diagnóstico fundamental independiente y P/E anual</caption>
+                        <thead>
+                          <tr>
+                            <th scope="col"><button type="button" class="mesa-sort-btn" data-mesa-sort="name">Activo</button></th>
+                            <th scope="col"><button type="button" class="mesa-sort-btn" data-mesa-sort="close">Último cierre conocido</button></th>
+                            <th scope="col"><button type="button" class="mesa-sort-btn" data-mesa-sort="change_1d">Var. 1d</button></th>
+                            <th scope="col"><button type="button" class="mesa-sort-btn" data-mesa-sort="score">Diagnóstico fundamental</button></th>
+                            <th scope="col"><button type="button" class="mesa-sort-btn" data-mesa-sort="pe">P/E anual</button></th>
+                            <th scope="col">Detalle</th>
+                          </tr>
+                        </thead>
+                        <tbody id="mesa-investor-table-body">
+                          <tr><td colspan="6">Cargando catálogo…</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <div id="mesa-investor-pagination" class="collection-controls">
+                      <button id="mesa-show-more-btn" class="button secondary compact hidden" type="button">Mostrar más</button>
+                    </div>
+                  </section>
                 </div>
-              </div>
-              <p id="mesa-universe-window" class="mesa-universe-window">—</p>
-              <div class="universe-matrix-scroll">
-                <table
-                  class="universe-matrix-table"
-                  id="mesa-universe-table"
-                  aria-describedby="mesa-universe-legend mesa-universe-window"
-                >
-                  <caption class="visually-hidden">Cobertura del universo de activos por capacidad consultada</caption>
-                  <thead>
-                    <tr>
-                      <th scope="col">Activo</th>
-                      <th scope="col">Dominio</th>
-                      <th scope="col">Mercado</th>
-                      <th scope="col">Fund.</th>
-                      <th scope="col">Valor.</th>
-                      <th scope="col">Última evidencia</th>
-                    </tr>
-                  </thead>
-                  <tbody id="mesa-universe-table-body">
-                    <tr><td colspan="6">Cargando…</td></tr>
-                  </tbody>
-                </table>
-              </div>
-              <p id="mesa-universe-collection-status" class="collection-status" role="status" aria-live="polite">Sin consultar.</p>
-              <div id="mesa-universe-collection-controls" class="collection-controls"></div>
-              <div id="mesa-universe-legend" class="mesa-universe-legend" aria-label="Leyenda de estados de cobertura">
-                <span><span class="mesa-matrix-mark mesa-matrix-fresh" aria-hidden="true"></span>Al día</span>
-                <span><span class="mesa-matrix-mark mesa-matrix-overdue" aria-hidden="true"></span>Vencida</span>
-                <span><span class="mesa-matrix-mark mesa-matrix-missing" aria-hidden="true"></span>Sin evidencia</span>
-                <span><span class="mesa-matrix-mark mesa-matrix-blocked" aria-hidden="true"></span>Bloqueada</span>
-                <span><span class="mesa-matrix-mark mesa-matrix-not-applicable" aria-hidden="true"></span>No aplica</span>
-              </div>
-                  </section>
-                </div>
-
-                <aside class="mesa-aside" aria-label="Cobertura y fuentes bloqueadas">
-                  <section class="mesa-layer mesa-coverage" aria-labelledby="mesa-coverage-titulo">
-                    <div class="section-intro">
-                      <div>
-                        <h3 id="mesa-coverage-titulo">Cobertura del corte</h3>
-                      </div>
-                    </div>
-                    <div class="overview-grid" aria-label="Estado operativo">
-                      <article class="status-card">
-                        <div class="status-label">
-                          <span class="status-dot" aria-hidden="true"></span>
-                          Datos
-                        </div>
-                        <strong id="workspace-status">—</strong>
-                        <small id="workspace-counts">—</small>
-                      </article>
-                      <article class="status-card">
-                        <div class="status-label">
-                          <span class="status-dot" aria-hidden="true"></span>
-                          Ejecución completa
-                        </div>
-                        <strong id="run-status">—</strong>
-                        <small id="run-time">—</small>
-                      </article>
-                    </div>
-                    <dl class="mesa-trust-grid">
-                      <div>
-                        <dt>Trazabilidad</dt>
-                        <dd id="traceability-status">—</dd>
-                        <small id="known-at-status">
-                          <span
-                            class="absence-mark missing"
-                            role="status"
-                            aria-label="Sin evidencia: Sin ejecución completa registrada"
-                          >
-                            <span class="absence-mark-icon"></span>
-                            <span class="absence-mark-label">Sin evidencia</span>
-                            <span class="absence-mark-reason">· Sin ejecución completa registrada</span>
-                          </span>
-                        </small>
-                      </div>
-                    </dl>
-                  </section>
-
-                  <section class="mesa-layer mesa-blocked-sources" aria-labelledby="mesa-blocked-sources-titulo">
-                    <div class="section-intro">
-                      <div>
-                        <h3 id="mesa-blocked-sources-titulo">Fuentes bloqueadas</h3>
-                      </div>
-                    </div>
-                    <dl class="mesa-trust-grid">
-                      <div>
-                        <dt>Programación</dt>
-                        <dd id="schedule-status">—</dd>
-                        <small id="schedule-next">—</small>
-                      </div>
-                      <div>
-                        <dt>Candidatos (resumen operativo)</dt>
-                        <dd id="candidate-status">—</dd>
-                        <small id="candidate-latest">Modo silencioso</small>
-                      </div>
-                    </dl>
-                    <dl class="mesa-bvl-summary" aria-live="polite">
-                      <div><dt>Registro BVL</dt><dd id="mesa-bvl-applicable">— aplicables</dd></div>
-                      <div><dt>Evidencia presente</dt><dd id="mesa-bvl-present">—</dd></div>
-                      <div><dt>Sin evidencia</dt><dd id="mesa-bvl-missing">—</dd></div>
-                      <div><dt>No consultada</dt><dd id="mesa-bvl-not-queried">—</dd></div>
-                      <div><dt>Sin configurar</dt><dd id="mesa-bvl-not-configured">—</dd></div>
-                      <div><dt>No implementada</dt><dd id="mesa-bvl-not-implemented">—</dd></div>
-                      <div><dt>No aplica</dt><dd id="mesa-bvl-not-applicable">—</dd></div>
-                    </dl>
-                  </section>
-
-                  <section class="mesa-layer mesa-incidents" aria-labelledby="mesa-incidents-titulo">
-                    <div class="section-intro">
-                      <div>
-                        <h3 id="mesa-incidents-titulo">Incidencias</h3>
-                      </div>
-                    </div>
-                    <dl class="mesa-trust-grid">
-                      <div>
-                        <dt>Alertas (resumen operativo)</dt>
-                        <dd id="alert-status">—</dd>
-                        <small id="alert-latest">Modo silencioso</small>
-                      </div>
-                    </dl>
-                    <div id="mesa-incidents-list" class="alert-inbox" aria-live="polite" aria-busy="false">
-                      <p>Cargando…</p>
-                    </div>
-                  </section>
-                </aside>
               </div>
             </section>
           </div>
@@ -324,6 +262,9 @@
                   <ul id="market-asset-listbox" role="listbox" aria-labelledby="asset-selector-label" hidden></ul>
                 </div>
               </div>
+            </div>
+            <div id="asset-compact-header" class="asset-compact-header" aria-live="polite">
+              <p class="asset-compact-loading">Selecciona un activo para consultar su resumen.</p>
             </div>
             <div id="asset-subtabs" class="asset-subtabs" role="tablist" aria-label="Secciones del activo">
               <button type="button" class="asset-subtab" role="tab" aria-selected="true" aria-controls="mercado" data-asset-subtab="mercado">Mercado</button>
@@ -761,6 +702,14 @@
                   </details>
                 </section>
 
+                <section id="fundamental-margins-section" class="fundamental-margins-section" aria-labelledby="fundamental-margins-title">
+                  <div class="fundamental-margins-header">
+                    <h4 id="fundamental-margins-title">Márgenes anuales (bruto, operativo y neto)</h4>
+                    <small id="fundamental-margins-caption">Hasta cuatro ejercicios fiscales reales devueltos por la investigación.</small>
+                  </div>
+                  <div id="fundamental-margins-chart" class="fundamental-margins-chart" aria-live="polite"></div>
+                </section>
+
                 <div id="fundamental-research-grid" class="fundamental-research-grid"></div>
 
                 <details id="unavailable-metrics-disclosure" class="fundamental-research-disclosure hidden">
@@ -916,27 +865,30 @@
                     </div>
                   </details>
                 </fieldset>
-                <fieldset class="valuation-control-group valuation-control-group--history">
-                  <legend>Historia materializada</legend>
-                  <label class="field"><span>Historia desde</span><input id="valuation-history-start" type="date"></label>
-                  <label class="field"><span>Historia hasta</span><input id="valuation-history-end" type="date"></label>
-                  <label class="field valuation-history-metric"><span>Métrica histórica</span><select id="valuation-history-metric" disabled><option value="">Todas</option></select></label>
-                  <div class="valuation-control-actions">
-                    <button id="query-valuation-history" class="button secondary" type="button">Cargar historia</button>
-                    <button id="export-valuation-history-json" class="data-export-button" type="button" disabled>Exportar historia</button>
-                  </div>
-                </fieldset>
-                <fieldset class="valuation-control-group valuation-control-group--rule">
-                  <legend>Regla histórica explícita</legend>
-                  <label class="field"><span>Métrica de regla</span><input id="valuation-rule-metric" value="valuation.corporate.price_to_book"></label>
-                  <label class="field"><span>Operador</span><select id="valuation-rule-operator"><option value="at_or_below_empirical_percentile">Percentil igual o inferior</option><option value="at_or_above_empirical_percentile">Percentil igual o superior</option></select></label>
-                  <label class="field"><span>Umbral Decimal (0 a 1)</span><input id="valuation-rule-threshold" value="0.50" inputmode="decimal"></label>
-                  <label class="field"><span>Mínimo previo</span><input id="valuation-rule-minimum" type="number" min="3" max="250" value="3"></label>
-                  <div class="valuation-control-actions">
-                    <button id="query-valuation-history-rule" class="button secondary" type="button">Evaluar regla</button>
-                    <button id="export-valuation-history-rule-json" class="data-export-button" type="button" disabled>Exportar regla</button>
-                  </div>
-                </fieldset>
+                <details id="valuation-history-controls-disclosure" class="valuation-history-controls-disclosure">
+                  <summary>Historia materializada y regla histórica explícita</summary>
+                  <fieldset class="valuation-control-group valuation-control-group--history">
+                    <legend>Historia materializada</legend>
+                    <label class="field"><span>Historia desde</span><input id="valuation-history-start" type="date"></label>
+                    <label class="field"><span>Historia hasta</span><input id="valuation-history-end" type="date"></label>
+                    <label class="field valuation-history-metric"><span>Métrica histórica</span><select id="valuation-history-metric" disabled><option value="">Todas</option></select></label>
+                    <div class="valuation-control-actions">
+                      <button id="query-valuation-history" class="button secondary" type="button">Cargar historia</button>
+                      <button id="export-valuation-history-json" class="data-export-button" type="button" disabled>Exportar historia</button>
+                    </div>
+                  </fieldset>
+                  <fieldset class="valuation-control-group valuation-control-group--rule">
+                    <legend>Regla histórica explícita</legend>
+                    <label class="field"><span>Métrica de regla</span><input id="valuation-rule-metric" value="valuation.corporate.price_to_book"></label>
+                    <label class="field"><span>Operador</span><select id="valuation-rule-operator"><option value="at_or_below_empirical_percentile">Percentil igual o inferior</option><option value="at_or_above_empirical_percentile">Percentil igual o superior</option></select></label>
+                    <label class="field"><span>Umbral Decimal (0 a 1)</span><input id="valuation-rule-threshold" value="0.50" inputmode="decimal"></label>
+                    <label class="field"><span>Mínimo previo</span><input id="valuation-rule-minimum" type="number" min="3" max="250" value="3"></label>
+                    <div class="valuation-control-actions">
+                      <button id="query-valuation-history-rule" class="button secondary" type="button">Evaluar regla</button>
+                      <button id="export-valuation-history-rule-json" class="data-export-button" type="button" disabled>Exportar regla</button>
+                    </div>
+                  </fieldset>
+                </details>
               </div>
             </div>
 
@@ -1181,249 +1133,6 @@
               </details>
             </div>
           </section>
-          <details id="research-readiness-panel" class="patterns-section readiness-section">
-            <summary class="ml-research-summary">
-              <span>
-                <strong>Preparación PIT de datos</strong>
-                <small>Admisión explicable del experimento registrado; no es un predictor validado.</small>
-              </span>
-            </summary>
-            <div class="readiness-body">
-              <p id="readiness-context" class="chart-quote-context">
-                Selecciona un activo del catálogo para consultar su preparación point-in-time.
-              </p>
-              <p class="patterns-summary">
-                Esta lectura reconstruye la muestra con evidencia local disponible al corte y
-                muestra por qué cada decisión entra o no en la admisión. Para este experimento
-                sólo el perfil cripto spot USD es compatible; equities y ETF muestran ese motivo.
-              </p>
-              <div class="readiness-controls">
-                <label class="field">
-                  <span>Desde (UTC)</span>
-                  <input id="readiness-start" type="date">
-                </label>
-                <label class="field">
-                  <span>Hasta (UTC)</span>
-                  <input id="readiness-end" type="date">
-                </label>
-                <label class="field">
-                  <span>Corte conocido (UTC)</span>
-                  <input
-                    id="readiness-known-at"
-                    type="text"
-                    inputmode="text"
-                    autocomplete="off"
-                    spellcheck="false"
-                    placeholder="2026-11-04T19:51:37Z"
-                  >
-                </label>
-                <button id="readiness-submit" class="button primary" type="button">
-                  Consultar preparación
-                </button>
-                <button id="readiness-download" class="button" type="button" disabled>
-                  Descargar JSON
-                </button>
-              </div>
-              <p id="readiness-status" class="chart-status" role="status" aria-live="polite">
-                Sin consultar. Define rango y corte y pulsa «Consultar preparación».
-              </p>
-              <div id="readiness-results" class="patterns-results readiness-results hidden" aria-busy="false">
-                <p id="readiness-decision" class="badge neutral"></p>
-                <p id="readiness-range" class="patterns-summary"></p>
-                <p id="readiness-identity" class="patterns-technical"></p>
-                <div class="patterns-grid">
-                  <article class="patterns-card">
-                    <h3>Admisión y particiones</h3>
-                    <div id="readiness-counts"></div>
-                  </article>
-                  <article class="patterns-card">
-                    <h3>Pisos incumplidos</h3>
-                    <ul id="readiness-floors" class="patterns-limitations"></ul>
-                  </article>
-                </div>
-                <section aria-labelledby="readiness-columns-title">
-                  <h3 id="readiness-columns-title">Razones por columna de feature</h3>
-                  <div id="readiness-columns" class="readiness-columns"></div>
-                </section>
-                <ul id="readiness-limitations" class="patterns-limitations"></ul>
-                <details class="json-disclosure">
-                  <summary>Proyección JSON exacta recibida</summary>
-                  <pre id="readiness-json" tabindex="0"></pre>
-                </details>
-              </div>
-              <section aria-labelledby="feature-preview-title" class="readiness-section">
-                <h4 id="feature-preview-title">Inputs antes de la decisión</h4>
-                <p class="patterns-summary">
-                  Consulta sólo las features D-2 y D-1 disponibles al corte elegido. La decisión
-                  preregistrada es 12:00 UTC de la fecha. Disponibilidad de inputs; no mide
-                  suficiencia de muestra ni capacidad predictiva.
-                </p>
-                <div class="readiness-controls">
-                  <label class="field">
-                    <span>Fecha de decisión (UTC)</span>
-                    <input id="feature-preview-date" type="date">
-                  </label>
-                  <label class="field">
-                    <span>Corte de inputs (UTC)</span>
-                    <input
-                      id="feature-preview-known-at"
-                      type="text"
-                      inputmode="text"
-                      autocomplete="off"
-                      spellcheck="false"
-                      placeholder="2026-11-09T01:23:00Z"
-                    >
-                  </label>
-                  <button id="feature-preview-submit" class="button primary" type="button">
-                    Consultar inputs
-                  </button>
-                  <button id="feature-preview-download" class="button" type="button" disabled>
-                    Descargar JSON
-                  </button>
-                </div>
-                <p id="feature-preview-status" class="chart-status" role="status" aria-live="polite">
-                  Sin consultar. Define fecha y corte y pulsa «Consultar inputs».
-                </p>
-                <div
-                  id="feature-preview-results"
-                  class="patterns-results readiness-results hidden"
-                  aria-busy="false"
-                >
-                  <p id="feature-preview-decision" class="badge neutral"></p>
-                  <p id="feature-preview-summary" class="patterns-summary"></p>
-                  <p id="feature-preview-identity" class="patterns-technical"></p>
-                  <div id="feature-preview-columns" class="readiness-columns"></div>
-                  <section aria-labelledby="feature-preview-refs-title">
-                    <h4 id="feature-preview-refs-title">Cierres utilizados</h4>
-                    <div id="feature-preview-refs"></div>
-                  </section>
-                  <ul id="feature-preview-limitations" class="patterns-limitations"></ul>
-                  <details class="json-disclosure">
-                    <summary>Proyección JSON exacta recibida</summary>
-                    <pre id="feature-preview-json" tabindex="0"></pre>
-                  </details>
-                </div>
-              </section>
-            </div>
-          </details>
-          <details id="ml-research-panel" class="patterns-section ml-research-section">
-            <summary class="ml-research-summary">
-              <span>
-                <strong>Evaluación ML de investigación</strong>
-                <small>Resultado sellado y verificable; no es señal, recomendación ni promoción.</small>
-              </span>
-            </summary>
-            <div class="ml-research-body">
-              <p class="patterns-summary">
-                Investigación retrospectiva; disponibilidad histórica supuesta. Carga el
-                listado para descubrir los estudios sellados del activo, abre uno y contrasta
-                hasta dos condiciones. Esta vista verifica el artefacto y no reejecuta el
-                entrenamiento ni evalúa el holdout.
-              </p>
-              <section class="experiments-explorer" aria-labelledby="experiments-title">
-                <h3 id="experiments-title">Estudios descubribles</h3>
-                <div class="ml-research-controls">
-                  <label class="field">
-                    <span>Familia</span>
-                    <select id="experiments-family">
-                      <option value="all">Todas</option>
-                      <option value="baseline">Baseline técnico</option>
-                      <option value="funding">Incremento de funding</option>
-                      <option value="volatility">Variación futura</option>
-                    </select>
-                  </label>
-                  <button id="experiments-load" class="button primary" type="button">
-                    Cargar estudios
-                  </button>
-                  <button id="experiments-next" class="button" type="button" disabled>
-                    Siguiente página
-                  </button>
-                </div>
-                <p id="experiments-status" class="chart-status" role="status" aria-live="polite">
-                  Sin cargar. Pulsa «Cargar estudios» para consultar el activo seleccionado.
-                </p>
-                <p id="experiments-coverage" class="patterns-coverage"></p>
-                <ul id="experiments-list" class="experiments-list"></ul>
-                <div id="experiments-warnings" class="experiments-warnings"></div>
-                <div id="experiments-detail" class="experiments-detail hidden">
-                  <h4 id="experiments-detail-title">Detalle verificado</h4>
-                  <p id="experiments-detail-decision" class="badge neutral"></p>
-                  <p id="experiments-detail-context" class="patterns-summary"></p>
-                  <p id="experiments-detail-reading" class="patterns-coverage"></p>
-                  <div id="experiments-detail-blocks" class="patterns-grid"></div>
-                  <ul id="experiments-detail-limitations" class="patterns-limitations"></ul>
-                  <details class="json-disclosure">
-                    <summary>Protocolo, folds, calibración y evidencia exacta</summary>
-                    <div id="experiments-detail-evidence"></div>
-                    <pre id="experiments-detail-json" tabindex="0"></pre>
-                  </details>
-                  <button id="experiments-download" class="button" type="button" disabled>
-                    Descargar reporte JSON
-                  </button>
-                </div>
-                <div id="experiments-comparison" class="experiments-comparison hidden">
-                  <h4>Contraste descriptivo</h4>
-                  <p
-                    id="experiments-comparison-status"
-                    class="chart-status"
-                    role="status"
-                    aria-live="polite"
-                  ></p>
-                  <div id="experiments-comparison-body"></div>
-                </div>
-              </section>
-              <p class="patterns-coverage">
-                Consulta manual por <code>run_id</code> (compatibilidad con el contrato
-                baseline-v1):
-              </p>
-              <form id="ml-research-form" class="patterns-controls ml-research-controls">
-                <label class="field">
-                  <span>run_id del recibo</span>
-                  <input
-                    id="ml-research-run-id"
-                    type="text"
-                    autocomplete="off"
-                    spellcheck="false"
-                    placeholder="00000000-0000-0000-0000-000000000000"
-                    required
-                  >
-                </label>
-                <button id="ml-research-submit" class="button primary" type="submit">
-                  Consultar evaluación
-                </button>
-              </form>
-              <p id="ml-research-status" class="chart-status" role="status" aria-live="polite">
-                Sin consultar. Pega el run_id del recibo de evaluación.
-              </p>
-              <div id="ml-research-results" class="patterns-results hidden" aria-busy="false">
-                <p id="ml-research-availability" class="patterns-coverage">
-                  Investigación retrospectiva; disponibilidad histórica supuesta.
-                </p>
-                <p id="ml-research-range" class="patterns-summary"></p>
-                <p id="ml-research-decision" class="badge neutral"></p>
-                <p id="ml-research-holdout" class="patterns-summary"></p>
-                <p id="ml-research-criterion" class="patterns-coverage"></p>
-                <div class="patterns-grid">
-                  <article class="patterns-card">
-                    <h3>Modelos y referencias</h3>
-                    <div id="ml-research-models"></div>
-                  </article>
-                  <article class="patterns-card">
-                    <h3>Comparaciones pareadas</h3>
-                    <div id="ml-research-comparisons"></div>
-                  </article>
-                </div>
-                <ul id="ml-research-limitations" class="patterns-limitations"></ul>
-                <details class="json-disclosure">
-                  <summary>Detalle por fold, calibración y evidencia</summary>
-                  <div id="ml-research-folds"></div>
-                  <p id="ml-research-evidence" class="patterns-technical"></p>
-                  <div id="ml-research-calibration"></div>
-                  <pre id="ml-research-json" tabindex="0"></pre>
-                </details>
-              </div>
-            </div>
-          </details>
           </div>
 
           <div class="board" id="board-revisar" data-board="revisar" tabindex="-1" hidden>
@@ -1433,6 +1142,35 @@
                 <h2 id="revisar-titulo">Candidatos y alertas</h2>
               </div>
             </div>
+
+            <section id="review-explore-panel" class="operation-panel review-explore-panel" aria-labelledby="review-explore-titulo">
+              <div class="panel-header">
+                <span>
+                  <strong id="review-explore-titulo">Explorar valores (filtros locales)</strong>
+                  <small id="review-explore-subtitle">Filtra localmente sobre datos ya cargados de investor-overview-v1; no crea reglas ni señales.</small>
+                </span>
+              </div>
+              <form id="review-explore-form" class="review-explore-controls">
+                <label class="field" for="review-filter-pe-max">
+                  <span>P/E máximo (ratio)</span>
+                  <input id="review-filter-pe-max" type="text" inputmode="decimal" placeholder="Ej. 25">
+                </label>
+                <label class="field" for="review-filter-margin-min">
+                  <span>Margen neto mínimo (%)</span>
+                  <input id="review-filter-margin-min" type="text" inputmode="decimal" placeholder="Ej. 10">
+                </label>
+                <label class="field" for="review-filter-leverage-max">
+                  <span>Pasivos/Activos máximo (ratio)</span>
+                  <input id="review-filter-leverage-max" type="text" inputmode="decimal" placeholder="Ej. 0.7">
+                </label>
+                <div class="review-explore-actions">
+                  <button id="review-filter-apply" class="button primary compact" type="submit">Aplicar filtros</button>
+                  <button id="review-filter-reset" class="button secondary compact" type="button">Restablecer</button>
+                </div>
+              </form>
+              <p id="review-filter-status" class="collection-status" role="status" aria-live="polite">Sin filtros aplicados.</p>
+              <div id="review-explore-results" class="review-explore-results"></div>
+            </section>
 
             <div id="review-master-detail" class="review-master-detail">
               <div id="review-master-list" class="review-master-list" aria-label="Bandejas separadas de Revisar">
@@ -1448,17 +1186,6 @@
                   </div>
                 </section>
 
-                <section id="alert-inbox-panel" class="operation-panel alert-inbox-panel">
-                  <div class="panel-header">
-                    <span>
-                      <strong>Bandeja operativa</strong>
-                      <small id="alert-inbox-summary">Evaluación determinista en modo silencioso</small>
-                    </span>
-                  </div>
-                  <div id="alert-inbox" class="alert-inbox" aria-live="polite">
-                    <p id="alert-inbox-empty">No hay alertas operativas registradas.</p>
-                  </div>
-                </section>
               </div>
               <aside id="review-detail-panel" class="review-detail-panel" aria-label="Detalle de Revisar" aria-live="polite">
                 <p id="review-detail-empty">Selecciona un elemento para revisar sus datos y acciones.</p>
@@ -1748,6 +1475,397 @@
               </form>
             </details>
 
+
+            <details id="sistema-incidencias" class="operation-panel">
+              <summary>
+                <span>
+                  <strong>Incidencias operativas</strong>
+                  <small>Alertas operativas e incidencias del servicio</small>
+                </span>
+                <span class="summary-action">Abrir</span>
+              </summary>
+              <div class="sistema-incidencias-body">
+                <section class="mesa-layer mesa-incidents" aria-labelledby="mesa-incidents-titulo">
+                  <div class="section-intro">
+                    <div>
+                      <h3 id="mesa-incidents-titulo">Incidencias</h3>
+                    </div>
+                  </div>
+                  <dl class="mesa-trust-grid">
+                    <div>
+                      <dt>Alertas (resumen operativo)</dt>
+                      <dd id="alert-status">—</dd>
+                      <small id="alert-latest">Modo silencioso</small>
+                    </div>
+                  </dl>
+                  <div id="mesa-incidents-list" class="alert-inbox" aria-live="polite" aria-busy="false">
+                    <p>Abre esta sección para consultar incidencias.</p>
+                  </div>
+                </section>
+                <section id="alert-inbox-panel" class="operation-panel alert-inbox-panel">
+                  <div class="panel-header">
+                    <span>
+                      <strong>Bandeja operativa</strong>
+                      <small id="alert-inbox-summary">Evaluación determinista en modo silencioso</small>
+                    </span>
+                  </div>
+                  <div id="alert-inbox" class="alert-inbox" aria-live="polite">
+                    <p id="alert-inbox-empty">No hay alertas operativas registradas.</p>
+                  </div>
+                </section>
+
+              </div>
+            </details>
+
+            <details id="sistema-verificacion" class="operation-panel">
+              <summary>
+                <span>
+                  <strong>Verificación y datos</strong>
+                  <small>Cobertura detallada, registro BVL, fuentes bloqueadas y trazabilidad</small>
+                </span>
+                <span class="summary-action">Abrir</span>
+              </summary>
+              <div class="sistema-verificacion-body">
+                <section class="mesa-layer mesa-coverage" aria-labelledby="mesa-coverage-titulo">
+                  <div class="section-intro">
+                    <div>
+                      <h3 id="mesa-coverage-titulo">Cobertura del corte</h3>
+                    </div>
+                  </div>
+                  <div class="overview-grid" aria-label="Estado operativo">
+                    <article class="status-card">
+                      <div class="status-label"><span class="status-dot" aria-hidden="true"></span>Datos</div>
+                      <strong id="workspace-status">—</strong>
+                      <small id="workspace-counts">—</small>
+                    </article>
+                    <article class="status-card">
+                      <div class="status-label"><span class="status-dot" aria-hidden="true"></span>Ejecución completa</div>
+                      <strong id="run-status">—</strong>
+                      <small id="run-time">—</small>
+                    </article>
+                  </div>
+                  <dl class="mesa-trust-grid">
+                    <div>
+                      <dt>Trazabilidad</dt>
+                      <dd id="traceability-status">—</dd>
+                      <small id="known-at-status"><span class="absence-mark missing" role="status" aria-label="Sin evidencia: Sin ejecución completa registrada"><span class="absence-mark-icon"></span><span class="absence-mark-label">Sin evidencia</span><span class="absence-mark-reason">· Sin ejecución completa registrada</span></span></small>
+                    </div>
+                  </dl>
+                </section>
+
+                <section class="mesa-layer mesa-blocked-sources" aria-labelledby="mesa-blocked-sources-titulo">
+                  <div class="section-intro">
+                    <div>
+                      <h3 id="mesa-blocked-sources-titulo">Fuentes bloqueadas</h3>
+                    </div>
+                  </div>
+                  <dl class="mesa-trust-grid">
+                    <div><dt>Programación</dt><dd id="schedule-status">—</dd><small id="schedule-next">—</small></div>
+                    <div><dt>Candidatos (resumen operativo)</dt><dd id="candidate-status">—</dd><small id="candidate-latest">Modo silencioso</small></div>
+                  </dl>
+                  <dl class="mesa-bvl-summary" aria-live="polite">
+                    <div><dt>Registro BVL</dt><dd id="mesa-bvl-applicable">— aplicables</dd></div>
+                    <div><dt>Evidencia presente</dt><dd id="mesa-bvl-present">—</dd></div>
+                    <div><dt>Sin evidencia</dt><dd id="mesa-bvl-missing">—</dd></div>
+                    <div><dt>No consultada</dt><dd id="mesa-bvl-not-queried">—</dd></div>
+                    <div><dt>Sin configurar</dt><dd id="mesa-bvl-not-configured">—</dd></div>
+                    <div><dt>No implementada</dt><dd id="mesa-bvl-not-implemented">—</dd></div>
+                    <div><dt>No aplica</dt><dd id="mesa-bvl-not-applicable">—</dd></div>
+                  </dl>
+                </section>
+
+                <section class="mesa-layer mesa-universe" aria-labelledby="mesa-universe-titulo">
+                  <div class="section-intro">
+                    <div>
+                      <p class="eyebrow">UNIVERSO</p>
+                      <h3 id="mesa-universe-titulo">Cobertura consultada</h3>
+                    </div>
+                  </div>
+                  <p id="mesa-universe-window" class="mesa-universe-window">—</p>
+                  <div class="universe-matrix-scroll">
+                    <table class="universe-matrix-table" id="mesa-universe-table" aria-describedby="mesa-universe-legend mesa-universe-window">
+                      <caption class="visually-hidden">Cobertura del universo de activos por capacidad consultada</caption>
+                      <thead>
+                        <tr>
+                          <th scope="col">Activo</th>
+                          <th scope="col">Dominio</th>
+                          <th scope="col">Mercado</th>
+                          <th scope="col">Fund.</th>
+                          <th scope="col">Valor.</th>
+                          <th scope="col">Última evidencia</th>
+                        </tr>
+                      </thead>
+                      <tbody id="mesa-universe-table-body"><tr><td colspan="6">Abre esta sección para consultar.</td></tr></tbody>
+                    </table>
+                  </div>
+                  <p id="mesa-universe-collection-status" class="collection-status" role="status" aria-live="polite">Sin consultar.</p>
+                  <div id="mesa-universe-collection-controls" class="collection-controls"></div>
+                  <div id="mesa-universe-legend" class="mesa-universe-legend" aria-label="Leyenda de estados de cobertura">
+                    <span><span class="mesa-matrix-mark mesa-matrix-fresh" aria-hidden="true"></span>Al día</span>
+                    <span><span class="mesa-matrix-mark mesa-matrix-overdue" aria-hidden="true"></span>Vencida</span>
+                    <span><span class="mesa-matrix-mark mesa-matrix-missing" aria-hidden="true"></span>Sin evidencia</span>
+                    <span><span class="mesa-matrix-mark mesa-matrix-blocked" aria-hidden="true"></span>Bloqueada</span>
+                    <span><span class="mesa-matrix-mark mesa-matrix-not-applicable" aria-hidden="true"></span>No aplica</span>
+                  </div>
+                </section>
+              </div>
+            </details>
+
+            <details id="sistema-investigacion" class="operation-panel">
+              <summary>
+                <span>
+                  <strong>Investigación experimental (no operativa)</strong>
+                  <small>Estudios STOP, preparación PIT, preview de features y reportes ML; no genera señales</small>
+                </span>
+                <span class="summary-action">Abrir</span>
+              </summary>
+              <div class="sistema-investigacion-body">
+          <details id="research-readiness-panel" class="patterns-section readiness-section">
+            <summary class="ml-research-summary">
+              <span>
+                <strong>Preparación PIT de datos</strong>
+                <small>Admisión explicable del experimento registrado; no es un predictor validado.</small>
+              </span>
+            </summary>
+            <div class="readiness-body">
+              <p id="readiness-context" class="chart-quote-context">
+                Selecciona un activo del catálogo para consultar su preparación point-in-time.
+              </p>
+              <p class="patterns-summary">
+                Esta lectura reconstruye la muestra con evidencia local disponible al corte y
+                muestra por qué cada decisión entra o no en la admisión. Para este experimento
+                sólo el perfil cripto spot USD es compatible; equities y ETF muestran ese motivo.
+              </p>
+              <div class="readiness-controls">
+                <label class="field">
+                  <span>Desde (UTC)</span>
+                  <input id="readiness-start" type="date">
+                </label>
+                <label class="field">
+                  <span>Hasta (UTC)</span>
+                  <input id="readiness-end" type="date">
+                </label>
+                <label class="field">
+                  <span>Corte conocido (UTC)</span>
+                  <input
+                    id="readiness-known-at"
+                    type="text"
+                    inputmode="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="2026-11-04T19:51:37Z"
+                  >
+                </label>
+                <button id="readiness-submit" class="button primary" type="button">
+                  Consultar preparación
+                </button>
+                <button id="readiness-download" class="button" type="button" disabled>
+                  Descargar JSON
+                </button>
+              </div>
+              <p id="readiness-status" class="chart-status" role="status" aria-live="polite">
+                Sin consultar. Define rango y corte y pulsa «Consultar preparación».
+              </p>
+              <div id="readiness-results" class="patterns-results readiness-results hidden" aria-busy="false">
+                <p id="readiness-decision" class="badge neutral"></p>
+                <p id="readiness-range" class="patterns-summary"></p>
+                <p id="readiness-identity" class="patterns-technical"></p>
+                <div class="patterns-grid">
+                  <article class="patterns-card">
+                    <h3>Admisión y particiones</h3>
+                    <div id="readiness-counts"></div>
+                  </article>
+                  <article class="patterns-card">
+                    <h3>Pisos incumplidos</h3>
+                    <ul id="readiness-floors" class="patterns-limitations"></ul>
+                  </article>
+                </div>
+                <section aria-labelledby="readiness-columns-title">
+                  <h3 id="readiness-columns-title">Razones por columna de feature</h3>
+                  <div id="readiness-columns" class="readiness-columns"></div>
+                </section>
+                <ul id="readiness-limitations" class="patterns-limitations"></ul>
+                <details class="json-disclosure">
+                  <summary>Proyección JSON exacta recibida</summary>
+                  <pre id="readiness-json" tabindex="0"></pre>
+                </details>
+              </div>
+              <section aria-labelledby="feature-preview-title" class="readiness-section">
+                <h4 id="feature-preview-title">Inputs antes de la decisión</h4>
+                <p class="patterns-summary">
+                  Consulta sólo las features D-2 y D-1 disponibles al corte elegido. La decisión
+                  preregistrada es 12:00 UTC de la fecha. Disponibilidad de inputs; no mide
+                  suficiencia de muestra ni capacidad predictiva.
+                </p>
+                <div class="readiness-controls">
+                  <label class="field">
+                    <span>Fecha de decisión (UTC)</span>
+                    <input id="feature-preview-date" type="date">
+                  </label>
+                  <label class="field">
+                    <span>Corte de inputs (UTC)</span>
+                    <input
+                      id="feature-preview-known-at"
+                      type="text"
+                      inputmode="text"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="2026-11-09T01:23:00Z"
+                    >
+                  </label>
+                  <button id="feature-preview-submit" class="button primary" type="button">
+                    Consultar inputs
+                  </button>
+                  <button id="feature-preview-download" class="button" type="button" disabled>
+                    Descargar JSON
+                  </button>
+                </div>
+                <p id="feature-preview-status" class="chart-status" role="status" aria-live="polite">
+                  Sin consultar. Define fecha y corte y pulsa «Consultar inputs».
+                </p>
+                <div
+                  id="feature-preview-results"
+                  class="patterns-results readiness-results hidden"
+                  aria-busy="false"
+                >
+                  <p id="feature-preview-decision" class="badge neutral"></p>
+                  <p id="feature-preview-summary" class="patterns-summary"></p>
+                  <p id="feature-preview-identity" class="patterns-technical"></p>
+                  <div id="feature-preview-columns" class="readiness-columns"></div>
+                  <section aria-labelledby="feature-preview-refs-title">
+                    <h4 id="feature-preview-refs-title">Cierres utilizados</h4>
+                    <div id="feature-preview-refs"></div>
+                  </section>
+                  <ul id="feature-preview-limitations" class="patterns-limitations"></ul>
+                  <details class="json-disclosure">
+                    <summary>Proyección JSON exacta recibida</summary>
+                    <pre id="feature-preview-json" tabindex="0"></pre>
+                  </details>
+                </div>
+              </section>
+            </div>
+          </details>
+          <details id="ml-research-panel" class="patterns-section ml-research-section">
+            <summary class="ml-research-summary">
+              <span>
+                <strong>Evaluación ML de investigación</strong>
+                <small>Resultado sellado y verificable; no es señal, recomendación ni promoción.</small>
+              </span>
+            </summary>
+            <div class="ml-research-body">
+              <p class="patterns-summary">
+                Investigación retrospectiva; disponibilidad histórica supuesta. Carga el
+                listado para descubrir los estudios sellados del activo, abre uno y contrasta
+                hasta dos condiciones. Esta vista verifica el artefacto y no reejecuta el
+                entrenamiento ni evalúa el holdout.
+              </p>
+              <section class="experiments-explorer" aria-labelledby="experiments-title">
+                <h3 id="experiments-title">Estudios descubribles</h3>
+                <div class="ml-research-controls">
+                  <label class="field">
+                    <span>Familia</span>
+                    <select id="experiments-family">
+                      <option value="all">Todas</option>
+                      <option value="baseline">Baseline técnico</option>
+                      <option value="funding">Incremento de funding</option>
+                      <option value="volatility">Variación futura</option>
+                    </select>
+                  </label>
+                  <button id="experiments-load" class="button primary" type="button">
+                    Cargar estudios
+                  </button>
+                  <button id="experiments-next" class="button" type="button" disabled>
+                    Siguiente página
+                  </button>
+                </div>
+                <p id="experiments-status" class="chart-status" role="status" aria-live="polite">
+                  Sin cargar. Pulsa «Cargar estudios» para consultar el activo seleccionado.
+                </p>
+                <p id="experiments-coverage" class="patterns-coverage"></p>
+                <ul id="experiments-list" class="experiments-list"></ul>
+                <div id="experiments-warnings" class="experiments-warnings"></div>
+                <div id="experiments-detail" class="experiments-detail hidden">
+                  <h4 id="experiments-detail-title">Detalle verificado</h4>
+                  <p id="experiments-detail-decision" class="badge neutral"></p>
+                  <p id="experiments-detail-context" class="patterns-summary"></p>
+                  <p id="experiments-detail-reading" class="patterns-coverage"></p>
+                  <div id="experiments-detail-blocks" class="patterns-grid"></div>
+                  <ul id="experiments-detail-limitations" class="patterns-limitations"></ul>
+                  <details class="json-disclosure">
+                    <summary>Protocolo, folds, calibración y evidencia exacta</summary>
+                    <div id="experiments-detail-evidence"></div>
+                    <pre id="experiments-detail-json" tabindex="0"></pre>
+                  </details>
+                  <button id="experiments-download" class="button" type="button" disabled>
+                    Descargar reporte JSON
+                  </button>
+                </div>
+                <div id="experiments-comparison" class="experiments-comparison hidden">
+                  <h4>Contraste descriptivo</h4>
+                  <p
+                    id="experiments-comparison-status"
+                    class="chart-status"
+                    role="status"
+                    aria-live="polite"
+                  ></p>
+                  <div id="experiments-comparison-body"></div>
+                </div>
+              </section>
+              <p class="patterns-coverage">
+                Consulta manual por <code>run_id</code> (compatibilidad con el contrato
+                baseline-v1):
+              </p>
+              <form id="ml-research-form" class="patterns-controls ml-research-controls">
+                <label class="field">
+                  <span>run_id del recibo</span>
+                  <input
+                    id="ml-research-run-id"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="00000000-0000-0000-0000-000000000000"
+                    required
+                  >
+                </label>
+                <button id="ml-research-submit" class="button primary" type="submit">
+                  Consultar evaluación
+                </button>
+              </form>
+              <p id="ml-research-status" class="chart-status" role="status" aria-live="polite">
+                Sin consultar. Pega el run_id del recibo de evaluación.
+              </p>
+              <div id="ml-research-results" class="patterns-results hidden" aria-busy="false">
+                <p id="ml-research-availability" class="patterns-coverage">
+                  Investigación retrospectiva; disponibilidad histórica supuesta.
+                </p>
+                <p id="ml-research-range" class="patterns-summary"></p>
+                <p id="ml-research-decision" class="badge neutral"></p>
+                <p id="ml-research-holdout" class="patterns-summary"></p>
+                <p id="ml-research-criterion" class="patterns-coverage"></p>
+                <div class="patterns-grid">
+                  <article class="patterns-card">
+                    <h3>Modelos y referencias</h3>
+                    <div id="ml-research-models"></div>
+                  </article>
+                  <article class="patterns-card">
+                    <h3>Comparaciones pareadas</h3>
+                    <div id="ml-research-comparisons"></div>
+                  </article>
+                </div>
+                <ul id="ml-research-limitations" class="patterns-limitations"></ul>
+                <details class="json-disclosure">
+                  <summary>Detalle por fold, calibración y evidencia</summary>
+                  <div id="ml-research-folds"></div>
+                  <p id="ml-research-evidence" class="patterns-technical"></p>
+                  <div id="ml-research-calibration"></div>
+                  <pre id="ml-research-json" tabindex="0"></pre>
+                </details>
+              </div>
+            </div>
+          </details>
+
+              </div>
+            </details>
           </section>
           </div>
         </main>

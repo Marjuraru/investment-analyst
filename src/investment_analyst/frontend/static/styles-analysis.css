@@ -2295,3 +2295,100 @@ pre {
     max-width: calc(100vw - 2rem);
   }
 }
+
+.asset-compact-header {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  margin: 0.75rem 0;
+}
+
+.asset-compact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
+  gap: 0.75rem;
+}
+
+.asset-compact-domain {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.asset-compact-domain small {
+  color: var(--muted);
+}
+
+.fundamental-margins-section {
+  margin: 1rem 0;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.margins-bars-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.margins-year-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.margins-year-bars {
+  position: relative;
+  display: flex;
+  gap: 0.35rem;
+  width: 100%;
+  height: 110px;
+  padding: 0 0.25rem;
+}
+
+.margins-zero-axis {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px dashed var(--line-strong);
+}
+
+.margins-bar-slot {
+  position: relative;
+  flex: 1;
+  height: 100%;
+}
+
+.margins-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: var(--accent);
+}
+
+.margins-bar.margin-operating {
+  background: var(--positive);
+}
+
+.margins-bar.margin-net {
+  background: var(--series-sma-20);
+}
+
+.margins-bar.is-negative {
+  background: var(--negative);
+}
+
+.margins-bar-gap {
+  position: absolute;
+  bottom: 4px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
