@@ -688,54 +688,16 @@ class ListedCompanyConsolidatedDiagnosticService:
             (DiagnosticMode.MARKET, request.market_as_of),
             (DiagnosticMode.FUNDAMENTAL, request.fundamental_as_of),
         ):
-            mode_results = [item for item in diagnostics if item.mode is mode]
-            current_version = _current_version(mode)
-            current = []
-            for diagnostic in mode_results:
-                if diagnostic.algorithm_version != current_version:
-                    ignored_versions += 1
-                    continue
-                if diagnostic.available_at > request.known_at:
-                    continue
-                if diagnostic.as_of > request.known_at:
-                    continue
-                candidate = _validate_diagnostic_common(
-                    diagnostic,
-                    request=request,
-                    metric_index=metric_index,
-                )
-                if (
-                    mode is DiagnosticMode.FUNDAMENTAL
-                    and candidate.fundamental_frequency is not request.fundamental_frequency
-                ):
-                    continue
-                current.append(candidate)
-
-            if not current:
-                sections[mode] = _not_found_section(
-                    mode,
-                    reason=(
-                        f"no eligible current-version {mode.value} diagnostic was available "
-                        "at known_at"
-                    ),
-                    examined=len(mode_results),
-                    eligible=0,
-                )
-                continue
-            selected_revisions, superseded = _select_revision(
-                current,
-                mode=mode,
+            section, ignored = self._select_section(
+                mode,
+                exact_date,
+                diagnostics,
+                request=request,
+                metric_index=metric_index,
                 resolver=semantic_resolver,
             )
-            sections[mode] = _choose_period(
-                selected_revisions,
-                exact_date=exact_date,
-                mode=mode,
-                request=request,
-                examined=len(mode_results),
-                eligible=len(current),
-                superseded=superseded,
-            )
+            sections[mode] = section
+            ignored_versions += ignored
 
         market = sections[DiagnosticMode.MARKET]
         fundamental = sections[DiagnosticMode.FUNDAMENTAL]
@@ -762,6 +724,104 @@ class ListedCompanyConsolidatedDiagnosticService:
         )
         self._verify_view(view, metric_index)
         return view
+
+    def query_fundamental_selection(
+        self,
+        request: _ConsolidatedRequest,
+    ) -> tuple[ConsolidatedDiagnosticSection, dict[UUID, MetricResult]]:
+        """Select only the fundamental section and the metrics it references.
+
+        Uses the same selection, validation and traceability checks as ``query`` but never
+        reads, hydrates or verifies market diagnostics or their metric results.
+        """
+        self._storage.require_open()
+        diagnostics = tuple(
+            self._storage.diagnostics.list(
+                asset_id=request.asset_id,
+                mode=DiagnosticMode.FUNDAMENTAL,
+            )
+        )
+        metric_index = self._hydrate_eligible_reference_index(diagnostics, request)
+        resolver = _SemanticTraceabilityResolver(
+            self._storage,
+            metric_index,
+            asset_id=request.asset_id,
+        )
+        section, _ = self._select_section(
+            DiagnosticMode.FUNDAMENTAL,
+            request.fundamental_as_of,
+            diagnostics,
+            request=request,
+            metric_index=metric_index,
+            resolver=resolver,
+        )
+        self._verify_sections((section,), request.known_at, metric_index)
+        return section, metric_index
+
+    @staticmethod
+    def _select_section(
+        mode: DiagnosticMode,
+        exact_date: date | None,
+        diagnostics: tuple[DiagnosticResult, ...],
+        *,
+        request: _ConsolidatedRequest,
+        metric_index: dict[UUID, MetricResult],
+        resolver: _SemanticTraceabilityResolver,
+    ) -> tuple[ConsolidatedDiagnosticSection, int]:
+        mode_results = [item for item in diagnostics if item.mode is mode]
+        current_version = _current_version(mode)
+        ignored_versions = 0
+        current = []
+        for diagnostic in mode_results:
+            if diagnostic.algorithm_version != current_version:
+                ignored_versions += 1
+                continue
+            if diagnostic.available_at > request.known_at:
+                continue
+            if diagnostic.as_of > request.known_at:
+                continue
+            candidate = _validate_diagnostic_common(
+                diagnostic,
+                request=request,
+                metric_index=metric_index,
+            )
+            if (
+                mode is DiagnosticMode.FUNDAMENTAL
+                and candidate.fundamental_frequency is not request.fundamental_frequency
+            ):
+                continue
+            current.append(candidate)
+
+        if not current:
+            return (
+                _not_found_section(
+                    mode,
+                    reason=(
+                        f"no eligible current-version {mode.value} diagnostic was available "
+                        "at known_at"
+                    ),
+                    examined=len(mode_results),
+                    eligible=0,
+                ),
+                ignored_versions,
+            )
+        selected_revisions, superseded = _select_revision(
+            current,
+            mode=mode,
+            resolver=resolver,
+        )
+        return (
+            _choose_period(
+                selected_revisions,
+                exact_date=exact_date,
+                mode=mode,
+                request=request,
+                examined=len(mode_results),
+                eligible=len(current),
+                superseded=superseded,
+            ),
+            ignored_versions,
+        )
 
     def _hydrate_eligible_reference_index(
         self,
@@ -798,13 +858,22 @@ class ListedCompanyConsolidatedDiagnosticService:
                 )
         return dict(hydrated)
 
-    @staticmethod
+    @classmethod
     def _verify_view(
+        cls,
         view: ConsolidatedDiagnosticView,
         metric_index: dict[UUID, MetricResult],
     ) -> None:
         """Verify the final compact view without rerunning either diagnostic engine."""
-        for section in (view.market, view.fundamental):
+        cls._verify_sections((view.market, view.fundamental), view.request.known_at, metric_index)
+
+    @staticmethod
+    def _verify_sections(
+        sections: tuple[ConsolidatedDiagnosticSection, ...],
+        known_at: datetime,
+        metric_index: dict[UUID, MetricResult],
+    ) -> None:
+        for section in sections:
             if section.status is ConsolidatedSectionStatus.NOT_FOUND:
                 continue
             diagnostic = section.diagnostic
@@ -812,7 +881,7 @@ class ListedCompanyConsolidatedDiagnosticService:
                 raise ConsolidatedDiagnosticTraceabilityError(
                     "available section lost its diagnostic"
                 )
-            if diagnostic.available_at > view.request.known_at:
+            if diagnostic.available_at > known_at:
                 raise ConsolidatedDiagnosticTraceabilityError(
                     "selected diagnostic was unavailable at known_at"
                 )

@@ -15,7 +15,10 @@ from investment_analyst.analytics.market.history_service import (
     summarize_market_history_v2,
 )
 from investment_analyst.analytics.market.history_v2 import HistoricalMarketDataV2Service
-from investment_analyst.analytics.valuation.models import CorporateValuationRequest
+from investment_analyst.analytics.valuation.models import (
+    CorporateValuationRequest,
+    CorporateValuationSnapshot,
+)
 from investment_analyst.analytics.valuation.service import CorporateValuationService
 from investment_analyst.application.analysis_capabilities import analysis_capabilities_for
 from investment_analyst.application.market_universe import (
@@ -329,35 +332,14 @@ class UniverseCoverageService:
     ) -> UniverseValuationCoverage:
         if asset.asset_class is not AssetClass.EQUITY:
             return _empty_valuation(CoverageCapability.NOT_APPLICABLE)
-        try:
-            market = resolve_alpaca_configuration(self._resolver, asset_id=asset.asset_id)
-            fundamental = resolve_sec_configuration(self._resolver, asset_id=asset.asset_id)
-        except (
-            ProviderAssetNotConfiguredError,
-            ProviderCapabilityMissingError,
-            ProviderNamespaceMissingError,
-        ):
-            return _empty_valuation(CoverageCapability.NOT_CONFIGURED)
-        snapshot = CorporateValuationService(
+        snapshot = self.valuation_snapshot(
+            asset,
+            request,
             storage,
-            capabilities=analysis_capabilities_for(asset),
-            market_source_id=market.source_id,
-            fundamental_source_id=fundamental.companyfacts_source_id,
-            price_currency=asset.quote_currency,
-            security_unit_factor=asset.security_unit_factor,
-            security_unit_basis=asset.security_unit_basis,
-            security_unit_basis_version=asset.security_unit_basis_version,
-            security_unit_market_adjustment=asset.security_unit_market_adjustment,
-            security_unit_basis_revisions=asset.security_unit_basis_revisions,
-        ).query(
-            CorporateValuationRequest(
-                asset_id=asset.asset_id,
-                known_at=request.known_at,
-                valuation_date=request.market_end,
-            ),
-            computed_at=request.known_at,
             selected_price=selected_price,
         )
+        if snapshot is None:
+            return _empty_valuation(CoverageCapability.NOT_CONFIGURED)
         reasons = tuple(
             sorted(
                 {
@@ -382,6 +364,60 @@ class UniverseCoverageService:
             reference_age_days=_age_days(request.known_at, reference_at),
             latest_input_age_days=_age_days(request.known_at, latest_input),
         )
+
+    def valuation_snapshot(
+        self,
+        asset: CatalogAsset,
+        request: UniverseCoverageRequest,
+        storage: LocalStorage,
+        *,
+        selected_price: MarketBar | None,
+    ) -> CorporateValuationSnapshot | None:
+        """Return the canonical latest-annual snapshot, or None when not configured."""
+        try:
+            market = resolve_alpaca_configuration(self._resolver, asset_id=asset.asset_id)
+            fundamental = resolve_sec_configuration(self._resolver, asset_id=asset.asset_id)
+        except (
+            ProviderAssetNotConfiguredError,
+            ProviderCapabilityMissingError,
+            ProviderNamespaceMissingError,
+        ):
+            return None
+        return CorporateValuationService(
+            storage,
+            capabilities=analysis_capabilities_for(asset),
+            market_source_id=market.source_id,
+            fundamental_source_id=fundamental.companyfacts_source_id,
+            price_currency=asset.quote_currency,
+            security_unit_factor=asset.security_unit_factor,
+            security_unit_basis=asset.security_unit_basis,
+            security_unit_basis_version=asset.security_unit_basis_version,
+            security_unit_market_adjustment=asset.security_unit_market_adjustment,
+            security_unit_basis_revisions=asset.security_unit_basis_revisions,
+        ).query(
+            CorporateValuationRequest(
+                asset_id=asset.asset_id,
+                known_at=request.known_at,
+                valuation_date=request.market_end,
+            ),
+            computed_at=request.known_at,
+            selected_price=selected_price,
+        )
+
+    def selected_market(
+        self,
+        descriptor: MarketAssetDescriptor | None,
+        request: UniverseCoverageRequest,
+        storage: LocalStorage,
+    ) -> tuple[UniverseMarketCoverage, MarketBar | None]:
+        """Return the canonical market coverage and its selected latest bar."""
+        start, end = inclusive_utc_date_bounds(request.market_start, request.market_end)
+        history = (
+            HistoricalMarketDataService(storage)
+            if getattr(storage.paths, "format_version", 1) == 1
+            else None
+        )
+        return self._market_view(descriptor, request, start, end, history, storage)
 
     def _bvl_registry_view(
         self,

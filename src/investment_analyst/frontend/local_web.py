@@ -193,6 +193,11 @@ from investment_analyst.application.crypto_spot_daily_models import (
     CryptoSpotDailyRefreshSummary,
 )
 from investment_analyst.application.facade import InvestmentAnalystApplication
+from investment_analyst.application.investor_overview_models import (
+    MAX_INVESTOR_OVERVIEW_BYTES,
+    InvestorOverviewRequest,
+    InvestorOverviewResult,
+)
 from investment_analyst.application.listed_market_refresh import (
     ListedMarketKnownAtTooEarlyError,
     ListedMarketRefreshError,
@@ -632,6 +637,15 @@ class _ApplicationOperations(Protocol):
         """Execute a point-in-time universe coverage query."""
         ...
 
+    def query_investor_overview(
+        self,
+        request: InvestorOverviewRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> InvestorOverviewResult:
+        """Execute one bounded point-in-time investor overview query."""
+        ...
+
     def query_cazatiburones_universe_activity(
         self,
         request: CazatiburonesUniverseActivityRequest,
@@ -965,6 +979,10 @@ class _WebOperations(Protocol):
 
     def universe_coverage(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
         """Return one cached read-only point-in-time universe coverage matrix."""
+        ...
+
+    def investor_overview(self, parameters: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+        """Return one bounded read-only point-in-time investor overview."""
         ...
 
     def cazatiburones_declared_activity(
@@ -1658,6 +1676,106 @@ class AaplLocalController:
         return self._signed_read_composite(
             tuple(queries),
             lambda: self._application.query_universe_coverage(
+                request,
+                location=StorageLocationRequest(workspace=self._workspace),
+            ),
+        )
+
+    def investor_overview_request(self, request: InvestorOverviewRequest) -> InvestorOverviewResult:
+        """Read a bounded overview without providers, writes or writer acquisition."""
+        descriptors = tuple(self._market_assets_by_id.get(item) for item in request.asset_ids)
+        market_sources = tuple(sorted({item.source_id for item in descriptors if item is not None}))
+        fundamental_assets = tuple(
+            sorted(
+                asset_id
+                for asset_id, item in zip(request.asset_ids, descriptors, strict=True)
+                if item is not None and item.fundamental_source_ids
+            )
+        )
+        fundamental_sources = tuple(
+            sorted(
+                {
+                    source_id
+                    for item in descriptors
+                    if item is not None
+                    for source_id in item.fundamental_source_ids
+                }
+            )
+        )
+        market_start, market_end = inclusive_utc_date_bounds(
+            request.market_start, request.market_end
+        )
+        fundamental_start, fundamental_end = inclusive_utc_date_bounds(
+            request.fundamental_start, request.market_end
+        )
+        endpoint = "/api/v1/investor-overview"
+        queries: list[ReadDependencyQuery] = []
+        if market_sources:
+            queries.extend(
+                (
+                    ReadDependencyQuery(
+                        family=ReadDependencyFamily.COVERAGE,
+                        endpoint=endpoint,
+                        asset_ids=request.asset_ids,
+                        source_ids=market_sources,
+                        known_at=request.known_at,
+                        start=market_start,
+                        end=market_end,
+                        selector="investor-overview;segment=market",
+                    ),
+                    ReadDependencyQuery(
+                        family=ReadDependencyFamily.METRICS,
+                        endpoint=endpoint,
+                        asset_ids=request.asset_ids,
+                        source_ids=market_sources,
+                        metric_keys=("market.history.simple_return_1d",),
+                        known_at=request.known_at,
+                        start=market_start,
+                        end=market_end,
+                        selector="investor-overview;segment=change-1d",
+                    ),
+                )
+            )
+        if fundamental_assets and fundamental_sources:
+            queries.extend(
+                (
+                    ReadDependencyQuery(
+                        family=ReadDependencyFamily.COVERAGE,
+                        endpoint=endpoint,
+                        asset_ids=fundamental_assets,
+                        source_ids=fundamental_sources,
+                        frequency="annual",
+                        known_at=request.known_at,
+                        start=fundamental_start,
+                        end=fundamental_end,
+                        selector="investor-overview;segment=fundamental",
+                    ),
+                    ReadDependencyQuery(
+                        family=ReadDependencyFamily.LISTED_COMPANY_REPORT,
+                        endpoint=endpoint,
+                        asset_ids=fundamental_assets,
+                        source_ids=fundamental_sources,
+                        frequency="annual",
+                        known_at=request.known_at,
+                        selector="investor-overview;segment=diagnostic",
+                    ),
+                )
+            )
+        if not queries:
+            queries.append(
+                ReadDependencyQuery(
+                    family=ReadDependencyFamily.COVERAGE,
+                    endpoint=endpoint,
+                    asset_ids=request.asset_ids,
+                    known_at=request.known_at,
+                    start=fundamental_start,
+                    end=fundamental_end,
+                    selector="investor-overview;segment=catalog-only",
+                )
+            )
+        return self._signed_read_composite(
+            tuple(queries),
+            lambda: self._application.query_investor_overview(
                 request,
                 location=StorageLocationRequest(workspace=self._workspace),
             ),
@@ -3094,6 +3212,27 @@ class AaplLocalWebApplication:
         )
         return self._controller.coverage_request(request).model_dump(mode="json")
 
+    def investor_overview(
+        self,
+        parameters: Mapping[str, tuple[str, ...]],
+    ) -> dict[str, object]:
+        """Validate and query one bounded read-only investor overview."""
+        if set(parameters) - {"known_at", "asset_id"}:
+            raise ValueError("investor overview query contains unsupported parameters")
+        known_at = _aware_datetime(_one_parameter(parameters, "known_at", required=True))
+        raw_ids = tuple(parameters.get("asset_id", ()))
+        if not raw_ids or any(not item.strip() for item in raw_ids):
+            raise ValueError("asset_id must contain between 1 and 10 non-empty values")
+        if len(raw_ids) != len(set(raw_ids)):
+            raise ValueError("asset_id values must be distinct")
+        request = InvestorOverviewRequest(known_at=known_at, asset_ids=tuple(sorted(raw_ids)))
+        payload = self._controller.investor_overview_request(request).model_dump(mode="json")
+        if len(json.dumps(payload, separators=(",", ":")).encode("utf-8")) > (
+            MAX_INVESTOR_OVERVIEW_BYTES
+        ):
+            raise ValueError("investor overview response exceeds the bounded payload size")
+        return payload
+
     def cazatiburones_universe_activity(
         self,
         parameters: Mapping[str, tuple[str, ...]],
@@ -3793,6 +3932,14 @@ class AaplLocalRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     HTTPStatus.OK,
                     server.application.universe_coverage(parameters),
+                )
+                return
+            if parsed.path == "/api/v1/investor-overview":
+                raw = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=11)
+                parameters = {key: tuple(values) for key, values in raw.items()}
+                self._send_json(
+                    HTTPStatus.OK,
+                    server.application.investor_overview(parameters),
                 )
                 return
             if parsed.path == "/api/v1/cazatiburones/universe-activity":
