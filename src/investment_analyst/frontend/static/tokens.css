@@ -19,9 +19,9 @@
  * Canvas convergence (UI-3): every surface, ink, rule and accent token below
  * is warm -- R >= G >= B on its own RGB channels, in both themes, with zero
  * exception -- matching the approved canvas. Two families are explicitly
- * exempt, by name, never by omission: the four semantic-state families
- * (--positive, --warning, --negative, --blocked-ink and their -soft/-ink
- * pairs) because their color encodes direction/state, not brand
+ * exempt, by name, never by omission: the five semantic-state families
+ * (--positive, --warning, --negative, --info, --blocked-ink and their
+ * -soft/-ink pairs) because their color encodes direction/state, not brand
  * temperature, exactly as the canvas itself leaves them; and the
  * categorical chart/series family (--series-sma-5/20/50, --series-revenue,
  * --series-net-income, --compare-series-1..5) because those exist
@@ -86,6 +86,9 @@
   --negative: #b33b45;
   --negative-soft: #fcebed;
   --negative-ink: #9e2934;
+  --info: #1d5fa7;
+  --info-soft: #e7f0fa;
+  --info-ink: #174c87;
   --neutral-soft: #efece5;
   --neutral-ink: #5f594e;
 
@@ -142,8 +145,8 @@
   --code-ink: #e6ded0;
   --code-border: #332c22;
 
-  /* Rail width: 158px in the approved canvas (was 212px). */
-  --sidebar-width: 158px;
+  /* Rail width: widened from 158px to 184px so sidebar labels fit without clipping. */
+  --sidebar-width: 184px;
 
   /* Canvas grid + density (UI-2 board shell): rem/clamp layout values, not
      colors, but declared under the same single-declaration/dual-theme
@@ -206,6 +209,9 @@
   --negative: #e47f88;
   --negative-soft: #45232a;
   --negative-ink: #f09aa2;
+  --info: #6aa9eb;
+  --info-soft: #1a2d44;
+  --info-ink: #9cc9f7;
   --neutral-soft: #2b2721;
   --neutral-ink: #c7c0b0;
 
@@ -248,7 +254,7 @@
   --code-ink: #e6ded0;
   --code-border: #332c22;
 
-  --sidebar-width: 158px;
+  --sidebar-width: 184px;
 
   --canvas-gutter: clamp(1.1rem, 3vw, 2.25rem);
   --canvas-row-gap: 0.75rem;

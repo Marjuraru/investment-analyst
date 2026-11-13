@@ -199,8 +199,7 @@ document.addEventListener("click", (event) => {
 });
 
 function comparisonPercent(value) {
-  const parsed = numericValue(value);
-  return parsed === null ? "—" : formatRangeChange(parsed);
+  return parseDecimalValueForDisplay(value) === null ? "—" : formatRangeChange(value);
 }
 
 function renderMarketComparison(payload) {
@@ -269,13 +268,17 @@ function renderMarketComparison(payload) {
         ? notApplicableMark
         : series.metrics.correlation_status === "unavailable"
           ? correlationUnavailableMark
-          : `<span class="figure">${comparisonPercent(series.metrics.correlation_to_benchmark)}</span>`;
+          : `<span class="figure" title="Correlación exacta: ${series.metrics.correlation_to_benchmark ?? ""}">${comparisonPercent(series.metrics.correlation_to_benchmark)}</span>`;
+    const betaValue = series.metrics.beta_to_benchmark;
+    const betaDisplay = betaValue === null || betaValue === undefined
+      ? "No disponible"
+      : formatDecimalRatio(betaValue, 2);
     const beta =
       series.metrics.beta_status === "not_applicable"
         ? notApplicableMark
         : series.metrics.beta_status === "unavailable"
           ? betaUnavailableMark
-          : `<span class="figure">${series.metrics.beta_to_benchmark ?? "No disponible"}</span>`;
+          : `<span class="figure" title="Beta exacto: ${betaValue ?? ""}">${betaDisplay}</span>`;
     card.innerHTML = `<p class="eyebrow">${identity?.symbol || series.asset_id}</p><h3>${identity?.name || series.asset_id}</h3><dl><dt>Retorno total</dt><dd><span class="figure">${comparisonPercent(series.metrics.total_return)}</span></dd><dt>Drawdown máximo</dt><dd><span class="figure">${comparisonPercent(series.metrics.maximum_drawdown)}</span></dd><dt>Volatilidad diaria</dt><dd><span class="figure">${comparisonPercent(series.metrics.daily_volatility)}</span></dd><dt>Correlación</dt><dd>${correlation}</dd><dt>Beta</dt><dd>${beta}</dd></dl>`;
     const identityLink = createContextualNavigationButton(
       identity?.symbol || series.asset_id,
@@ -366,8 +369,11 @@ function prepareDailyPatternsRange() {
 }
 
 function dailyPatternsFigure(value) {
-  const figure = createElement("span", "figure", formatNumber(value, { maximumFractionDigits: 6 }));
-  figure.title = String(value);
+  const text = parseDecimalValueForDisplay(value) !== null
+    ? formatDecimalRatio(value, 6, { trimTrailingZeros: true })
+    : formatNumber(value, { maximumFractionDigits: 6 });
+  const figure = createElement("span", "figure", text);
+  figure.title = value === null || value === undefined ? "UNKNOWN" : String(value);
   return figure;
 }
 

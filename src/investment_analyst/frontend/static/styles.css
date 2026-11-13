@@ -158,9 +158,13 @@
     position: static;
     display: grid;
     width: 100%;
+    max-width: 100%;
+    min-width: 0;
     padding: 0.8rem 1rem;
-    grid-template-columns: auto 1fr;
+    grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
+    gap: 0.5rem;
+    overflow-x: clip;
   }
 
   .brand {
@@ -175,7 +179,10 @@
   .primary-nav {
     display: flex;
     flex-direction: row;
+    flex-wrap: wrap;
     justify-content: flex-end;
+    min-width: 0;
+    max-width: 100%;
     gap: 0.15rem;
     margin-top: 0;
   }
@@ -249,16 +256,22 @@
   .topbar-actions {
     width: 100%;
     justify-content: flex-end;
+    flex-wrap: wrap;
   }
 
   .market-clock-strip {
-    justify-content: space-between;
-    gap: 0.75rem;
-    padding-top: 0.45rem;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 0.55rem 0.75rem;
+    padding-top: 0.35rem;
   }
 
   .market-clock-item small {
     display: none;
+  }
+
+  .exact-detail-list {
+    grid-template-columns: 1fr;
   }
 
   main {

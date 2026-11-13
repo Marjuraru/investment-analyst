@@ -19,11 +19,18 @@ queda disponible para las lecturas documentales existentes sin mezclarla con fun
   `assetPreferencesSnapshot`, y carga secuencialmente lotes de `<=10` activos (cancelable al
   cambiar filtros o corte, tope `100` activos y `2 MiB` en memoria) con filtros locales por
   búsqueda, clase, watchlist y estado de diagnóstico, ordenación decimal por cadena con nulos
-  siempre al final y desempate estable por `assetId`, fila expandible de detalle y botón
-  «Reintentar» tras error o cancelación. Los motivos de ausencia point-in-time se muestran en
-  español junto al corte efectivo (`no_bar_in_window` → «Sin barras elegibles para este
-  corte/ventana»; `no_annual_diagnostic_at_known_at` → «Sin diagnóstico anual disponible al corte»).
-  Una fila fallida o cancelada nunca conserva la etiqueta «Pendiente».
+  siempre al final y desempate estable por `assetId`, fila expandible de detalle y banner único de
+  estado parcial (`#mesa-investor-banner`). Ante un fallo operativo (`HTTP 503` o error de red), la
+  secuencia detiene los lotes restantes sin auto-reintento infinito, conserva las filas ya cargadas,
+  marca el lote fallido como «Error» y el resto sin consultar como «Carga pausada», anuncia
+  «No se pudo completar la consulta local. X cargados, Y sin consultar» y ofrece «Reintentar
+  pendientes» (que reconsulta sólo los faltantes en lotes `<=10` con bloqueo de reentrada) más
+  «Ver estado en Sistema»; la ausencia legítima (`missing`, `not_applicable`, `no_bar_in_window`)
+  nunca dispara reintentos. Las celdas conservan etiquetas breves («Sin datos», «No aplica», «Otra
+  fecha» cuando la fecha de cierre difiere del corte) y exponen el motivo point-in-time completo en
+  español y el código técnico dentro del detalle y atributos accesibles (`no_bar_in_window` → «Sin
+  barras elegibles para este corte/ventana»; `no_annual_diagnostic_at_known_at` → «Sin diagnóstico
+  anual disponible al corte»; más los códigos de valoración y fallback «Detalle no disponible»).
 - **Activo (`#board-activo`)**: al cambiar activo, corte, rango o frecuencia ejecuta limpieza
   síncrona inmediata (`clearActiveAssetContextSync`) antes del primer `await` (incluyendo
   `resetMarketSnapshot`, totales de cabecera, exports y avisos vacíos) y aborta peticiones en
@@ -32,19 +39,23 @@ queda disponible para las lecturas documentales existentes sin mezclarla con fun
   activa mediante `loadActivoCurrentSubtab()` validando `presentation.hasFundamentals` para
   `fundamentales`, `valoracion` y `analisis` sin fan-out ni carga anticipada de pestañas ocultas,
   conserva claves de subpestaña únicamente tras completar sin error ni cancelación, muestra el
-  encabezado compacto `#asset-compact-header` con corte efectivo, añade el gráfico comparativo de
-  márgenes de hasta 4 ejercicios (`#fundamental-margins-chart`) en Fundamentales y mantiene
-  compactados los controles de histórico de Valoración (`#valuation-history-controls-disclosure`).
+  encabezado compacto `#asset-compact-header` con corte efectivo y clase traducida, añade el gráfico
+  comparativo de márgenes de hasta 4 ejercicios (`#fundamental-margins-chart`) en Fundamentales y
+  mantiene compactados los controles de histórico de Valoración
+  (`#valuation-history-controls-disclosure`). Los indicadores neutros o descriptivos (drawdown,
+  volatilidad y distancias a SMA) usan tinta neutra en lugar de verde/rojo de ganancia.
 - **Corte explícito `known_at` y botón «Ahora» (`#known-at-now-btn`)**: la barra superior conserva
-  el corte vigente visible en todos los tableros e incluye la acción explícita «Ahora» para fijar
+  el corte vigente visible en todos los tableros, permite plegar los relojes secundarios de
+  mercado (`#market-clock-toggle`) e incluye la acción explícita «Ahora» para fijar
   `#report-known-at` a la hora UTC vigente e invalidar contexto y cachés; cambiar de activo jamás
   reemplaza ni avanza silenciosamente el corte explícito.
-- **Revisar (`#board-revisar`) y Sistema (`#board-sistema`)**: Revisar incorpora `"Explorar
-  valores"` (`#review-explore-panel`) con filtros AND decimales (P/E máximo positivo excluyendo
-  `<= 0`, margen neto mínimo `%`, pasivos/activos máximo). La cobertura detallada, registro BVL,
-  fuentes bloqueadas, incidencias y alertas operativas viven en `#sistema-verificacion` y
-  `#sistema-incidencias`; los paneles experimentales ML/PIT permanecen en `#sistema-investigacion`
-  sin carga automática.
+- **Revisar (`#board-revisar`) y Sistema (`#board-sistema`)**: Revisar separa sus dos modos de
+  trabajo mediante subpestañas (`#revisar-tab-candidates` y `#revisar-tab-explore` para
+  `#review-explore-panel`), aplicando filtros AND decimales (P/E máximo positivo excluyendo `<= 0`,
+  margen neto mínimo `%`, pasivos/activos máximo sin símbolo `×` y comparación normalizada de
+  timestamps `sameIsoTimestamp`). La cobertura detallada, registro BVL, fuentes bloqueadas,
+  incidencias y alertas operativas viven en `#sistema-verificacion` y `#sistema-incidencias`; los
+  paneles experimentales ML/PIT permanecen en `#sistema-investigacion` sin carga automática.
 
 ## Eficiencia y reapertura (`DATA-CHASSIS-47`)
 
@@ -316,11 +327,13 @@ el mismo corte global, sin cambiar el activo global.
 ## Mesa: composición y cobertura (`UI-9`)
 
 El rail global ya ocupa la primera columna de la aplicación; `mesa` no lo duplica. Dentro del
-tablero, una columna principal fluida contiene **Novedades de las bandejas** y **Universo**, y un
-`aside` fijo de 340 px contiene, en este orden, **Cobertura del corte**, **Fuentes bloqueadas** e
-**Incidencias**. En pantalla estrecha el tablero colapsa a una columna antes de perder legibilidad;
-el único desplazamiento horizontal propio es el de la matriz. El corte `known_at` y el reloj siguen
-en la cabecera compartida y no se crea un score, ranking ni veredicto que mezcle los dominios.
+tablero, una columna principal a ancho completo (`minmax(0, 1fr)`) presenta primero
+**Universo y lectura compacta** (`#mesa-investor-section`) seguido de **Novedades de las bandejas**
+en un bloque colapsable por defecto (`#mesa-news-disclosure`), mientras **Cobertura del corte**,
+**Fuentes bloqueadas**, **Registro BVL**, **Universo** e **Incidencias** residen en `#board-sistema`.
+Las tablas conservan encabezados compactos y son el único desplazamiento horizontal propio. El corte
+`known_at` y el reloj siguen en la cabecera compartida y no se crea un score, ranking ni veredicto
+que mezcle los dominios.
 
 Novedades conserva tres bloques de procedencia independiente -- institucional 13F, actividad
 declarada y reglas analíticas -- sin total, orden ni score común. Reglas analíticas sigue leyendo
@@ -543,14 +556,20 @@ presentan en español; se conservan nombres técnicos ampliamente usados como AA
 SIP, SMA, JSON y point-in-time cuando aportan precisión.
 
 Los valores financieros exactos no se modifican ni se vuelven a persistir. El navegador aplica
-redondeo únicamente para presentación:
+redondeo únicamente para presentación mediante formato decimal directo sobre cadenas exactas (sin
+aritmética `float` previa para precios, porcentajes, ratios, múltiplos o escalas), preservando el
+valor `Decimal` completo en `title`, `aria-label` o en el diálogo accesible `#exact-detail-dialog`:
 
-- puntuaciones independientes: hasta un decimal;
+- precios en USD >= 1: dos decimales; sub-dólar (`0 < x < 1`, p. ej. cripto): hasta 8 decimales sin
+  ceros finales superfluos (mínimo 2 decimales), y no-cero por debajo de `0.00000001` como
+  `<0.00000001`;
+- puntuaciones independientes: hasta un decimal (sin alterar ni desplazar el veredicto);
 - cobertura de evidencia: porcentaje con hasta un decimal;
-- retornos, volatilidad y ratios porcentuales: porcentaje con hasta dos decimales;
-- volumen relativo y pasivos sobre patrimonio: múltiplo con hasta dos decimales;
-- medias móviles en USD: dos decimales;
-- OHLC y VWAP diarios en USD: dos decimales;
+- retornos, volatilidad y ratios porcentuales: porcentaje con hasta dos decimales (valores no-cero
+  inferiores en magnitud a `0.01%` se presentan como `<0.01%` con signo, nunca como `0.00%`);
+- volumen relativo y P/E: múltiplo con `×` y hasta dos decimales; ratios adimensionales como
+  pasivos sobre activos: dos decimales sin `×`;
+- medias móviles, OHLC y VWAP diarios en USD: mismas reglas de precio decimal exacto;
 - hechos SEC en la ficha y el gráfico: miles de millones de USD con hasta un decimal;
 - importes fundamentales derivados: miles de millones de USD con hasta un decimal;
 - márgenes e intensidades fundamentales derivadas: porcentajes con hasta un decimal;

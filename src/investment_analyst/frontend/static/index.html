@@ -66,11 +66,13 @@
           </div>
           <!-- Compatibility marker only: id="lima-clock" is not rendered as a DOM element. -->
           <div
+            id="market-clock-strip"
             class="market-clock-strip"
+            data-clocks-collapsed="false"
             aria-label="Sesiones regulares de BVL y NYSE, con hora de Nueva York"
             aria-describedby="market-clock-note"
           >
-            <div class="market-clock-item">
+            <div class="market-clock-item market-clock-item--secondary">
               <span>Nueva York</span>
               <time id="new-york-clock" datetime="">--:--</time>
               <small id="new-york-clock-date">America/New_York</small>
@@ -81,7 +83,7 @@
                 <span id="bvl-session-dot" class="session-status-dot" aria-hidden="true"></span>
                 Calculando…
               </strong>
-              <small id="bvl-session-remaining">Horario regular America/Lima</small>
+              <small id="bvl-session-remaining" class="market-clock-item--secondary">Horario regular America/Lima</small>
             </div>
             <div class="market-clock-item market-clock-session">
               <span>NYSE</span>
@@ -89,8 +91,11 @@
                 <span id="nyse-session-dot" class="session-status-dot" aria-hidden="true"></span>
                 Calculando…
               </strong>
-              <small id="nyse-session-remaining">09:30–16:00 ET</small>
+              <small id="nyse-session-remaining" class="market-clock-item--secondary">09:30–16:00 ET</small>
             </div>
+            <button id="market-clock-toggle" class="market-clock-toggle" type="button" aria-expanded="true" title="Mostrar u ocultar detalles de horario">
+              Horarios
+            </button>
             <span id="market-clock-note" class="visually-hidden">
               BVL usa dos periodos regulares oficiales en America/Lima y sólo evalúa lunes a
               viernes; no evalúa feriados ni sesiones especiales. En particular, no evalúa feriados ni
@@ -123,47 +128,9 @@
 
           <div class="board" id="board-mesa" data-board="mesa" tabindex="-1">
             <section id="resumen" aria-labelledby="resumen-titulo">
-              <h2 id="resumen-titulo" class="visually-hidden">Mesa: cobertura y novedades</h2>
+              <h2 id="resumen-titulo" class="visually-hidden">Mesa: universo al corte y novedades</h2>
               <div class="mesa-layout">
                 <div class="mesa-main">
-                  <section class="mesa-layer mesa-news" aria-labelledby="mesa-news-titulo">
-              <div class="section-intro">
-                <div>
-                  <p class="eyebrow">NOVEDADES</p>
-                  <h3 id="mesa-news-titulo">Novedades de las bandejas</h3>
-                </div>
-              </div>
-              <div class="mesa-news-families">
-                <article class="mesa-news-family" id="mesa-news-analytical">
-                  <header class="mesa-news-family-header">
-                    <strong>Reglas analíticas</strong>
-                    <span id="mesa-news-analytical-count" class="mesa-news-count">—</span>
-                  </header>
-                  <div id="mesa-news-analytical-list" class="alert-inbox" aria-live="polite" aria-busy="false">
-                    <p>Cargando…</p>
-                  </div>
-                </article>
-                <article class="mesa-news-family" id="mesa-news-institutional">
-                  <header class="mesa-news-family-header">
-                    <strong>Institucional 13F</strong>
-                    <span id="mesa-news-institutional-count" class="mesa-news-count">—</span>
-                  </header>
-                  <div id="mesa-news-institutional-list" class="alert-inbox" aria-live="polite" aria-busy="false">
-                    <p>Cargando…</p>
-                  </div>
-                </article>
-                <article class="mesa-news-family" id="mesa-news-activity">
-                  <header class="mesa-news-family-header">
-                    <strong>Actividad declarada</strong>
-                    <span id="mesa-news-activity-count" class="mesa-news-count">—</span>
-                  </header>
-                  <div id="mesa-news-activity-list" class="alert-inbox" aria-live="polite" aria-busy="false">
-                    <p>Cargando…</p>
-                  </div>
-                </article>
-              </div>
-                  </section>
-
                   <section id="mesa-investor-section" class="mesa-layer mesa-universe" aria-labelledby="mesa-investor-titulo">
                     <div class="section-intro">
                       <div>
@@ -205,24 +172,36 @@
                       </label>
                     </div>
                     <div class="mesa-investor-toolbar">
-                      <p id="mesa-investor-status" class="collection-status" role="status" aria-live="polite">Catálogo listo; cargando lote visible…</p>
-                      <p id="mesa-investor-window" class="mesa-universe-window">—</p>
+                      <div class="mesa-cut-summary">
+                        <span id="mesa-investor-window" class="mesa-universe-window">—</span>
+                        <span id="mesa-investor-status" class="collection-status" role="status" aria-live="polite">Catálogo listo; cargando lote visible…</span>
+                      </div>
                       <div class="mesa-investor-actions">
                         <button id="mesa-load-all-btn" class="button secondary compact" type="button">Cargar datos del universo seleccionado</button>
                         <button id="mesa-cancel-load-btn" class="button secondary compact hidden" type="button">Cancelar</button>
-                        <button id="mesa-retry-load-btn" class="button secondary compact hidden" type="button">Reintentar</button>
+                        <button id="mesa-retry-load-btn" class="button secondary compact hidden" type="button">Reintentar pendientes</button>
                       </div>
                     </div>
-                    <div class="universe-matrix-scroll">
+                    <div id="mesa-investor-banner" class="mesa-investor-banner hidden" role="alert">
+                      <div class="mesa-investor-banner-copy">
+                        <strong id="mesa-investor-banner-text"></strong>
+                        <span id="mesa-investor-banner-detail" class="mesa-investor-banner-detail hidden"></span>
+                      </div>
+                      <div class="mesa-investor-banner-actions">
+                        <button id="mesa-banner-retry-btn" class="button secondary compact hidden" type="button">Reintentar pendientes</button>
+                        <button id="mesa-banner-system-btn" class="button secondary compact hidden" type="button">Ver estado en Sistema</button>
+                      </div>
+                    </div>
+                    <div class="universe-matrix-scroll mesa-table-scroll">
                       <table class="universe-matrix-table mesa-investor-table" id="mesa-investor-table" aria-describedby="mesa-investor-status mesa-investor-window">
                         <caption class="visually-hidden">Resumen compacto por activo: último cierre conocido, variación, diagnóstico fundamental independiente y P/E anual</caption>
                         <thead>
                           <tr>
                             <th scope="col"><button type="button" class="mesa-sort-btn" data-mesa-sort="name">Activo</button></th>
-                            <th scope="col"><button type="button" class="mesa-sort-btn" data-mesa-sort="close">Último cierre conocido</button></th>
-                            <th scope="col"><button type="button" class="mesa-sort-btn" data-mesa-sort="change_1d">Var. 1d</button></th>
-                            <th scope="col"><button type="button" class="mesa-sort-btn" data-mesa-sort="score">Diagnóstico fundamental</button></th>
-                            <th scope="col"><button type="button" class="mesa-sort-btn" data-mesa-sort="pe">P/E anual</button></th>
+                            <th scope="col" class="is-numeric"><button type="button" class="mesa-sort-btn" data-mesa-sort="close">Último cierre</button></th>
+                            <th scope="col" class="is-numeric"><button type="button" class="mesa-sort-btn" data-mesa-sort="change_1d">Var. 1d</button></th>
+                            <th scope="col" class="is-numeric"><button type="button" class="mesa-sort-btn" data-mesa-sort="score">Fund. anual</button></th>
+                            <th scope="col" class="is-numeric"><button type="button" class="mesa-sort-btn" data-mesa-sort="pe">P/E anual</button></th>
                             <th scope="col">Detalle</th>
                           </tr>
                         </thead>
@@ -234,6 +213,44 @@
                     <div id="mesa-investor-pagination" class="collection-controls">
                       <button id="mesa-show-more-btn" class="button secondary compact hidden" type="button">Mostrar más</button>
                     </div>
+                  </section>
+
+                  <section class="mesa-layer mesa-news" aria-labelledby="mesa-news-titulo">
+                    <details id="mesa-news-disclosure" class="mesa-news-disclosure">
+                      <summary>
+                        <span id="mesa-news-titulo">Novedades de las bandejas</span>
+                        <span class="mesa-news-disclosure-hint">Ver 3 bandejas independientes</span>
+                      </summary>
+                      <div class="mesa-news-families">
+                        <article class="mesa-news-family" id="mesa-news-analytical">
+                          <header class="mesa-news-family-header">
+                            <strong>Reglas analíticas</strong>
+                            <span id="mesa-news-analytical-count" class="mesa-news-count">—</span>
+                          </header>
+                          <div id="mesa-news-analytical-list" class="alert-inbox" aria-live="polite" aria-busy="false">
+                            <p>Cargando…</p>
+                          </div>
+                        </article>
+                        <article class="mesa-news-family" id="mesa-news-institutional">
+                          <header class="mesa-news-family-header">
+                            <strong>Institucional 13F</strong>
+                            <span id="mesa-news-institutional-count" class="mesa-news-count">—</span>
+                          </header>
+                          <div id="mesa-news-institutional-list" class="alert-inbox" aria-live="polite" aria-busy="false">
+                            <p>Cargando…</p>
+                          </div>
+                        </article>
+                        <article class="mesa-news-family" id="mesa-news-activity">
+                          <header class="mesa-news-family-header">
+                            <strong>Actividad declarada</strong>
+                            <span id="mesa-news-activity-count" class="mesa-news-count">—</span>
+                          </header>
+                          <div id="mesa-news-activity-list" class="alert-inbox" aria-live="polite" aria-busy="false">
+                            <p>Cargando…</p>
+                          </div>
+                        </article>
+                      </div>
+                    </details>
                   </section>
                 </div>
               </div>
@@ -1152,7 +1169,30 @@
               </div>
             </div>
 
-            <section id="review-explore-panel" class="operation-panel review-explore-panel" aria-labelledby="review-explore-titulo">
+            <div class="revisar-subtabs" role="tablist" aria-label="Vistas de Revisar">
+              <button
+                id="revisar-tab-candidates"
+                type="button"
+                class="revisar-subtab"
+                role="tab"
+                aria-selected="true"
+                aria-controls="review-master-detail"
+              >
+                Candidatos y detalle
+              </button>
+              <button
+                id="revisar-tab-explore"
+                type="button"
+                class="revisar-subtab"
+                role="tab"
+                aria-selected="false"
+                aria-controls="review-explore-panel"
+              >
+                Exploración local
+              </button>
+            </div>
+
+            <section id="review-explore-panel" class="operation-panel review-explore-panel" role="tabpanel" aria-labelledby="revisar-tab-explore" hidden>
               <div class="panel-header">
                 <span>
                   <strong id="review-explore-titulo">Explorar valores (filtros locales)</strong>
@@ -1181,7 +1221,7 @@
               <div id="review-explore-results" class="review-explore-results"></div>
             </section>
 
-            <div id="review-master-detail" class="review-master-detail">
+            <div id="review-master-detail" class="review-master-detail" role="tabpanel" aria-labelledby="revisar-tab-candidates">
               <div id="review-master-list" class="review-master-list" aria-label="Bandejas separadas de Revisar">
                 <section id="candidate-inbox-panel" class="operation-panel candidate-inbox-panel">
                   <div class="panel-header">
@@ -1881,5 +1921,17 @@
 
       </div>
     </div>
+    <dialog id="exact-detail-dialog" class="exact-detail-dialog hidden" aria-labelledby="exact-detail-title">
+      <div class="exact-detail-header">
+        <div class="exact-detail-title-wrap">
+          <h3 id="exact-detail-title" class="exact-detail-title">Detalle exacto</h3>
+          <p id="exact-detail-subtitle" class="exact-detail-subtitle hidden"></p>
+        </div>
+        <button id="exact-detail-close" class="button secondary compact" type="button">Cerrar</button>
+      </div>
+      <dl id="exact-detail-list" class="exact-detail-list"></dl>
+      <div id="exact-detail-notes" class="exact-detail-notes hidden"></div>
+      <div id="exact-detail-actions" class="exact-detail-actions hidden"></div>
+    </dialog>
   </body>
 </html>

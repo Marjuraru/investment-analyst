@@ -949,12 +949,11 @@
 
 .snapshot-grid dd {
   margin: 0.15rem 0 0;
-  overflow: hidden;
   color: var(--ink-strong);
   font-size: 0.7rem;
   font-weight: 720;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .stat-move.positive {
@@ -2317,6 +2316,11 @@ pre {
   gap: 0.2rem;
 }
 
+.asset-compact-domain .mesa-value-cell {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
 .asset-compact-domain small {
   color: var(--muted);
 }
@@ -2391,4 +2395,43 @@ pre {
   text-align: center;
   color: var(--muted);
   font-size: 0.75rem;
+}
+
+.valuation-controls-disclosure {
+  margin-top: 0.55rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.valuation-controls-disclosure > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 40px;
+  padding: 0.45rem 0.75rem;
+  color: var(--ink-strong);
+  font-size: 0.78rem;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.valuation-controls-disclosure[open] > summary {
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.asset-compact-header .asset-compact-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(155px, 100%), 1fr));
+  gap: 0.5rem 0.75rem;
+}
+
+.asset-compact-meta-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem 0.75rem;
+  margin-bottom: 0.4rem;
+  color: var(--muted-strong);
+  font-size: 0.72rem;
 }

@@ -1,7 +1,7 @@
 .mesa-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
-  gap: var(--canvas-block-gap);
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
   max-width: 100%;
 }
 
@@ -313,9 +313,10 @@
 }
 
 .mesa-contextual-meta {
-  align-items: center;
+  flex-wrap: wrap;
+  align-items: baseline;
   justify-content: space-between;
-  gap: 0.5rem;
+  gap: 0.3rem 0.6rem;
   color: var(--muted);
   font-size: 0.7rem;
 }
@@ -366,11 +367,15 @@
   justify-content: flex-start;
 }
 
+.mesa-investor-section .section-intro {
+  margin-bottom: 0.45rem;
+}
+
 .mesa-investor-controls {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 0.75rem;
-  margin-bottom: 0.75rem;
+  grid-template-columns: minmax(190px, 1.5fr) repeat(3, minmax(125px, 1fr));
+  gap: 0.5rem 0.65rem;
+  margin-bottom: 0.5rem;
 }
 
 .mesa-investor-toolbar {
@@ -378,14 +383,104 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 0.75rem;
+  gap: 0.45rem 0.75rem;
+  margin-bottom: 0.45rem;
+}
+
+.mesa-cut-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.65rem;
+  color: var(--muted-strong);
+  font-size: 0.74rem;
 }
 
 .mesa-investor-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.mesa-investor-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 0.85rem;
+  margin-bottom: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--warning);
+  background: var(--warning-soft);
+  color: var(--warning-ink);
+  font-size: 0.76rem;
+}
+
+.mesa-investor-banner.is-error {
+  border-color: var(--negative);
+  background: var(--negative-soft);
+  color: var(--negative-ink);
+}
+
+.mesa-investor-banner-copy {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.mesa-investor-banner-detail {
+  color: var(--ink);
+  font-size: 0.7rem;
+}
+
+.mesa-investor-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.mesa-investor-table {
+  width: 100%;
+  min-width: 700px;
+  border-collapse: collapse;
+  font-size: var(--base-font-size);
+}
+
+.mesa-investor-table th,
+.mesa-investor-table td {
+  padding: 0.34rem 0.55rem;
+  border-bottom: var(--row-rule-width) solid var(--line);
+  vertical-align: middle;
+}
+
+.mesa-investor-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-subtle);
+  border-bottom: 1px solid var(--line-strong);
+  color: var(--muted-strong);
+  font-size: var(--label-font-size);
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.mesa-investor-table th.is-numeric,
+.mesa-investor-table td.is-numeric {
+  text-align: right;
+  font-family: var(--figure-font);
+  font-variant-numeric: tabular-nums;
+}
+
+.mesa-investor-table th.is-numeric .mesa-sort-btn {
+  width: 100%;
+  text-align: right;
+}
+
+.mesa-investor-table tbody tr:hover {
+  background: var(--surface-subtle);
 }
 
 .mesa-sort-btn {
@@ -393,25 +488,140 @@
   border: 0;
   color: inherit;
   font: inherit;
-  font-weight: 700;
+  font-weight: 760;
+  letter-spacing: inherit;
+  text-transform: inherit;
   cursor: pointer;
-  padding: 0.2rem 0;
+  padding: 0.18rem 0;
   text-align: left;
+}
+
+.mesa-asset-cell {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 150px;
+}
+
+.mesa-asset-line1 {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.mesa-asset-ticker-btn {
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-dark);
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 780;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mesa-asset-ticker-btn:hover,
+.mesa-asset-ticker-btn:focus-visible {
+  text-decoration: underline;
+}
+
+.mesa-asset-line2 {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.mesa-asset-name {
+  min-width: 0;
+  max-width: 195px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mesa-asset-submeta {
+  flex-shrink: 0;
+  color: var(--muted-strong);
 }
 
 .mesa-value-cell {
   display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.32rem;
+  white-space: nowrap;
+}
+
+.mesa-value-primary {
+  color: var(--ink-strong);
+  font-family: var(--figure-font);
+  font-variant-numeric: tabular-nums;
+  font-weight: 660;
+}
+
+.mesa-value-primary.is-positive {
+  color: var(--positive-ink);
+}
+
+.mesa-value-primary.is-negative {
+  color: var(--negative-ink);
 }
 
 .mesa-value-sub {
   color: var(--muted);
-  font-size: 0.78rem;
+  font-size: 0.7rem;
+}
+
+.mesa-date-badge {
+  display: inline-block;
+  padding: 0.04rem 0.28rem;
+  border: 1px solid var(--line-strong);
+  background: var(--neutral-soft);
+  color: var(--muted-strong);
+  font-family: var(--font-sans);
+  font-size: 0.62rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.mesa-status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.08rem 0.34rem;
+  border: 1px solid var(--line);
+  background: var(--neutral-soft);
+  color: var(--neutral-ink);
+  font-family: var(--font-sans);
+  font-size: 0.66rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.mesa-status-pill.is-error {
+  border-color: var(--negative);
+  background: var(--negative-soft);
+  color: var(--negative-ink);
+}
+
+.mesa-status-pill.is-paused,
+.mesa-status-pill.is-warn {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+  color: var(--warning-ink);
+}
+
+.mesa-status-pill.is-good {
+  border-color: var(--positive);
+  background: var(--positive-soft);
+  color: var(--positive-ink);
 }
 
 .mesa-value-error {
-  color: var(--blocked-ink, var(--warning-ink));
+  color: var(--negative-ink);
   font-weight: 700;
 }
 
@@ -425,42 +635,78 @@
 }
 
 .mesa-score-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  min-width: 110px;
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 0.3rem;
+  white-space: nowrap;
 }
 
-.mesa-score-bar {
-  width: 100%;
-  height: 6px;
+.mesa-detail-btn {
+  min-height: 32px;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mesa-detail-btn:hover,
+.mesa-detail-btn:focus-visible {
+  border-color: var(--accent);
   background: var(--surface-subtle);
-  overflow: hidden;
-}
-
-.mesa-score-fill {
-  display: block;
-  height: 100%;
-  background: var(--accent);
+  color: var(--ink-strong);
 }
 
 .mesa-detail-grid {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem 1.25rem;
-  margin-bottom: 0.5rem;
+  gap: 0.6rem 1.1rem;
+  margin-bottom: 0.45rem;
 }
 
 .mesa-detail-links {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 0.45rem;
+}
+
+.mesa-news-disclosure {
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.mesa-news-disclosure > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 44px;
+  padding: 0.55rem 0.85rem;
+  cursor: pointer;
+  color: var(--ink-strong);
+  font-weight: 740;
+  font-size: 0.84rem;
+}
+
+.mesa-news-disclosure-hint {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.mesa-news-disclosure > .mesa-news-families {
+  padding: 0.65rem 0.85rem 0.85rem;
+  border-top: 1px solid var(--line);
 }
 
 .review-explore-controls {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 0.75rem;
+  gap: 0.65rem;
   align-items: end;
 }
 
@@ -474,8 +720,8 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem 1rem;
-  padding: 0.65rem 0;
+  gap: 0.45rem 0.9rem;
+  padding: 0.5rem 0;
   border-bottom: 1px solid var(--line);
 }
 
@@ -490,5 +736,18 @@
 .mesa-investor-section .universe-matrix-scroll {
   display: block;
   width: 100%;
-  overflow-x: auto;
+  max-height: 540px;
+  overflow: auto;
+}
+
+@media (max-width: 960px) {
+  .mesa-investor-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .mesa-investor-controls {
+    grid-template-columns: 1fr;
+  }
 }
