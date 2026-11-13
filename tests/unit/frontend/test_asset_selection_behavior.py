@@ -126,3 +126,9 @@ def test_first_contractual_catalog_asset_wins_without_an_explicit_choice() -> No
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"passed": len(cases)}
+
+
+def test_explicit_known_at_now_button_does_not_affect_automatic_asset_switching() -> None:
+    assert 'byId("known-at-now-btn")?.addEventListener("click"' in APP_SHELL
+    assert "input.value = new Date().toISOString();" in APP_SHELL
+    assert "knownAtByAsset.get(assetId) || defaultKnownAtCut()" in APP_CORE

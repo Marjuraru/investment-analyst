@@ -410,6 +410,20 @@
   font-size: 0.78rem;
 }
 
+.mesa-value-error {
+  color: var(--blocked-ink, var(--warning-ink));
+  font-weight: 700;
+}
+
+.mesa-value-cancelled {
+  color: var(--muted-strong);
+  font-style: italic;
+}
+
+.activo-retry-btn {
+  margin-top: 0.4rem;
+}
+
 .mesa-score-cell {
   display: flex;
   flex-direction: column;

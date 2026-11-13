@@ -513,3 +513,193 @@ vm.runInContext(shellSrc.slice(start, end), ctx);
     result = _run_node(script)
     assert result["mercadoCalls"] == ["header", "mercado"]
     assert result["valoracionCalls"] == ["header", "valoracion"]
+
+
+def test_subtab_dispatcher_uses_real_descriptor_has_fundamentals() -> None:
+    script = f"""
+const vm = require("node:vm");
+const calls = [];
+const ctx = vm.createContext({{
+  console, URLSearchParams, Map, Set, Date, Math, Number, String, Array, Object, Promise, JSON,
+  selectedMarketAsset: "equity:us:googl",
+  activeAssetSubtabId: "valoracion",
+  selectedFundamentalFrequency: "annual",
+  activoBoardRequestSequence: 1,
+  marketAssets: {{}},
+  marketAssetPresentation: () => ctx.marketAssets[ctx.selectedMarketAsset],
+  activeAssetSubtabKeys: new Map(),
+  byId: () => ({{ value: "2026-10-20T00:00:00Z" }}),
+  loadActivoCompactHeader: async () => {{ calls.push("header"); }},
+  queryMarketChart: async () => {{ calls.push("mercado"); }},
+  queryFundamentalTrend: async () => {{ calls.push("fundamentales:trend"); }},
+  queryFundamentalResearch: async () => {{ calls.push("fundamentales:research"); }},
+  queryValuation: async () => {{ calls.push("valoracion"); }},
+  queryReport: async () => {{ calls.push("analisis"); }},
+}});
+const coreSrc = {json.dumps(APP_CORE)};
+const startCore = coreSrc.indexOf("function marketAssetFromDescriptor");
+const endCore = coreSrc.indexOf("function resolveMarketAssetSelection");
+vm.runInContext(coreSrc.slice(startCore, endCore), ctx);
+
+ctx.marketAssets["equity:us:googl"] = ctx.marketAssetFromDescriptor({{
+  asset_id: "equity:us:googl",
+  symbol: "GOOGL",
+  name: "Alphabet Inc.",
+  asset_class: "equity",
+  exchange: "NASDAQ",
+  quote_currency: "USD",
+  provider: "alpaca",
+  provider_identifier: "GOOGL",
+  source_id: "alpaca-market-data:iex:googl:daily-bars:adjustment-all",
+  chart_schema_version: "v1",
+  volume_unit: "shares",
+  default_market_start: "2024-01-01",
+  analysis: {{
+    family: "listed_company", market_mode: "daily_equity", fundamental_mode: "corporate",
+  }},
+  has_fundamentals: true,
+  has_corporate_valuation: true,
+  supports_crypto_derivatives: false,
+  fundamental_frequencies: ["annual", "quarterly"],
+}});
+
+const shellSrc = {json.dumps(APP_SHELL)};
+const start = shellSrc.indexOf("async function loadActivoCurrentSubtab");
+const end = shellSrc.indexOf("function setSidebarOpen");
+vm.runInContext(shellSrc.slice(start, end), ctx);
+
+(async () => {{
+  await ctx.loadActivoCurrentSubtab();
+  const valuationCalls = [...calls];
+  calls.length = 0;
+  ctx.activeAssetSubtabId = "analisis";
+  await ctx.loadActivoCurrentSubtab();
+  const analysisCalls = [...calls];
+  console.log(JSON.stringify({{
+    exchange: ctx.marketAssets["equity:us:googl"].exchange,
+    valuationCalls,
+    analysisCalls,
+  }}));
+}})();
+"""
+    result = _run_node(script)
+    assert result["exchange"] == "NASDAQ"
+    assert result["valuationCalls"] == ["header", "valoracion"]
+    assert result["analysisCalls"] == ["header", "analisis"]
+
+
+def test_fetch_investor_overview_batch_accepts_equivalent_utc_iso_formatting() -> None:
+    script = f"""
+const vm = require("node:vm");
+let fetchCount = 0;
+const ctx = vm.createContext({{
+  console, URLSearchParams, Map, Set, Date, Math, Number, String, Array, Object, Promise, JSON,
+  TextEncoder, Error, Symbol, AbortController,
+  document: {{
+    documentElement: {{}},
+    getElementById: (id) =>
+      id === "report-known-at" ? {{ value: "2026-11-13T00:00:00.000Z" }} : null,
+  }},
+  getComputedStyle: () => ({{ getPropertyValue: () => "#000000" }}),
+  fetch: async () => {{
+    fetchCount += 1;
+    return {{
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({{
+        schema_version: "investor-overview-v1",
+        known_at: "2026-11-13T00:00:00Z",
+        catalog_version: "v1",
+        catalog_sha256: "abc123",
+        windows: {{}},
+        assets: [{{
+          asset_id: "equity:us:aapl",
+          market: {{}},
+          fundamental: {{}},
+          valuation: {{}},
+        }}],
+      }}),
+    }};
+  }},
+}});
+const coreSrc = {json.dumps(APP_CORE)};
+vm.runInContext(coreSrc.slice(0, coreSrc.indexOf("function setButtonBusy")), ctx);
+vm.runInContext(coreSrc.slice(coreSrc.indexOf("function sameIsoTimestamp")), ctx);
+
+(async () => {{
+  const cut = "2026-11-13T00:00:00.000Z";
+  const first = await ctx.fetchInvestorOverviewBatch(["equity:us:aapl"], cut);
+  const cached = ctx.getCachedInvestorOverviewAsset("equity:us:aapl", cut);
+  const second = await ctx.fetchInvestorOverviewBatch(["equity:us:aapl"], cut);
+  console.log(JSON.stringify({{
+    firstCount: first.assets.length,
+    cachedHit: Boolean(cached),
+    secondCount: second.assets.length,
+    fetchCount,
+    sameFalseDiffMs: ctx.sameIsoTimestamp("2026-11-13T00:00:00Z", "2026-11-13T00:00:01Z"),
+  }}));
+}})();
+"""
+    result = _run_node(script)
+    assert result == {
+        "firstCount": 1,
+        "cachedHit": True,
+        "secondCount": 1,
+        "fetchCount": 1,
+        "sameFalseDiffMs": False,
+    }
+
+
+def test_subtab_dispatcher_does_not_dedupe_superseded_sequence() -> None:
+    script = f"""
+const vm = require("node:vm");
+const calls = [];
+let releaseFirst;
+let first = true;
+const ctx = vm.createContext({{
+  console, URLSearchParams, Map, Set, Date, Math, Number, String, Array, Object, Promise, JSON,
+  selectedMarketAsset: "equity:us:aapl",
+  activeAssetSubtabId: "mercado",
+  selectedFundamentalFrequency: "annual",
+  activoBoardRequestSequence: 1,
+  marketAssets: {{}},
+  marketAssetPresentation: () => ({{ hasFundamentals: false, supportsCryptoDerivatives: false }}),
+  activeAssetSubtabKeys: new Map(),
+  byId: () => ({{ value: "2026-10-20T00:00:00Z" }}),
+  loadActivoCompactHeader: async (req) => {{
+    calls.push("header:" + req.sequence);
+    if (first) {{
+      first = false;
+      await new Promise((r) => {{ releaseFirst = r; }});
+    }}
+  }},
+  queryMarketChart: async (req) => {{ calls.push("mercado:" + req.sequence); }},
+  queryFundamentalTrend: async () => {{}},
+  queryFundamentalResearch: async () => {{}},
+  queryValuation: async () => {{}},
+  queryReport: async () => {{}},
+}});
+const shellSrc = {json.dumps(APP_SHELL)};
+const start = shellSrc.indexOf("async function loadActivoCurrentSubtab");
+const end = shellSrc.indexOf("function setSidebarOpen");
+vm.runInContext(shellSrc.slice(start, end), ctx);
+
+(async () => {{
+  const p1 = ctx.loadActivoCurrentSubtab();
+  ctx.activoBoardRequestSequence = 2;
+  const p2 = ctx.loadActivoCurrentSubtab({{
+    sequence: 2,
+    assetId: "equity:us:aapl",
+    knownAt: "2026-10-20T00:00:00Z",
+  }});
+  await p2;
+  releaseFirst();
+  await p1;
+  console.log(JSON.stringify({{ calls, cachedKey: ctx.activeAssetSubtabKeys.get("mercado") }}));
+}})();
+"""
+    result = _run_node(script)
+    assert "header:1" in result["calls"]
+    assert "header:2" in result["calls"]
+    assert "mercado:2" in result["calls"]
+    assert result["cachedKey"] == "equity:us:aapl|2026-10-20T00:00:00Z|mercado|annual"

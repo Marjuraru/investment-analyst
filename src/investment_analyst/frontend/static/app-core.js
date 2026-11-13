@@ -614,21 +614,200 @@ let listedCompanyReportRequest = 0;
 let marketChartRequestSequence = 0;
 let fundamentalTrendRequestSequence = 0;
 let fundamentalResearchRequestSequence = 0;
+let valuationRequestSequence = 0;
 let activoBoardRequestSequence = 0;
 let activeAssetAbortController = null;
 const activeAssetSubtabKeys = new Map();
+const ACTIVO_CONCURRENCY_MAX = 2;
+const activoActiveSlots = new Set();
+const activoWaitQueue = [];
+const activeAssetContextState = {
+  status: "idle",
+  assetId: null,
+  knownAt: "",
+  subtab: null,
+  requestKey: null,
+  reason: null,
+  message: null,
+};
 let boardDataReady = false;
 const loadedBoardIds = new Set();
 const INVESTOR_OVERVIEW_BATCH_SIZE = 10;
 const INVESTOR_OVERVIEW_MAX_SNAPSHOT = 100;
+const INVESTOR_OVERVIEW_MAX_BYTES = 2 * 1024 * 1024;
+const INVESTOR_OVERVIEW_ABSENCE_REASONS = Object.freeze({
+  no_bar_in_window: "Sin barras elegibles para este corte/ventana",
+  no_annual_diagnostic_at_known_at: "Sin diagnóstico anual disponible al corte",
+});
 const investorOverviewState = {
   contextKey: null,
   knownAt: null,
   catalogVersion: null,
   catalogSha256: null,
   windows: null,
+  approxBytes: 0,
+  assetByteSizes: new Map(),
   byAssetId: new Map(),
 };
+
+function createAbortError(message = "Consulta cancelada.") {
+  const err = new Error(message);
+  err.name = "AbortError";
+  return err;
+}
+
+function setActiveAssetContextState(patch = {}) {
+  Object.assign(activeAssetContextState, patch);
+}
+
+function translateOverviewAbsenceReason(reason) {
+  if (!reason) return "";
+  return INVESTOR_OVERVIEW_ABSENCE_REASONS[reason] || String(reason);
+}
+
+function formatKnownAtLabel(knownAt) {
+  const raw = String(knownAt || "").trim();
+  if (!raw) return "Sin corte";
+  if (typeof formatInstant === "function") return formatInstant(raw);
+  return raw;
+}
+
+function assetPreferenceFlags(assetId) {
+  const target = String(assetId || "").trim();
+  const rows = Array.isArray(assetPreferencesSnapshot?.assets) ? assetPreferencesSnapshot.assets : [];
+  const match = target ? rows.find((item) => item && item.asset_id === target) : null;
+  return {
+    inWatchlist: Boolean(match?.watchlist),
+    isFavorite: Boolean(match?.favorite),
+    scheduledRefresh: Boolean(match?.scheduled_refresh),
+  };
+}
+
+function pruneAbortedActivoSlots() {
+  for (const slot of [...activoActiveSlots]) {
+    if (slot.signal?.aborted) activoActiveSlots.delete(slot);
+  }
+}
+
+function drainActivoWaitQueue() {
+  pruneAbortedActivoSlots();
+  while (activoWaitQueue.length > 0 && activoActiveSlots.size < ACTIVO_CONCURRENCY_MAX) {
+    const next = activoWaitQueue.shift();
+    if (next && next.grant()) break;
+  }
+}
+
+function acquireActivoFetchSlot({ signal } = {}) {
+  if (signal?.aborted) throw createAbortError();
+  pruneAbortedActivoSlots();
+  if (activoActiveSlots.size < ACTIVO_CONCURRENCY_MAX) {
+    const token = { signal: signal || null };
+    activoActiveSlots.add(token);
+    return token;
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+    };
+    const entry = {
+      grant: () => {
+        if (settled) return false;
+        settled = true;
+        cleanup();
+        if (signal?.aborted) {
+          reject(createAbortError());
+          return false;
+        }
+        const token = { signal: signal || null };
+        activoActiveSlots.add(token);
+        resolve(token);
+        return true;
+      },
+    };
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      const idx = activoWaitQueue.indexOf(entry);
+      if (idx >= 0) activoWaitQueue.splice(idx, 1);
+      reject(createAbortError());
+    };
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    activoWaitQueue.push(entry);
+  });
+}
+
+function releaseActivoFetchSlot(token = null) {
+  if (token) {
+    activoActiveSlots.delete(token);
+  } else {
+    const first = activoActiveSlots.values().next().value;
+    if (first) activoActiveSlots.delete(first);
+  }
+  drainActivoWaitQueue();
+}
+
+async function runWithActivoConcurrencyLimit(taskFn, { signal } = {}) {
+  const pendingSlot = acquireActivoFetchSlot({ signal });
+  const token = pendingSlot && typeof pendingSlot.then === "function"
+    ? await pendingSlot
+    : pendingSlot;
+  try {
+    return await taskFn();
+  } finally {
+    releaseActivoFetchSlot(token);
+  }
+}
+
+function cancelActiveAssetRequests() {
+  if (activeAssetAbortController) {
+    try {
+      activeAssetAbortController.abort();
+    } catch {}
+  }
+  activeAssetAbortController = typeof AbortController === "function" ? new AbortController() : null;
+  activoBoardRequestSequence += 1;
+  marketChartRequestSequence += 1;
+  fundamentalTrendRequestSequence += 1;
+  fundamentalResearchRequestSequence += 1;
+  valuationRequestSequence += 1;
+  listedCompanyReportRequest += 1;
+  if (typeof cryptoDerivativesRequest === "number") cryptoDerivativesRequest += 1;
+  activeAssetSubtabKeys.clear();
+  if (typeof setChartBusy === "function") setChartBusy(false);
+  if (typeof setFundamentalBusy === "function") setFundamentalBusy(false, { forceReset: true });
+  for (const retryId of [
+    "chart-retry-button",
+    "fundamental-trend-retry-button",
+    "fundamental-research-retry-button",
+  ]) {
+    const rb = byId(retryId);
+    if (rb) rb.classList.add("hidden");
+  }
+  const reportArea = byId("report-area");
+  if (reportArea) reportArea.setAttribute("aria-busy", "false");
+  const button = byId("report-button");
+  if (button && typeof setButtonBusy === "function") {
+    setButtonBusy(button, false, "Consultando…", "Consultar análisis");
+  }
+  const valuationCard = byId("valuation-card");
+  if (valuationCard) valuationCard.setAttribute("aria-busy", "false");
+  const valuationBtn = byId("query-valuation");
+  if (valuationBtn && typeof setButtonBusy === "function") {
+    setButtonBusy(valuationBtn, false, "Consultando…", "Cargar valoración");
+  }
+  const subtab = typeof activeAssetSubtabId === "string" ? activeAssetSubtabId : "mercado";
+  setActiveAssetContextState({
+    status: "cancelled",
+    assetId: selectedMarketAsset || null,
+    knownAt: byId("report-known-at")?.value?.trim() || "",
+    subtab,
+    requestKey: null,
+    reason: "user_cancelled",
+    message: "Consulta cancelada.",
+  });
+}
 let chartSettings = { ...DEFAULT_CHART_SETTINGS, ...DEFAULT_SMA_COLORS };
 const chartSeriesVisibility = {
   "sma-5": true,
@@ -666,13 +845,15 @@ function marketAssetFromDescriptor(descriptor) {
     : descriptor.asset_class === "crypto"
       ? descriptor.volume_unit
       : "acciones";
+  const normalizedExchange = String(descriptor.exchange || "UNKNOWN").trim() || "UNKNOWN";
   return Object.freeze({
     assetId: descriptor.asset_id,
     symbol: descriptor.symbol,
     name: descriptor.name,
+    exchange: normalizedExchange,
     quoteCurrency: descriptor.quote_currency,
-    breadcrumb: `${assetClassLabels[descriptor.asset_class] || "Análisis de mercado"} / ${descriptor.exchange}`,
-    meta: `${descriptor.exchange} · ${descriptor.quote_currency}${descriptor.source_id.includes("iex") ? " · IEX parcial" : descriptor.source_id.includes("coinbase") ? " · mercado 24/7" : ""}`,
+    breadcrumb: `${assetClassLabels[descriptor.asset_class] || "Análisis de mercado"} / ${normalizedExchange}`,
+    meta: `${normalizedExchange} · ${descriptor.quote_currency}${descriptor.source_id.includes("iex") ? " · IEX parcial" : descriptor.source_id.includes("coinbase") ? " · mercado 24/7" : ""}`,
     sourceId: descriptor.source_id,
     schemaVersion: descriptor.chart_schema_version,
     intradaySourceId: descriptor.intraday_source_id,
@@ -1119,6 +1300,8 @@ function assetSubtabIsAvailable(button) {
   return Boolean(button) && !button.classList.contains("hidden") && !button.disabled;
 }
 
+let suppressAssetSubtabDispatch = false;
+
 function selectAssetSubtab(requestedId) {
   const buttons = assetSubtabButtons();
   const marketButton = buttons.find((button) => button.dataset.assetSubtab === "mercado");
@@ -1137,7 +1320,8 @@ function selectAssetSubtab(requestedId) {
     if (section) section.hidden = !selected;
   }
   if (
-    boardDataReady
+    !suppressAssetSubtabDispatch
+    && boardDataReady
     && typeof loadActivoCurrentSubtab === "function"
     && typeof boardIdFromLocationHash === "function"
     && boardIdFromLocationHash() === "activo"
@@ -1146,7 +1330,7 @@ function selectAssetSubtab(requestedId) {
   }
 }
 
-function renderAssetScopeForBoard(boardId) {
+function renderAssetScopeForBoard(boardId, options = {}) {
   const scopeBar = byId("asset-scope-bar");
   const shouldShow = ASSET_SCOPE_BOARD_IDS.has(boardId);
   scopeBar.hidden = !shouldShow;
@@ -1156,7 +1340,15 @@ function renderAssetScopeForBoard(boardId) {
   if (activeBoard) activeBoard.prepend(scopeBar);
   const subtabs = byId("asset-subtabs");
   subtabs.hidden = boardId !== "activo";
-  if (boardId === "activo") selectAssetSubtab(activeAssetSubtabId);
+  if (boardId === "activo") {
+    const previousSuppress = suppressAssetSubtabDispatch;
+    suppressAssetSubtabDispatch = options.dispatchSubtabLoad === false;
+    try {
+      selectAssetSubtab(activeAssetSubtabId);
+    } finally {
+      suppressAssetSubtabDispatch = previousSuppress;
+    }
+  }
 }
 
 function initializeAssetSubtabs() {
@@ -2098,7 +2290,23 @@ function clearActiveAssetContextSync(nextPresentation = null) {
     } catch {}
   }
   activeAssetAbortController = typeof AbortController === "function" ? new AbortController() : null;
+  activoBoardRequestSequence += 1;
+  marketChartRequestSequence += 1;
+  fundamentalTrendRequestSequence += 1;
+  fundamentalResearchRequestSequence += 1;
+  valuationRequestSequence += 1;
+  listedCompanyReportRequest += 1;
+  if (typeof cryptoDerivativesRequest === "number") cryptoDerivativesRequest += 1;
   activeAssetSubtabKeys.clear();
+  setActiveAssetContextState({
+    status: "idle",
+    assetId: nextPresentation?.assetId || selectedMarketAsset || null,
+    knownAt: byId("report-known-at")?.value?.trim() || "",
+    subtab: typeof activeAssetSubtabId === "string" ? activeAssetSubtabId : "mercado",
+    requestKey: null,
+    reason: null,
+    message: null,
+  });
   if (marketChartRenderFrame !== null) {
     cancelAnimationFrame(marketChartRenderFrame);
     marketChartRenderFrame = null;
@@ -2107,11 +2315,42 @@ function clearActiveAssetContextSync(nextPresentation = null) {
   marketChartViewport = null;
   marketChartDrag = null;
   selectedChartPoint = -1;
+  if (typeof setChartBusy === "function") setChartBusy(false);
+  if (typeof setFundamentalBusy === "function") setFundamentalBusy(false, { forceReset: true });
+  for (const retryId of [
+    "chart-retry-button",
+    "fundamental-trend-retry-button",
+    "fundamental-research-retry-button",
+  ]) {
+    const rb = byId(retryId);
+    if (rb) rb.classList.add("hidden");
+  }
   const label = nextPresentation ? `${nextPresentation.symbol} — ${nextPresentation.name}` : "activo";
+  const assetPrice = byId("asset-price");
+  if (assetPrice) assetPrice.textContent = "—";
+  const assetDailyChange = byId("asset-daily-change");
+  if (assetDailyChange) {
+    assetDailyChange.textContent = "—";
+    assetDailyChange.className = "asset-change neutral";
+  }
+  const assetQuality = byId("asset-quality");
+  if (assetQuality) {
+    assetQuality.textContent = "—";
+    assetQuality.className = "quality-chip hidden";
+  }
   const chartHost = byId("market-chart");
   if (chartHost) chartHost.replaceChildren();
+  const chartCard = byId("market-chart-card");
+  if (chartCard) {
+    chartCard.classList.remove("is-empty-state");
+    chartCard.setAttribute("aria-busy", "false");
+  }
   const chartEmpty = byId("chart-empty");
-  if (chartEmpty) chartEmpty.classList.add("hidden");
+  if (chartEmpty) {
+    chartEmpty.textContent = "";
+    chartEmpty.classList.add("hidden");
+  }
+  if (typeof resetMarketSnapshot === "function") resetMarketSnapshot();
   for (const id of [
     "chart-latest-close",
     "chart-range-change",
@@ -2133,14 +2372,27 @@ function clearActiveAssetContextSync(nextPresentation = null) {
     const el = byId(id);
     if (el) el.textContent = "—";
   }
+  const chartRangeChange = byId("chart-range-change");
+  if (chartRangeChange) chartRangeChange.className = "chart-change neutral";
   const latestDate = byId("chart-latest-date");
   if (latestDate) latestDate.textContent = `Cargando ${label}…`;
   const pointsBody = byId("chart-table-body");
   if (pointsBody) pointsBody.replaceChildren();
   const chartStatus = byId("chart-status");
   if (chartStatus) chartStatus.textContent = `Cargando ${label}…`;
-  const exportCsv = byId("export-market-csv");
-  if (exportCsv) exportCsv.disabled = true;
+  for (const exportId of [
+    "export-market-csv",
+    "export-fundamental-csv",
+    "export-fundamental-research-csv",
+    "export-valuation-json",
+    "export-valuation-history-json",
+    "export-valuation-history-rule-json",
+    "export-annual-horizons-json",
+    "export-report-json",
+  ]) {
+    const exportBtn = byId(exportId);
+    if (exportBtn) exportBtn.disabled = true;
+  }
   const compactHeader = byId("asset-compact-header");
   if (compactHeader) {
     compactHeader.replaceChildren(
@@ -2157,6 +2409,16 @@ function clearActiveAssetContextSync(nextPresentation = null) {
   if (typeof resetAnnualHorizons === "function") {
     resetAnnualHorizons({ clearAnchor: true, clearMetrics: true });
   }
+  const fundamentalEmpty = byId("fundamental-empty");
+  if (fundamentalEmpty) {
+    fundamentalEmpty.textContent = "";
+    fundamentalEmpty.classList.add("hidden");
+  }
+  const fundamentalResearchEmpty = byId("fundamental-research-empty");
+  if (fundamentalResearchEmpty) {
+    fundamentalResearchEmpty.textContent = "";
+    fundamentalResearchEmpty.classList.add("hidden");
+  }
 }
 
 function resetInvestorOverviewCache() {
@@ -2165,18 +2427,93 @@ function resetInvestorOverviewCache() {
   investorOverviewState.catalogVersion = null;
   investorOverviewState.catalogSha256 = null;
   investorOverviewState.windows = null;
+  investorOverviewState.approxBytes = 0;
+  investorOverviewState.assetByteSizes.clear();
   investorOverviewState.byAssetId.clear();
 }
 
+function sameIsoTimestamp(left, right) {
+  const a = String(left || "").trim();
+  const b = String(right || "").trim();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const msA = Date.parse(a);
+  const msB = Date.parse(b);
+  if (!Number.isFinite(msA) || !Number.isFinite(msB) || msA !== msB) return false;
+  const subMs = (value) => {
+    const match = /\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/i.exec(value);
+    return match ? match[1].slice(3).replace(/0+$/, "") : "";
+  };
+  return subMs(a) === subMs(b);
+}
+
 function getCachedInvestorOverviewAsset(assetId, knownAt) {
-  if (!investorOverviewState.contextKey || investorOverviewState.knownAt !== knownAt) return null;
+  if (!investorOverviewState.contextKey || !sameIsoTimestamp(investorOverviewState.knownAt, knownAt)) {
+    return null;
+  }
   return investorOverviewState.byAssetId.get(assetId) || null;
 }
 
+function approximateJsonBytes(value) {
+  try {
+    const encoded = JSON.stringify(value) || "";
+    if (typeof TextEncoder === "function") return new TextEncoder().encode(encoded).length;
+    return encoded.length * 2;
+  } catch {
+    return 1024;
+  }
+}
+
+function evictInvestorOverviewAsset(assetId) {
+  const oldSize = investorOverviewState.assetByteSizes.get(assetId) || 0;
+  investorOverviewState.assetByteSizes.delete(assetId);
+  investorOverviewState.byAssetId.delete(assetId);
+  investorOverviewState.approxBytes = Math.max(0, investorOverviewState.approxBytes - oldSize);
+}
+
+function storeInvestorOverviewAsset(asset) {
+  const id = asset.asset_id;
+  if (investorOverviewState.byAssetId.has(id)) {
+    evictInvestorOverviewAsset(id);
+  }
+  const entryBytes = approximateJsonBytes(asset);
+  if (entryBytes > INVESTOR_OVERVIEW_MAX_BYTES) {
+    throw new Error("El resumen recibido excede el límite de memoria permitido en la sesión.");
+  }
+  while (
+    investorOverviewState.byAssetId.size >= INVESTOR_OVERVIEW_MAX_SNAPSHOT
+    || (
+      investorOverviewState.byAssetId.size > 0
+      && investorOverviewState.approxBytes + entryBytes > INVESTOR_OVERVIEW_MAX_BYTES
+    )
+  ) {
+    const oldestKey = investorOverviewState.byAssetId.keys().next().value;
+    if (!oldestKey) break;
+    evictInvestorOverviewAsset(oldestKey);
+  }
+  investorOverviewState.byAssetId.set(id, asset);
+  investorOverviewState.assetByteSizes.set(id, entryBytes);
+  investorOverviewState.approxBytes += entryBytes;
+}
+
 async function fetchInvestorOverviewBatch(assetIds, knownAt, options = {}) {
-  const uniqueIds = Array.from(new Set(assetIds.filter(Boolean))).sort();
+  if (!Array.isArray(assetIds)) {
+    throw new Error("Se esperaba una lista de identificadores de activos válida.");
+  }
+  const requestKnownAt = String(knownAt || "").trim();
+  if (!requestKnownAt) {
+    throw new Error("Falta el corte known_at para consultar el resumen.");
+  }
+  const normalizedIds = [];
+  for (const rawId of assetIds) {
+    if (typeof rawId !== "string" || !rawId.trim()) {
+      throw new Error("El lote contiene un identificador de activo inválido.");
+    }
+    normalizedIds.push(rawId.trim());
+  }
+  const uniqueIds = Array.from(new Set(normalizedIds)).sort();
   if (uniqueIds.length === 0) return null;
-  if (investorOverviewState.knownAt !== knownAt) {
+  if (!sameIsoTimestamp(investorOverviewState.knownAt, requestKnownAt)) {
     resetInvestorOverviewCache();
   }
   const missing = uniqueIds.filter((id) => !investorOverviewState.byAssetId.has(id));
@@ -2191,14 +2528,47 @@ async function fetchInvestorOverviewBatch(assetIds, knownAt, options = {}) {
     };
   }
   for (let i = 0; i < missing.length; i += INVESTOR_OVERVIEW_BATCH_SIZE) {
+    if (options.signal?.aborted) throw createAbortError();
+    const expectedCatalogSha = investorOverviewState.catalogSha256;
     const chunk = missing.slice(i, i + INVESTOR_OVERVIEW_BATCH_SIZE);
-    const params = new URLSearchParams({ known_at: knownAt });
+    const chunkSet = new Set(chunk);
+    const params = new URLSearchParams({ known_at: requestKnownAt });
     for (const id of chunk) params.append("asset_id", id);
     const payload = await api(`/api/v1/investor-overview?${params.toString()}`, options);
+    if (options.signal?.aborted) throw createAbortError();
+    if (!payload || payload.schema_version !== "investor-overview-v1") {
+      throw new Error("Contrato incompatible recibido en investor-overview-v1.");
+    }
+    if (!sameIsoTimestamp(payload.known_at, requestKnownAt)) {
+      throw new Error("La respuesta de investor-overview no coincide con el corte solicitado.");
+    }
+    const currentUiCut = byId("report-known-at")?.value?.trim();
+    if (options.respectUiCut !== false && currentUiCut && !sameIsoTimestamp(currentUiCut, requestKnownAt)) {
+      throw createAbortError("Corte modificado durante la consulta de Mesa.");
+    }
+    const assets = Array.isArray(payload.assets) ? payload.assets : null;
+    if (!assets) {
+      throw new Error("La respuesta de investor-overview no incluyó una lista de activos válida.");
+    }
+    const seenInChunk = new Set();
+    for (const asset of assets) {
+      const returnedId = typeof asset?.asset_id === "string" ? asset.asset_id : "";
+      if (!returnedId || !chunkSet.has(returnedId) || seenInChunk.has(returnedId)) {
+        throw new Error("El lote recibido contiene activos inesperados o duplicados.");
+      }
+      seenInChunk.add(returnedId);
+    }
+    if (seenInChunk.size !== chunk.length) {
+      throw new Error("Faltaron activos solicitados en el lote de resumen.");
+    }
     if (
-      investorOverviewState.catalogSha256 &&
-      payload.catalog_sha256 !== investorOverviewState.catalogSha256
+      expectedCatalogSha &&
+      payload.catalog_sha256 !== expectedCatalogSha
     ) {
+      resetInvestorOverviewCache();
+      throw new Error("El catálogo cambió durante la carga; recarga Mesa para mantener consistencia.");
+    }
+    if (investorOverviewState.knownAt && !sameIsoTimestamp(investorOverviewState.knownAt, requestKnownAt)) {
       resetInvestorOverviewCache();
     }
     investorOverviewState.knownAt = payload.known_at;
@@ -2206,12 +2576,8 @@ async function fetchInvestorOverviewBatch(assetIds, knownAt, options = {}) {
     investorOverviewState.catalogSha256 = payload.catalog_sha256;
     investorOverviewState.windows = payload.windows;
     investorOverviewState.contextKey = `${payload.known_at}|${payload.catalog_sha256}`;
-    for (const asset of payload.assets || []) {
-      if (investorOverviewState.byAssetId.size >= INVESTOR_OVERVIEW_MAX_SNAPSHOT) {
-        const oldestKey = investorOverviewState.byAssetId.keys().next().value;
-        if (oldestKey) investorOverviewState.byAssetId.delete(oldestKey);
-      }
-      investorOverviewState.byAssetId.set(asset.asset_id, asset);
+    for (const asset of assets) {
+      storeInvestorOverviewAsset(asset);
     }
   }
   return {
@@ -2224,34 +2590,115 @@ async function fetchInvestorOverviewBatch(assetIds, knownAt, options = {}) {
   };
 }
 
-async function api(path, options = {}) {
-  const method = String(options.method || "GET").toUpperCase();
-  const dedupeKey = method === "GET" && !options.signal ? path : null;
-  if (dedupeKey && apiInFlightRequests.has(dedupeKey)) {
-    return apiInFlightRequests.get(dedupeKey);
-  }
-  const request = (async () => {
+function api(path, options = {}) {
+  const makeAbortError = () => {
+    const error = new Error("La consulta fue cancelada.");
+    error.name = "AbortError";
+    return error;
+  };
+  const runFetch = async (fetchOptions = {}) => {
     const response = await fetch(path, {
       cache: "no-store",
-      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-      ...options,
+      headers: { "Content-Type": "application/json", ...(fetchOptions.headers || {}) },
+      ...fetchOptions,
     });
-    const payload = await response.json();
+    const rawText = typeof response.text === "function"
+      ? await response.text()
+      : JSON.stringify(await response.json());
+    let payload = null;
+    if (rawText) {
+      try {
+        payload = JSON.parse(rawText);
+      } catch {
+        payload = null;
+      }
+    }
     if (!response.ok) {
-      const error = payload.error || {};
+      const error = payload?.error || {};
       const message = ERROR_MESSAGES[error.code] || error.message || `Error HTTP ${response.status}`;
       const failure = new Error(message);
       failure.code = error.code;
       failure.status = response.status;
       throw failure;
     }
+    if (payload === null) {
+      throw new Error("La respuesta del servidor no es JSON válido.");
+    }
     return payload;
-  })();
-  if (dedupeKey) {
-    apiInFlightRequests.set(dedupeKey, request);
-    request.finally(() => apiInFlightRequests.delete(dedupeKey)).catch(() => {});
+  };
+
+  const method = String(options.method || "GET").toUpperCase();
+  const consumerSignal = options.signal || null;
+  if (consumerSignal?.aborted) {
+    return Promise.reject(makeAbortError());
   }
-  return request;
+  const canCoalesce = method === "GET" && options.dedupe !== false;
+  if (!canCoalesce) {
+    return runFetch(options);
+  }
+
+  let entry = apiInFlightRequests.get(path);
+  if (!entry) {
+    const sharedController = typeof AbortController === "function" ? new AbortController() : null;
+    const consumers = new Set();
+    const fetchOptions = { ...options };
+    if (sharedController) {
+      fetchOptions.signal = sharedController.signal;
+    } else {
+      delete fetchOptions.signal;
+    }
+    const promise = runFetch(fetchOptions);
+    entry = { promise, controller: sharedController, consumers };
+    apiInFlightRequests.set(path, entry);
+    promise.finally(() => {
+      if (apiInFlightRequests.get(path) === entry) {
+        apiInFlightRequests.delete(path);
+      }
+    }).catch(() => {});
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const consumerToken = Symbol("api-consumer");
+    entry.consumers.add(consumerToken);
+    const cleanup = () => {
+      entry.consumers.delete(consumerToken);
+      if (consumerSignal && onAbort) {
+        consumerSignal.removeEventListener("abort", onAbort);
+      }
+    };
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (entry.consumers.size === 0) {
+        if (apiInFlightRequests.get(path) === entry) {
+          apiInFlightRequests.delete(path);
+        }
+        try {
+          entry.controller?.abort();
+        } catch {}
+      }
+      reject(makeAbortError());
+    };
+    if (consumerSignal) {
+      consumerSignal.addEventListener("abort", onAbort, { once: true });
+    }
+    entry.promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
 
 function setButtonBusy(button, busy, busyLabel, idleLabel) {

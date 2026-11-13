@@ -533,6 +533,15 @@ byId("crypto-derivatives-panel").addEventListener("toggle", (event) => {
 
 byId("report-known-at").addEventListener("change", () => {
   renderKnownAtCut(byId("report-known-at").value.trim());
+  if (typeof abortMesaInvestorRequests === "function") {
+    abortMesaInvestorRequests();
+    if (typeof mesaInvestorUiState === "object" && mesaInvestorUiState) {
+      mesaInvestorUiState.failedAssetIds?.clear();
+      mesaInvestorUiState.cancelledAssetIds?.clear();
+      mesaInvestorUiState.batchError = null;
+      mesaInvestorUiState.batchStatus = "idle";
+    }
+  }
   resetInvestorOverviewCache();
   clearActiveAssetContextSync(marketAssetPresentation());
   invalidateValuationFilingSelection();
@@ -546,6 +555,12 @@ byId("report-known-at").addEventListener("change", () => {
 byId("report-known-at").addEventListener("input", () => {
   renderKnownAtCut(byId("report-known-at").value.trim());
   invalidateValuationFilingSelection();
+});
+byId("known-at-now-btn")?.addEventListener("click", () => {
+  const input = byId("report-known-at");
+  if (!input) return;
+  input.value = new Date().toISOString();
+  input.dispatchEvent(new Event("change"));
 });
 byId("market-comparison-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -730,9 +745,15 @@ const DEFAULT_BOARD_ID = BOARD_REGISTRY[0].id;
 
 async function loadActivoCompactHeader(deferredRequest = null) {
   const container = byId("asset-compact-header");
-  if (!container || !selectedMarketAsset) return;
-  const knownAt = byId("report-known-at").value.trim();
-  const cached = getCachedInvestorOverviewAsset(selectedMarketAsset, knownAt);
+  const assetId = deferredRequest?.assetId ?? selectedMarketAsset;
+  const knownAt = deferredRequest?.knownAt ?? byId("report-known-at").value.trim();
+  if (!container || !assetId) return;
+  const isStillCurrent = () =>
+    assetId === selectedMarketAsset
+    && knownAt === byId("report-known-at").value.trim()
+    && (!deferredRequest || isCurrentActivoBoardRequest(deferredRequest));
+  if (!isStillCurrent()) return;
+  const cached = getCachedInvestorOverviewAsset(assetId, knownAt);
   if (cached) {
     if (typeof renderActivoCompactHeader === "function") {
       renderActivoCompactHeader(cached);
@@ -740,54 +761,104 @@ async function loadActivoCompactHeader(deferredRequest = null) {
     return;
   }
   const signal = activeAssetAbortController ? activeAssetAbortController.signal : undefined;
+  const retryHeader = () => loadActivoCompactHeader();
   try {
-    const overview = await fetchInvestorOverviewBatch([selectedMarketAsset], knownAt, { signal });
-    if (deferredRequest && !isCurrentActivoBoardRequest(deferredRequest)) return;
-    if (selectedMarketAsset !== overview?.assets?.[0]?.asset_id) return;
-    if (typeof renderActivoCompactHeader === "function" && overview?.assets?.[0]) {
-      renderActivoCompactHeader(overview.assets[0]);
+    const fetchHeader = () => fetchInvestorOverviewBatch([assetId], knownAt, { signal });
+    const overview = typeof runWithActivoConcurrencyLimit === "function"
+      ? await runWithActivoConcurrencyLimit(fetchHeader, { signal })
+      : await fetchHeader();
+    if (!isStillCurrent()) return;
+    const item = overview?.assets?.[0];
+    if (!item || item.asset_id !== assetId) {
+      throw new Error("El resumen del activo recibido no coincide con la selección vigente.");
+    }
+    if (typeof renderActivoCompactHeader === "function") {
+      renderActivoCompactHeader(item);
     }
   } catch (error) {
-    if (error && error.name === "AbortError") return;
-    if (deferredRequest && !isCurrentActivoBoardRequest(deferredRequest)) return;
+    if (error && error.name === "AbortError") {
+      if (isStillCurrent()) {
+        const retryBtn = createElement("button", "button secondary compact", "Reintentar");
+        retryBtn.type = "button";
+        retryBtn.addEventListener("click", () => {
+          void retryHeader();
+        });
+        container.replaceChildren(
+          createElement("p", "asset-compact-error", `Resumen cancelado · corte ${formatKnownAtLabel(knownAt)}.`),
+          retryBtn,
+        );
+        if (deferredRequest) throw error;
+      }
+      return;
+    }
+    if (!isStillCurrent()) return;
+    const retryBtn = createElement("button", "button secondary compact", "Reintentar");
+    retryBtn.type = "button";
+    retryBtn.addEventListener("click", () => {
+      void retryHeader();
+    });
     container.replaceChildren(
       createElement("p", "asset-compact-error", `Resumen no disponible: ${error.message}`),
+      retryBtn,
     );
+    if (deferredRequest) throw error;
   }
 }
 
 async function loadActivoCurrentSubtab(deferredRequest = null) {
   if (!selectedMarketAsset) return;
   const subtab = activeAssetSubtabId || "mercado";
-  const knownAt = byId("report-known-at").value.trim();
-  const contextKey = `${selectedMarketAsset}|${knownAt}|${subtab}|${selectedFundamentalFrequency || ""}`;
-  if (activeAssetSubtabKeys.get(subtab) === contextKey) return;
-  activeAssetSubtabKeys.set(subtab, contextKey);
-
+  const assetId = deferredRequest?.assetId ?? selectedMarketAsset;
+  const knownAt = deferredRequest?.knownAt ?? byId("report-known-at").value.trim();
+  const presentation = marketAssets[assetId] || marketAssetPresentation();
+  const contextKey = `${assetId}|${knownAt}|${subtab}|${selectedFundamentalFrequency || ""}`;
+  if (!loadActivoCurrentSubtab._inFlightKeys) {
+    loadActivoCurrentSubtab._inFlightKeys = new Map();
+  }
+  const inFlightKeys = loadActivoCurrentSubtab._inFlightKeys;
   const req = deferredRequest || Object.freeze({
     sequence: activoBoardRequestSequence,
-    assetId: selectedMarketAsset,
+    assetId,
     knownAt,
   });
+  const inFlightEntry = inFlightKeys.get(subtab);
+  if (
+    activeAssetSubtabKeys.get(subtab) === contextKey
+    || (inFlightEntry && inFlightEntry.contextKey === contextKey && inFlightEntry.sequence === req.sequence)
+  ) {
+    return;
+  }
+  const inFlightToken = Object.freeze({ contextKey, sequence: req.sequence });
+  inFlightKeys.set(subtab, inFlightToken);
 
   const tasks = [loadActivoCompactHeader(req)];
-  const presentation = marketAssetPresentation();
   if (subtab === "mercado") {
     tasks.push(queryMarketChart(req));
   } else if (subtab === "fundamentales" && presentation.hasFundamentals) {
     tasks.push(queryFundamentalTrend(req), queryFundamentalResearch(req));
-  } else if (subtab === "valoracion" && presentation.hasValuation) {
+  } else if (subtab === "valoracion" && presentation.hasFundamentals) {
     tasks.push(queryValuation(req));
-  } else if (subtab === "analisis" && presentation.hasCompleteAnalysis) {
+  } else if (subtab === "analisis" && presentation.hasFundamentals) {
     tasks.push(queryReport(req));
   } else if (subtab === "derivados-crypto" && presentation.supportsCryptoDerivatives) {
     tasks.push(queryCryptoDerivatives());
   }
 
-  const results = await Promise.allSettled(tasks);
-  if (!isCurrentActivoBoardRequest(req)) return;
-  if (results.some((r) => r.status === "rejected")) {
-    activeAssetSubtabKeys.delete(subtab);
+  try {
+    const results = await Promise.allSettled(tasks);
+    if (!isCurrentActivoBoardRequest(req)) return;
+    if (results.some((r) => r.status === "rejected")) {
+      activeAssetSubtabKeys.delete(subtab);
+      if (deferredRequest) {
+        throw new Error("Al menos una consulta del tablero Activo falló o fue cancelada.");
+      }
+    } else {
+      activeAssetSubtabKeys.set(subtab, contextKey);
+    }
+  } finally {
+    if (inFlightKeys.get(subtab) === inFlightToken) {
+      inFlightKeys.delete(subtab);
+    }
   }
 }
 
@@ -938,7 +1009,8 @@ function activateBoard(boardId, { focus = true } = {}) {
     if (isActive) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
-  renderAssetScopeForBoard(resolvedId);
+  const willLoadBoard = boardDataReady && !loadedBoardIds.has(resolvedId);
+  renderAssetScopeForBoard(resolvedId, { dispatchSubtabLoad: !willLoadBoard });
   if (window.location.hash.replace(/^#/, "") !== resolvedId) {
     history.replaceState(null, "", `#${resolvedId}`);
   }

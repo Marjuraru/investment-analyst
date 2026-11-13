@@ -1187,17 +1187,12 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
     byId("chart-range-change").className = "chart-change neutral";
     byId("chart-latest-date").textContent = "Sin datos locales para el corte seleccionado";
     empty.textContent = intraday
-      ? "No hay velas intradía locales para este corte. Usa «Actualizar BTC-USD» para importar las últimas 24 horas."
-      : "No hay historial de precios para este corte.";
+      ? `No hay velas intradía locales para el corte ${formatInstant(chart.known_at)}. Usa «Actualizar BTC-USD» para importar las últimas 24 horas.`
+      : `Sin barras elegibles para este corte/ventana (${formatInstant(chart.known_at)}).`;
     empty.classList.remove("hidden");
     byId("market-chart-card").classList.add("is-empty-state");
     byId("market-chart").replaceChildren();
     byId("chart-table-body").replaceChildren();
-    resetMarketSnapshot();
-    byId("chart-latest-close").textContent = "—";
-    byId("chart-range-change").textContent = "—";
-    byId("chart-range-change").className = "chart-change neutral";
-    byId("chart-latest-date").textContent = "No fue posible consultar este activo";
     byId("chart-status").textContent = `Corte: ${formatInstant(chart.known_at)} · sin precios disponibles.`;
     return;
   }
@@ -1275,6 +1270,27 @@ function setChartBusy(busy) {
   }
 }
 
+function setInlineRetryAction(anchorEl, buttonId, retryFn, label = "Reintentar") {
+  if (!anchorEl || typeof anchorEl.insertAdjacentElement !== "function") return;
+  let button = byId(buttonId);
+  if (!retryFn) {
+    if (button) button.classList.add("hidden");
+    return;
+  }
+  if (!button) {
+    button = createElement("button", "button secondary compact activo-retry-btn", label);
+    button.id = buttonId;
+    button.type = "button";
+    anchorEl.insertAdjacentElement("afterend", button);
+  }
+  button.textContent = label;
+  button.onclick = () => {
+    button.classList.add("hidden");
+    void retryFn();
+  };
+  button.classList.remove("hidden");
+}
+
 async function queryMarketChart(deferredRequest = null) {
   const request = ++marketChartRequestSequence;
   const assetId = deferredRequest?.assetId ?? selectedMarketAsset;
@@ -1288,8 +1304,14 @@ async function queryMarketChart(deferredRequest = null) {
   if (!isCurrentRequest()) return;
   marketChartDrag = null;
   byId("market-chart").classList.remove("is-panning");
+  if (typeof setInlineRetryAction === "function") {
+    setInlineRetryAction(byId("chart-empty"), "chart-retry-button", null);
+  }
   setChartBusy(true);
   setExportAvailable("export-market-csv", false);
+  if (typeof setActiveAssetContextState === "function") {
+    setActiveAssetContextState({ status: "loading", assetId, knownAt, subtab: "mercado", reason: null, message: null });
+  }
   byId("chart-status").textContent = "Consultando el histórico local…";
   const requestedPeriod = marketChartPeriod();
   const intraday = isIntradayInterval();
@@ -1307,7 +1329,18 @@ async function queryMarketChart(deferredRequest = null) {
     parameters.set("bollinger_multiplier", chartSettings.bollingerMultiplier);
   }
   const signal = activeAssetAbortController ? activeAssetAbortController.signal : undefined;
+  const retryChart = () => {
+    activeAssetSubtabKeys.delete("mercado");
+    return queryMarketChart();
+  };
+  let slotToken = null;
   try {
+    if (typeof acquireActivoFetchSlot === "function") {
+      const pendingSlot = acquireActivoFetchSlot({ signal });
+      slotToken = pendingSlot && typeof pendingSlot.then === "function"
+        ? await pendingSlot
+        : pendingSlot;
+    }
     const payload = await api(
       `${intraday ? "/api/market-intraday" : "/api/market-chart"}?${parameters.toString()}`,
       { signal },
@@ -1316,13 +1349,45 @@ async function queryMarketChart(deferredRequest = null) {
     rememberViewPreview(`market-chart:${assetId}:${knownAt}`, payload);
     clearPreviousCutNotice();
     renderMarketChart(intraday ? normalizeBtcIntradayChart(payload) : payload);
+    if (typeof setActiveAssetContextState === "function") {
+      setActiveAssetContextState({
+        status: (payload.points || []).length ? "ready" : "empty",
+        assetId,
+        knownAt,
+        subtab: "mercado",
+        reason: null,
+        message: null,
+      });
+    }
   } catch (error) {
-    if (error && error.name === "AbortError") return;
+    if (error && error.name === "AbortError") {
+      if (isCurrentRequest()) {
+        const empty = byId("chart-empty");
+        if (empty) {
+          empty.textContent = "Consulta de gráfico cancelada. Puedes reintentar manualmente.";
+          empty.classList.remove("hidden");
+          if (typeof setInlineRetryAction === "function") {
+            setInlineRetryAction(empty, "chart-retry-button", retryChart);
+          }
+        }
+        byId("chart-status").textContent = "El gráfico no pudo construirse para el corte solicitado.";
+        if (typeof setActiveAssetContextState === "function") {
+          setActiveAssetContextState({ status: "cancelled", assetId, knownAt, subtab: "mercado", reason: "aborted", message: "Consulta cancelada." });
+        }
+        if (deferredRequest) throw error;
+      }
+      return;
+    }
     if (!isCurrentRequest()) return;
     marketChartPayload = null;
     marketChartViewport = null;
     updateMarketChartZoomState();
     setExportAvailable("export-market-csv", false);
+    if (typeof resetMarketSnapshot === "function") resetMarketSnapshot();
+    byId("chart-latest-close").textContent = "—";
+    byId("chart-latest-date").textContent = "Error al consultar este activo";
+    byId("chart-range-change").textContent = "—";
+    byId("chart-range-change").className = "chart-change neutral";
     byId("market-chart").replaceChildren();
     byId("chart-table-body").replaceChildren();
     const empty = byId("chart-empty");
@@ -1332,8 +1397,18 @@ async function queryMarketChart(deferredRequest = null) {
         "No hay velas intradía locales para este corte. Usa «Actualizar BTC-USD» para importar las últimas 24 horas.";
     }
     empty.classList.remove("hidden");
+    if (typeof setInlineRetryAction === "function") {
+      setInlineRetryAction(empty, "chart-retry-button", retryChart);
+    }
     byId("chart-status").textContent = "El gráfico no pudo construirse para el corte solicitado.";
+    if (typeof setActiveAssetContextState === "function") {
+      setActiveAssetContextState({ status: "error", assetId, knownAt, subtab: "mercado", reason: error.code || "chart_error", message: error.message });
+    }
+    if (deferredRequest) throw error;
   } finally {
+    if (slotToken && typeof releaseActivoFetchSlot === "function") {
+      releaseActivoFetchSlot(slotToken);
+    }
     if (isLatestRequest()) setChartBusy(false);
   }
 }
@@ -2317,12 +2392,12 @@ function renderFundamentalRatios(section) {
   }
 }
 
-function setFundamentalBusy(busy) {
-  fundamentalBusyCount = Math.max(0, fundamentalBusyCount + (busy ? 1 : -1));
+function setFundamentalBusy(busy, { forceReset = false } = {}) {
+  fundamentalBusyCount = forceReset ? 0 : Math.max(0, fundamentalBusyCount + (busy ? 1 : -1));
   const active = fundamentalBusyCount > 0;
-  byId("fundamental-trend-card").setAttribute("aria-busy", String(active));
-  byId("fundamental-research-panel").setAttribute("aria-busy", String(active));
-  byId("company-profile").setAttribute("aria-busy", String(active));
+  byId("fundamental-trend-card")?.setAttribute("aria-busy", String(active));
+  byId("fundamental-research-panel")?.setAttribute("aria-busy", String(active));
+  byId("company-profile")?.setAttribute("aria-busy", String(active));
   for (const button of document.querySelectorAll(".frequency-button")) button.disabled = active;
 }
 
@@ -2342,14 +2417,18 @@ async function queryFundamentalTrend(deferredRequest = null) {
   const assetId = deferredRequest?.assetId ?? selectedMarketAsset;
   const knownAt = deferredRequest?.knownAt ?? byId("report-known-at").value.trim();
   const frequency = selectedFundamentalFrequency;
+  const isLatestRequest = () => request === fundamentalTrendRequestSequence;
   const isCurrentRequest = () =>
-    request === fundamentalTrendRequestSequence
+    isLatestRequest()
     && assetId === selectedMarketAsset
     && knownAt === byId("report-known-at").value.trim()
     && frequency === selectedFundamentalFrequency
     && (!deferredRequest || isCurrentActivoBoardRequest(deferredRequest));
   if (!isCurrentRequest()) return;
+  let acquiredBusy = false;
+  setInlineRetryAction(byId("fundamental-empty"), "fundamental-trend-retry-button", null);
   setFundamentalBusy(true);
+  acquiredBusy = true;
   setExportAvailable("export-fundamental-csv", false);
   byId("fundamental-status").textContent = "Consultando fundamentales locales…";
   const parameters = new URLSearchParams({
@@ -2358,12 +2437,37 @@ async function queryFundamentalTrend(deferredRequest = null) {
     frequency,
   });
   const signal = activeAssetAbortController ? activeAssetAbortController.signal : undefined;
+  const retryTrend = () => {
+    activeAssetSubtabKeys.delete("fundamentales");
+    return queryFundamentalTrend();
+  };
+  let slotToken = null;
   try {
+    if (typeof acquireActivoFetchSlot === "function") {
+      const pendingSlot = acquireActivoFetchSlot({ signal });
+      slotToken = pendingSlot && typeof pendingSlot.then === "function"
+        ? await pendingSlot
+        : pendingSlot;
+    }
     const payload = await api(`/api/fundamental-trend?${parameters.toString()}`, { signal });
     if (!isCurrentRequest()) return;
     renderFundamentalTrend(payload);
   } catch (error) {
-    if (error && error.name === "AbortError") return;
+    if (error && error.name === "AbortError") {
+      if (isCurrentRequest()) {
+        const empty = byId("fundamental-empty");
+        if (empty) {
+          empty.textContent = "Consulta de tendencia fundamental cancelada.";
+          empty.classList.remove("hidden");
+          if (typeof setInlineRetryAction === "function") {
+            setInlineRetryAction(empty, "fundamental-trend-retry-button", retryTrend);
+          }
+        }
+        byId("fundamental-status").textContent = "La tendencia fundamental no pudo construirse.";
+        if (deferredRequest) throw error;
+      }
+      return;
+    }
     if (!isCurrentRequest()) return;
     fundamentalTrendPayload = null;
     setExportAvailable("export-fundamental-csv", false);
@@ -2373,9 +2477,16 @@ async function queryFundamentalTrend(deferredRequest = null) {
     const empty = byId("fundamental-empty");
     empty.textContent = error.message;
     empty.classList.remove("hidden");
+    if (typeof setInlineRetryAction === "function") {
+      setInlineRetryAction(empty, "fundamental-trend-retry-button", retryTrend);
+    }
     byId("fundamental-status").textContent = "La tendencia fundamental no pudo construirse.";
+    if (deferredRequest) throw error;
   } finally {
-    setFundamentalBusy(false);
+    if (slotToken && typeof releaseActivoFetchSlot === "function") {
+      releaseActivoFetchSlot(slotToken);
+    }
+    if (acquiredBusy && isLatestRequest()) setFundamentalBusy(false);
   }
 }
 
@@ -2384,14 +2495,20 @@ async function queryFundamentalResearch(deferredRequest = null) {
   const assetId = deferredRequest?.assetId ?? selectedMarketAsset;
   const knownAt = deferredRequest?.knownAt ?? byId("report-known-at").value.trim();
   const frequency = selectedFundamentalFrequency;
+  const isLatestRequest = () => request === fundamentalResearchRequestSequence;
   const isCurrentRequest = () =>
-    request === fundamentalResearchRequestSequence
+    isLatestRequest()
     && assetId === selectedMarketAsset
     && knownAt === byId("report-known-at").value.trim()
     && frequency === selectedFundamentalFrequency
     && (!deferredRequest || isCurrentActivoBoardRequest(deferredRequest));
   if (!isCurrentRequest()) return;
+  let acquiredBusy = false;
+  if (typeof setInlineRetryAction === "function") {
+    setInlineRetryAction(byId("fundamental-research-empty"), "fundamental-research-retry-button", null);
+  }
   setFundamentalBusy(true);
+  acquiredBusy = true;
   setExportAvailable("export-fundamental-research-csv", false);
   const parameters = new URLSearchParams({
     asset_id: assetId,
@@ -2399,14 +2516,38 @@ async function queryFundamentalResearch(deferredRequest = null) {
     frequency,
   });
   const signal = activeAssetAbortController ? activeAssetAbortController.signal : undefined;
+  const retryResearch = () => {
+    activeAssetSubtabKeys.delete("fundamentales");
+    return queryFundamentalResearch();
+  };
+  let slotToken = null;
   try {
+    if (typeof acquireActivoFetchSlot === "function") {
+      const pendingSlot = acquireActivoFetchSlot({ signal });
+      slotToken = pendingSlot && typeof pendingSlot.then === "function"
+        ? await pendingSlot
+        : pendingSlot;
+    }
     const payload = await api(`/api/fundamental-analysis?${parameters.toString()}`, { signal });
     if (!isCurrentRequest()) return;
     rememberViewPreview(`fundamental-analysis:${assetId}:${knownAt}:${frequency}`, payload);
     clearPreviousCutNotice();
     renderFundamentalResearch(payload);
   } catch (error) {
-    if (error && error.name === "AbortError") return;
+    if (error && error.name === "AbortError") {
+      if (isCurrentRequest()) {
+        const empty = byId("fundamental-research-empty");
+        if (empty) {
+          empty.textContent = "Consulta de análisis fundamental cancelada.";
+          empty.classList.remove("hidden");
+          if (typeof setInlineRetryAction === "function") {
+            setInlineRetryAction(empty, "fundamental-research-retry-button", retryResearch);
+          }
+        }
+        if (deferredRequest) throw error;
+      }
+      return;
+    }
     if (!isCurrentRequest()) return;
     fundamentalResearchPayload = null;
     setExportAvailable("export-fundamental-research-csv", false);
@@ -2416,8 +2557,15 @@ async function queryFundamentalResearch(deferredRequest = null) {
     const empty = byId("fundamental-research-empty");
     empty.textContent = error.message;
     empty.classList.remove("hidden");
+    if (typeof setInlineRetryAction === "function") {
+      setInlineRetryAction(empty, "fundamental-research-retry-button", retryResearch);
+    }
+    if (deferredRequest) throw error;
   } finally {
-    setFundamentalBusy(false);
+    if (slotToken && typeof releaseActivoFetchSlot === "function") {
+      releaseActivoFetchSlot(slotToken);
+    }
+    if (acquiredBusy && isLatestRequest()) setFundamentalBusy(false);
   }
 }
 
@@ -2989,8 +3137,16 @@ function renderValuation(payload) {
 
 async function queryValuation(deferredRequest = null) {
   if (!marketAssetPresentation().hasFundamentals) return;
+  const request = ++valuationRequestSequence;
   const assetId = deferredRequest?.assetId ?? selectedMarketAsset;
   const knownAt = deferredRequest?.knownAt ?? byId("report-known-at").value.trim();
+  const isLatestRequest = () => request === valuationRequestSequence;
+  const isCurrentRequest = () =>
+    isLatestRequest()
+    && assetId === selectedMarketAsset
+    && knownAt === byId("report-known-at").value.trim()
+    && (!deferredRequest || isCurrentActivoBoardRequest(deferredRequest));
+  if (!isCurrentRequest()) return;
   const card = byId("valuation-card");
   const button = byId("query-valuation");
   card.setAttribute("aria-busy", "true");
@@ -3009,18 +3165,37 @@ async function queryValuation(deferredRequest = null) {
     basis: "latest_annual",
   });
   const signal = activeAssetAbortController ? activeAssetAbortController.signal : undefined;
+  let slotToken = null;
   try {
+    if (typeof acquireActivoFetchSlot === "function") {
+      const pendingSlot = acquireActivoFetchSlot({ signal });
+      slotToken = pendingSlot && typeof pendingSlot.then === "function"
+        ? await pendingSlot
+        : pendingSlot;
+    }
     const payload = await api(`/api/v1/valuation?${parameters.toString()}`, { signal });
-    if (assetId !== selectedMarketAsset || knownAt !== byId("report-known-at").value.trim()) return;
+    if (!isCurrentRequest()) return;
     renderValuation(payload);
   } catch (error) {
-    if (error && error.name === "AbortError") return;
-    if (assetId !== selectedMarketAsset || knownAt !== byId("report-known-at").value.trim()) return;
+    if (error && error.name === "AbortError") {
+      if (isCurrentRequest()) {
+        byId("valuation-status").textContent = `Consulta de valoración cancelada · corte ${formatInstant(knownAt)}`;
+        if (deferredRequest) throw error;
+      }
+      return;
+    }
+    if (!isCurrentRequest()) return;
     resetValuation();
-    byId("valuation-status").textContent = error.message;
+    byId("valuation-status").textContent = `${error.message} (Corte ${formatInstant(knownAt)})`;
+    if (deferredRequest) throw error;
   } finally {
-    card.setAttribute("aria-busy", "false");
-    setButtonBusy(button, false, "Consultando…", "Cargar valoración");
+    if (slotToken && typeof releaseActivoFetchSlot === "function") {
+      releaseActivoFetchSlot(slotToken);
+    }
+    if (isLatestRequest()) {
+      card.setAttribute("aria-busy", "false");
+      setButtonBusy(button, false, "Consultando…", "Cargar valoración");
+    }
   }
 }
 
@@ -3298,10 +3473,18 @@ async function queryReport() {
   if (byId("fundamental-as-of").value) {
     parameters.set("fundamental_as_of", byId("fundamental-as-of").value);
   }
+  const signal = activeAssetAbortController?.signal;
+  let slotToken = null;
   try {
+    if (typeof acquireActivoFetchSlot === "function") {
+      const pendingSlot = acquireActivoFetchSlot({ signal });
+      slotToken = pendingSlot && typeof pendingSlot.then === "function"
+        ? await pendingSlot
+        : pendingSlot;
+    }
     parameters.set("asset_id", assetId);
     const report = await api(`/api/listed-company-report?${parameters.toString()}`, {
-      signal: activeAssetAbortController?.signal,
+      signal,
     });
     if (
       request !== listedCompanyReportRequest
@@ -3315,11 +3498,21 @@ async function queryReport() {
     renderReport(report);
     setMessage(operationalIssues.join(" · "), operationalIssues.length > 0);
   } catch (error) {
-    if (error?.name === "AbortError") return;
+    if (error?.name === "AbortError") {
+      if (isCurrentRequest()) {
+        setMessage("Consulta de análisis cancelada.", false);
+        if (deferredRequest) throw error;
+      }
+      return;
+    }
     if (!isCurrentRequest()) return;
     setMessage(error.message, true);
+    if (deferredRequest) throw error;
   } finally {
-    if (isCurrentRequest()) {
+    if (slotToken && typeof releaseActivoFetchSlot === "function") {
+      releaseActivoFetchSlot(slotToken);
+    }
+    if (isLatestRequest()) {
       reportArea.setAttribute("aria-busy", "false");
       setButtonBusy(button, false, "Consultando…", "Consultar análisis");
     }
