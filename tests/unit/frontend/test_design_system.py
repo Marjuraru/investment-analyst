@@ -456,6 +456,11 @@ _THEMED_TEXT_SURFACE_PAIRS: tuple[tuple[str, str], ...] = (
     ("blocked-ink", "surface"),
     ("blocked-ink", "surface-subtle"),
     ("blocked-ink", "blocked-soft"),
+    ("info-ink", "surface"),
+    ("info-ink", "surface-subtle"),
+    ("info-ink", "canvas"),
+    ("info-ink", "info-soft"),
+    ("info", "info-soft"),
 )
 
 # Rail and code tokens are declared identical in both themes (a
@@ -1781,6 +1786,9 @@ _WARM_EXEMPT_TOKENS = frozenset(
         "negative-ink",
         "blocked-ink",
         "blocked-soft",
+        "info",
+        "info-soft",
+        "info-ink",
         "series-sma-5",
         "series-sma-20",
         "series-sma-50",
@@ -2887,7 +2895,7 @@ def _sistema_slice(index_html: str) -> str:
 def _check_mesa_presents_the_four_reading_layers_in_order(index_html: str) -> None:
     mesa = _mesa_slice(index_html)
     assert 'class="mesa-layout"' in mesa
-    assert mesa.index('id="mesa-news-analytical"') < mesa.index('id="mesa-investor-table"')
+    assert mesa.index('id="mesa-investor-table"') < mesa.index('id="mesa-news-analytical"')
     assert "EN QUÉ CONFÍO" not in mesa
     assert 'id="app-sidebar"' not in mesa
     assert 'id="board-nav"' not in mesa
@@ -2900,7 +2908,7 @@ def test_mesa_presents_the_four_reading_layers_in_order() -> None:
 def _check_universe_matrix_is_the_last_layer(index_html: str) -> None:
     mesa = _mesa_slice(index_html)
     sistema = _sistema_slice(index_html)
-    assert mesa.index('id="mesa-news-analytical"') < mesa.index('id="mesa-investor-table"')
+    assert mesa.index('id="mesa-investor-table"') < mesa.index('id="mesa-news-analytical"')
     assert 'id="mesa-incidents-list"' not in mesa
     headings = (
         'id="mesa-incidents-titulo"',
@@ -3222,7 +3230,7 @@ def _check_design_system_documentation_declares_the_mesa_hierarchy(doc_text: str
     for phrase in (
         "novedades de las bandejas",
         "columna principal",
-        "340 px",
+        "minmax(0, 1fr)",
         "fuentes bloqueadas",
         "incidencias",
         "universo",
@@ -3250,7 +3258,8 @@ def test_design_system_documentation_declares_the_mesa_hierarchy() -> None:
 def _check_mesa_three_column_composition(index_html: str, styles_css: str) -> None:
     mesa = _mesa_slice(index_html)
     assert mesa.count('class="mesa-layout"') == 1
-    assert "grid-template-columns: minmax(0, 1fr) 340px;" in styles_css
+    layout_match = re.search(r"\n\.mesa-layout\s*\{([^}]*)\}", f"\n{styles_css}", re.DOTALL)
+    assert layout_match and "grid-template-columns: minmax(0, 1fr);" in layout_match.group(1)
     assert "@media (max-width: 1120px)" in styles_css
     assert ".mesa-layout {\n    grid-template-columns: 1fr;" in styles_css
 
@@ -4426,8 +4435,8 @@ def test_probe_mesa_hierarchy_documentation_rule_catches_a_missing_declaration()
 def test_probe_ui9_mesa_layout_rule_catches_a_non_340px_aside() -> None:
     _check_mesa_three_column_composition(INDEX_HTML, STYLES_CSS)
     corrupted = STYLES_CSS.replace(
-        "grid-template-columns: minmax(0, 1fr) 340px;",
-        "grid-template-columns: minmax(0, 1fr) 341px;",
+        ".mesa-layout {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr);",
+        ".mesa-layout {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) 340px;",
         1,
     )
     assert corrupted != STYLES_CSS

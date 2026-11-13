@@ -537,8 +537,11 @@ byId("report-known-at").addEventListener("change", () => {
     abortMesaInvestorRequests();
     if (typeof mesaInvestorUiState === "object" && mesaInvestorUiState) {
       mesaInvestorUiState.failedAssetIds?.clear();
+      mesaInvestorUiState.pausedAssetIds?.clear();
       mesaInvestorUiState.cancelledAssetIds?.clear();
       mesaInvestorUiState.batchError = null;
+      mesaInvestorUiState.pausedReason = null;
+      mesaInvestorUiState.hasQueriedCut = "";
       mesaInvestorUiState.batchStatus = "idle";
     }
   }
@@ -701,6 +704,9 @@ function navigateToReviewContext(target) {
     return true;
   }
   activateBoard("revisar", { focus: true });
+  if (typeof selectRevisarSubtab === "function") {
+    selectRevisarSubtab("candidates");
+  }
   reviewSelectItem(target.family, target.id);
   return true;
 }
@@ -756,7 +762,7 @@ async function loadActivoCompactHeader(deferredRequest = null) {
   const cached = getCachedInvestorOverviewAsset(assetId, knownAt);
   if (cached) {
     if (typeof renderActivoCompactHeader === "function") {
-      renderActivoCompactHeader(cached);
+      renderActivoCompactHeader(cached, investorOverviewState.knownAt || knownAt);
     }
     return;
   }
@@ -773,7 +779,7 @@ async function loadActivoCompactHeader(deferredRequest = null) {
       throw new Error("El resumen del activo recibido no coincide con la selección vigente.");
     }
     if (typeof renderActivoCompactHeader === "function") {
-      renderActivoCompactHeader(item);
+      renderActivoCompactHeader(item, overview?.known_at || knownAt);
     }
   } catch (error) {
     if (error && error.name === "AbortError") {
@@ -1020,9 +1026,50 @@ function activateBoard(boardId, { focus = true } = {}) {
   if (boardDataReady) loadDeferredBoardData(resolvedId);
 }
 
+function selectRevisarSubtab(tab) {
+  const isExplore = tab === "explore";
+  const tabCandidates = byId("revisar-tab-candidates");
+  const tabExplore = byId("revisar-tab-explore");
+  const panelCandidates = byId("review-master-detail");
+  const panelExplore = byId("review-explore-panel");
+  if (tabCandidates) tabCandidates.setAttribute("aria-selected", String(!isExplore));
+  if (tabExplore) tabExplore.setAttribute("aria-selected", String(isExplore));
+  if (panelCandidates) panelCandidates.hidden = isExplore;
+  if (panelExplore) panelExplore.hidden = !isExplore;
+}
+
+function initializeHeaderUiToggles() {
+  const strip = byId("market-clock-strip");
+  const toggle = byId("market-clock-toggle");
+  if (strip && toggle && !toggle.dataset.bound) {
+    toggle.dataset.bound = "true";
+    const startCollapsed = typeof window !== "undefined" && Number(window.innerWidth) > 0 && window.innerWidth <= 1440;
+    strip.dataset.clocksCollapsed = String(startCollapsed);
+    toggle.setAttribute("aria-expanded", String(!startCollapsed));
+    toggle.textContent = startCollapsed ? "Ver horarios" : "Menos horarios";
+    toggle.addEventListener("click", () => {
+      const nextCollapsed = strip.dataset.clocksCollapsed !== "true";
+      strip.dataset.clocksCollapsed = String(nextCollapsed);
+      toggle.setAttribute("aria-expanded", String(!nextCollapsed));
+      toggle.textContent = nextCollapsed ? "Ver horarios" : "Menos horarios";
+    });
+  }
+  const tabCandidates = byId("revisar-tab-candidates");
+  const tabExplore = byId("revisar-tab-explore");
+  if (tabCandidates && !tabCandidates.dataset.bound) {
+    tabCandidates.dataset.bound = "true";
+    tabCandidates.addEventListener("click", () => selectRevisarSubtab("candidates"));
+  }
+  if (tabExplore && !tabExplore.dataset.bound) {
+    tabExplore.dataset.bound = "true";
+    tabExplore.addEventListener("click", () => selectRevisarSubtab("explore"));
+  }
+}
+
 function initializeBoardShell() {
   renderBoardNav();
   renderNotBuiltBoards();
+  initializeHeaderUiToggles();
   activateBoard(boardIdFromLocationHash(), { focus: false });
   for (const link of document.querySelectorAll(".board-nav-link")) {
     link.addEventListener("click", (event) => {

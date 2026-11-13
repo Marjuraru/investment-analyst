@@ -196,14 +196,16 @@ function renderCazatiburonesUniverseRows() {
   const error = byId("cazatiburones-universe-error");
   const body = byId("cazatiburones-universe-rows");
   const filterStatus = byId("cazatiburones-universe-filter-status");
+  const collectionStatus = byId("cazatiburones-universe-collection-status");
   body.replaceChildren();
   tableScroll.classList.add("hidden");
   empty.classList.add("hidden");
   error.classList.add("hidden");
+  collectionStatus.classList.remove("hidden");
   if (!cazatiburonesUniverseSnapshot) {
     filterStatus.textContent = "El índice aún no tiene evidencia cargada.";
     renderProgressiveCollectionControls(
-      byId("cazatiburones-universe-collection-status"),
+      collectionStatus,
       byId("cazatiburones-universe-collection-controls"),
       0,
       0,
@@ -319,6 +321,10 @@ function renderCazatiburonesUniverseLoading() {
   byId("cazatiburones-universe-empty").classList.add("hidden");
   byId("cazatiburones-universe-error").classList.add("hidden");
   byId("cazatiburones-universe-table-scroll").classList.add("hidden");
+  const collectionStatus = byId("cazatiburones-universe-collection-status");
+  collectionStatus.textContent = "Consultando el índice…";
+  collectionStatus.classList.add("hidden");
+  byId("cazatiburones-universe-collection-controls").replaceChildren();
   byId("cazatiburones-universe-filter-status").textContent = "Esperando la evidencia del corte global vigente.";
 }
 
@@ -328,6 +334,10 @@ function renderCazatiburonesUniverseError(message) {
   byId("cazatiburones-universe-loading").classList.add("hidden");
   byId("cazatiburones-universe-empty").classList.add("hidden");
   byId("cazatiburones-universe-table-scroll").classList.add("hidden");
+  const collectionStatus = byId("cazatiburones-universe-collection-status");
+  collectionStatus.textContent = "Índice no disponible.";
+  collectionStatus.classList.add("hidden");
+  byId("cazatiburones-universe-collection-controls").replaceChildren();
   const error = byId("cazatiburones-universe-error");
   error.textContent = message;
   error.classList.remove("hidden");
@@ -432,7 +442,11 @@ function cazatiburonesFieldOrAbsence(value, formatter = String) {
 
 function cazatiburonesMetricMarkup(metric) {
   if (metric.status === "available") {
-    return `<span class="figure">${formatNumber(metric.value)}</span>`;
+    const text = typeof formatDecimalRatio === "function"
+      ? formatDecimalRatio(metric.value, 4, { trimTrailingZeros: true })
+      : formatNumber(metric.value);
+    const exactTitle = metric.value !== null && metric.value !== undefined ? ` title="Valor exacto: ${metric.value}"` : "";
+    return `<span class="figure"${exactTitle}>${text}</span>`;
   }
   return renderAbsenceMark(
     metric.status === "missing" ? "missing" : "not-evaluable",
@@ -557,7 +571,7 @@ function renderCazatiburonesInstitutionalObservations(payload, offset, limit) {
           `<dl>` +
           `<dt>CUSIP</dt><dd>${view.row.cusip}</dd>` +
           `<dt>Campo</dt><dd>${view.observation.field_name}</dd>` +
-          `<dt>Valor as-filed</dt><dd><span class="figure">${formatNumber(view.observation.value)}</span></dd>` +
+          `<dt>Valor as-filed</dt><dd><span class="figure" title="Valor exacto: ${view.observation.value} ${view.observation.unit}">${formatDecimalRatio(view.observation.value, 4, { trimTrailingZeros: true })}</span></dd>` +
           `<dt>Unidad</dt><dd>${view.observation.unit}</dd>` +
           `<dt>Disponible desde</dt><dd>${formatInstant(view.observation.available_at)}</dd>` +
           `</dl>` +

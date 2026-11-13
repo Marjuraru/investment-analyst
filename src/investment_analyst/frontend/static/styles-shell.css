@@ -25,9 +25,9 @@
 .brand {
   display: inline-flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.55rem;
   min-height: 42px;
-  padding-inline: 0.4rem;
+  padding-inline: 0.25rem;
   border: 0;
   background: transparent;
   color: var(--rail-ink-strong);
@@ -42,13 +42,13 @@
 .brand-mark {
   display: grid;
   flex-shrink: 0;
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
   place-items: center;
   border: 1px solid var(--rail-border-overlay);
   background: linear-gradient(145deg, var(--rail-accent-start), var(--rail-accent-end));
   box-shadow: inset 0 1px var(--rail-overlay-strong);
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 850;
   letter-spacing: 0.05em;
 }
@@ -60,14 +60,14 @@
 }
 
 .brand-text strong {
-  font-size: 0.92rem;
+  font-size: 0.86rem;
   letter-spacing: -0.01em;
 }
 
 .brand-text small {
-  margin-top: 0.18rem;
+  margin-top: 0.16rem;
   color: var(--rail-ink-muted);
-  font-size: 0.78rem;
+  font-size: 0.72rem;
 }
 
 .sidebar-toggle {
@@ -125,11 +125,11 @@
 .nav-link {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.55rem;
   min-height: 38px;
-  padding: 0.45rem 0.65rem;
+  padding: 0.45rem 0.55rem;
   color: var(--rail-ink);
-  font-size: 0.88rem;
+  font-size: 0.84rem;
   font-weight: 650;
   text-decoration: none;
   overflow: hidden;
@@ -491,14 +491,17 @@ main {
 
 .market-clock-strip {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 0.85rem;
+  gap: 0.35rem 0.75rem;
   min-width: 0;
 }
 
 .market-clock-item {
   display: inline-flex;
+  flex: 0 0 auto;
+  max-width: 100%;
   min-width: 0;
   align-items: baseline;
   gap: 0.38rem;
@@ -648,6 +651,11 @@ main {
   color: var(--negative-ink);
 }
 
+.badge.info {
+  background: var(--info-soft);
+  color: var(--info-ink);
+}
+
 .badge.neutral {
   background: var(--neutral-soft);
   color: var(--neutral-ink);
@@ -727,3 +735,135 @@ main {
    else. No rule sets a competing `display` on .board itself, so the
    browser's own [hidden] behavior is sufficient; this rule exists only to
    make that contract explicit and testable. */
+
+.market-clock-strip .market-clock-toggle {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+  color: var(--muted-strong);
+  font: inherit;
+  font-size: 0.66rem;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.market-clock-strip[data-clocks-collapsed="true"] .market-clock-item--secondary {
+  display: none;
+}
+
+.exact-detail-dialog {
+  width: min(560px, 92vw);
+  max-height: 85vh;
+  overflow: auto;
+  padding: 1rem 1.15rem;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.exact-detail-dialog::backdrop {
+  background: var(--topbar);
+}
+
+.exact-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.exact-detail-title {
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: 0.98rem;
+}
+
+.exact-detail-subtitle {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.exact-detail-list {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.9fr) minmax(0, 1.3fr);
+  gap: 0.45rem 0.85rem;
+  margin: 0.75rem 0;
+}
+
+.exact-detail-row {
+  display: contents;
+}
+
+.exact-detail-term {
+  color: var(--muted-strong);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.exact-detail-value {
+  margin: 0;
+  color: var(--ink-strong);
+  font-family: var(--figure-font);
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
+.exact-detail-notes {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.75rem;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.exact-detail-note {
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 0.72rem;
+}
+
+.exact-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.numeric-value--positive {
+  color: var(--positive-ink);
+}
+
+.numeric-value--negative {
+  color: var(--negative-ink);
+}
+
+.numeric-value--neutral {
+  color: var(--ink-strong);
+}
+
+.compact-exact-trigger {
+  min-height: 28px;
+  padding: 0.14rem 0.42rem;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+  color: var(--muted-strong);
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.compact-exact-trigger:hover,
+.compact-exact-trigger:focus-visible {
+  border-color: var(--accent);
+  color: var(--ink-strong);
+}

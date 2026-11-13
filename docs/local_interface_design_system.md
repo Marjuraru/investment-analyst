@@ -56,11 +56,15 @@ directamente fallaba el contraste en tema oscuro (blanco sobre el
 
 `--positive`, `--warning`, `--negative` y sus pares `-ink`/`-soft` no
 cambian respecto de la paleta preexistente. `--blocked-ink`/
-`--blocked-soft` son el único par semántico genuinamente nuevo, usado por
-la marca `blocked` de la gramática de ausencia (ver abajo); los otros
-cuatro estados de ausencia reutilizan tokens neutros/de acento/de
-advertencia ya existentes, distinguidos por forma en vez de por un matiz
-nuevo.
+`--blocked-soft` se usan en la marca `blocked` de la gramática de
+ausencia (ver abajo), y `--info` / `--info-ink` / `--info-soft` expresan
+estados informativos neutros (p. ej. notificaciones nuevas y «Otra fecha»
+o «Carga pausada») con contraste >= 4,5:1 verificado en ambos temas
+(`info-ink` 7,54–8,68 en claro y 8,06–10,71 en oscuro; `info` 5,62–6,47
+en claro y 5,65–7,51 en oscuro sobre `surface`, `surface-subtle`, `canvas`
+y `info-soft`); los otros cuatro estados de ausencia reutilizan tokens
+neutros/de acento/de advertencia ya existentes, distinguidos por forma en
+vez de por un matiz nuevo.
 
 ### Tokens del riel de navegación y del bloque de código
 
@@ -347,21 +351,23 @@ de pintar o aplicar su estado de error; una respuesta superada se descarta en
 silencio. La invalidación no crea persistencia entre recargas, un segundo
 reloj, un segundo selector ni un corte por tablero.
 
-### Mesa: tres columnas y matriz por dominio (`UI-9`)
+### Mesa: ancho completo y tabla primero (`UI-9` / `INVESTOR-UI-READABILITY`)
 
-El lienzo aprobado define una composición que aprovecha el rail global ya existente, sin duplicarlo
-dentro de `mesa`:
+El lienzo aprovecha el rail global ensanchado (`--sidebar-width: 184px`) sin duplicarlo dentro
+de `mesa`:
 
-1. **Columna principal y aside.** `#board-mesa` contiene una columna principal fluida con
-   **Novedades de las bandejas** seguida de **Universo**, y un `aside` fijo de 340 px con
-   **Cobertura del corte**, **Fuentes bloqueadas** e **Incidencias**, en ese orden. Antes de que la
-   lectura pierda espacio, la composición colapsa a una columna; la matriz es el único elemento que
-   puede desplazarse horizontalmente.
+1. **Columna principal a ancho completo.** `#board-mesa` usa una sola columna fluida
+   (`grid-template-columns: minmax(0, 1fr)`) que prioriza la tabla compacta de análisis de
+   inversor (`#mesa-investor-section`) en primer lugar sobre el pliegue, seguida por el bloque
+   desplegable de **Novedades de las bandejas** (`#mesa-news-disclosure`). **Universo**,
+   **Cobertura del corte**, **Fuentes bloqueadas**, **Registro BVL** e **Incidencias** viven
+   consolidados en `#board-sistema`. Antes de que la lectura pierda espacio horizontal, las
+   tablas anchas son el único elemento con desplazamiento horizontal propio.
 2. **Datos sin reordenar su significado.** Los IDs operativos de cobertura, programación,
    trazabilidad y candidatos permanecen en Cobertura/Fuentes bloqueadas; los de alertas e
    incidencias permanecen en Incidencias. El corte `known_at` y el reloj siguen compartidos en la
-   cabecera. Sin score, ranking ni recomendación: la jerarquía sale de densidad, orden y
-   tipografía, nunca de un número héroe.
+   cabecera (con reloj secundario plegable `#market-clock-toggle`). Sin score, ranking ni
+   recomendación: la jerarquía sale de densidad, orden y tipografía, nunca de un número héroe.
 3. **Seis tableros, no nueve.** `UI-9` no crea, renombra ni elimina ningún tablero;
    `BOARD_REGISTRY` conserva sus seis entradas.
 
@@ -640,8 +646,8 @@ cumple **R ≥ G ≥ B** sobre sus propios canales RGB, en ambos temas, sin una
 sola excepción silenciosa. Dos familias quedan explícitamente exentas, por
 nombre, nunca por omisión:
 
-- **Los cuatro estados semánticos** — `--positive`, `--warning`,
-  `--negative`, `--blocked-ink` y sus pares `-soft`/`-ink`. Su color
+- **Los cinco estados semánticos** — `--positive`, `--warning`,
+  `--negative`, `--info`, `--blocked-ink` y sus pares `-soft`/`-ink`. Su color
   significa dirección o estado, no temperatura de marca, y el lienzo
   tampoco los hace cálidos.
 - **La familia categórica de gráfico** — `--series-sma-5/20/50`,
@@ -745,14 +751,15 @@ La reorganización `INVESTOR-WORKFLOW-UX` conserva los seis tableros (`mesa`, `a
 `revisar`, `cazatiburones`, `sistema` al final) y los tokens existentes de `tokens.css` sin
 introducir literales de color ni dependencias externas:
 
-- **`#board-mesa`**: reemplaza la matriz operativa directa por la tabla de inversor
-  (`#mesa-investor-section`) con carga por lotes sobre `investor-overview-v1`, ordenación decimal
-  estable y fila expandible.
-- **`#board-activo`**: añade `#asset-compact-header`, `#fundamental-margins-chart` (hasta 4
+- **`#board-mesa`**: reemplaza la matriz operativa directa por la tabla de inversor a ancho
+  completo (`#mesa-investor-section`, tabla primero en `#mesa-investor-table`) con carga
+  recuperable por lotes sobre `investor-overview-v1`, ordenación decimal estable, fila expandible y
+  detalle exacto accesible (`#exact-detail-dialog`).
+- **`#board-activo`**: añade `#asset-compact-header` (con corte y clase traducida), `#fundamental-margins-chart` (hasta 4
   ejercicios fiscales) y `#valuation-history-controls-disclosure`, manteniendo `#tecnico` libre de
   paneles experimentales ML/PIT.
-- **`#board-revisar`**: añade `#review-explore-panel` («Explorar valores») y traslada las alertas
-  operativas a Sistema.
+- **`#board-revisar`**: separa las vistas en subpestañas explícitas (`#revisar-tab-candidates` y
+  `#revisar-tab-explore` para `#review-explore-panel`) y traslada las alertas operativas a Sistema.
 - **`#board-sistema`**: aloja `#sistema-verificacion` (cobertura del corte, matriz del universo,
   registro BVL y fuentes bloqueadas), `#sistema-incidencias` (alertas e incidencias operativas) y
   `#sistema-investigacion` (paneles no operacionales ML/PIT, sin carga automática).

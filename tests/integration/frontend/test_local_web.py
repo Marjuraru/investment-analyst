@@ -2188,7 +2188,7 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert '"market.history.relative_volume"' in javascript
     assert 'kind: "multiple"' in javascript
     assert 'kind: "percentage"' in javascript
-    assert 'style: "currency"' in javascript
+    assert "formatDecimalPrice(value, currency)" in javascript
     assert "formatScore(diagnostic.final_score)" in javascript
     assert "formatConfidence(diagnostic.confidence)" in javascript
     assert "JSON.stringify(report, null, 2)" in javascript

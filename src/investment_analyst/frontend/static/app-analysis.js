@@ -1039,15 +1039,57 @@ function normalizeBtcIntradayChart(payload) {
   };
 }
 
+function computeDecimalRelativeRatioString(numeratorRaw, denominatorRaw, scaleDecimals = 12) {
+  const num = parseDecimalValueForDisplay(numeratorRaw);
+  const den = parseDecimalValueForDisplay(denominatorRaw);
+  if (!num || !den || den.sign === 0) return null;
+  if (num.sign === 0) return "-1";
+  const maxFrac = Math.max(num.fracDigits.length, den.fracDigits.length);
+  const numScaled =
+    BigInt(num.sign) * BigInt(`${num.intDigits}${num.fracDigits.padEnd(maxFrac, "0")}`);
+  const denScaled =
+    BigInt(den.sign) * BigInt(`${den.intDigits}${den.fracDigits.padEnd(maxFrac, "0")}`);
+  const diff = numScaled - denScaled;
+  if (diff === 0n) return "0";
+  const precision = Math.max(4, Number(scaleDecimals) || 12);
+  const factor = 10n ** BigInt(precision);
+  const quotient = (diff * factor) / denScaled;
+  if (quotient === 0n) {
+    const tiny = `0.${"0".repeat(precision - 1)}1`;
+    const isNegative = (diff < 0n) !== (denScaled < 0n);
+    return isNegative ? `-${tiny}` : tiny;
+  }
+  const absQ = quotient < 0n ? -quotient : quotient;
+  const signPrefix = quotient < 0n ? "-" : "";
+  const digits = absQ.toString().padStart(precision + 1, "0");
+  const intPart = digits.slice(0, digits.length - precision);
+  const fracPart = digits.slice(digits.length - precision);
+  return `${signPrefix}${intPart}.${fracPart}`;
+}
+
+function setNeutralSignedPercentage(target, value, title) {
+  const parsed = parseDecimalValueForDisplay(value);
+  target.textContent = parsed === null
+    ? "—"
+    : formatDecimalPercentFromRatio(value, { decimals: 2, signed: true });
+  target.className = "stat-move neutral";
+  target.title = value === null || value === undefined ? "" : `${title}: ${formatExactDecimalText(value)}`;
+  if (value !== null && value !== undefined) {
+    target.setAttribute("aria-label", `${title}: ${target.textContent} (exacto ${formatExactDecimalText(value)})`);
+  } else {
+    target.removeAttribute("aria-label");
+  }
+}
+
 function renderMarketSnapshot(chart, latestSession, latestPoint) {
   const oneDayReturn = chartStatistic(chart, "market.history.simple_return_1d");
   const volatility = chartStatistic(chart, "market.history.rolling_daily_volatility");
   const relativeVolume = chartStatistic(chart, "market.history.relative_volume");
   const range = chart.range_statistics || {};
-  const close = numericValue(latestSession.close);
-  const shortSma = latestPoint.short_sma ? numericValue(latestPoint.short_sma.value) : null;
-  const longSma = latestPoint.long_sma ? numericValue(latestPoint.long_sma.value) : null;
-  const thirdSma = latestPoint.third_sma ? numericValue(latestPoint.third_sma.value) : null;
+  const closeRaw = latestSession.close;
+  const shortSmaRaw = latestPoint.short_sma?.value ?? null;
+  const longSmaRaw = latestPoint.long_sma?.value ?? null;
+  const thirdSmaRaw = latestPoint.third_sma?.value ?? null;
 
   setSignedPercentage(byId("snapshot-return-1d"), oneDayReturn?.value, "Retorno exacto");
   setSignedPercentage(
@@ -1060,50 +1102,91 @@ function renderMarketSnapshot(chart, latestSession, latestPoint) {
     range.compound_annual_growth_rate,
     "CAGR exacto del rango",
   );
-  setSignedPercentage(
+  setNeutralSignedPercentage(
     byId("snapshot-range-drawdown"),
     range.maximum_drawdown_rate,
     "Máximo drawdown exacto basado en cierres",
   );
-  setSignedPercentage(
+  setNeutralSignedPercentage(
     byId("snapshot-sma-5-distance"),
-    close !== null && shortSma ? close / shortSma - 1 : null,
+    computeDecimalRelativeRatioString(closeRaw, shortSmaRaw),
     `Distancia mostrada a SMA ${chartSettings.shortWindow}`,
   );
-  setSignedPercentage(
+  setNeutralSignedPercentage(
     byId("snapshot-sma-20-distance"),
-    close !== null && longSma ? close / longSma - 1 : null,
+    computeDecimalRelativeRatioString(closeRaw, longSmaRaw),
     `Distancia mostrada a SMA ${chartSettings.longWindow}`,
   );
-  setSignedPercentage(
+  setNeutralSignedPercentage(
     byId("snapshot-sma-50-distance"),
-    close !== null && thirdSma ? close / thirdSma - 1 : null,
+    computeDecimalRelativeRatioString(closeRaw, thirdSmaRaw),
     `Distancia mostrada a SMA ${chartSettings.thirdWindow}`,
   );
 
-  byId("snapshot-vwap").textContent =
-    latestSession.vwap !== null ? formatCurrency(latestSession.vwap) : "—";
-  byId("snapshot-open").textContent = formatCurrency(latestSession.open);
-  byId("snapshot-day-range").textContent = `${formatCurrency(latestSession.high)} / ${formatCurrency(latestSession.low)}`;
-  byId("snapshot-volume").textContent = formatMarketVolume(latestSession.volume, {
+  const vwapEl = byId("snapshot-vwap");
+  vwapEl.textContent = latestSession.vwap !== null ? formatCurrency(latestSession.vwap) : "—";
+  if (latestSession.vwap !== null && latestSession.vwap !== undefined) {
+    vwapEl.title = `VWAP exacto: ${formatExactDecimalText(latestSession.vwap)}`;
+    vwapEl.setAttribute("aria-label", `${vwapEl.textContent} (exacto ${formatExactDecimalText(latestSession.vwap)})`);
+  } else {
+    vwapEl.title = "";
+    vwapEl.removeAttribute("aria-label");
+  }
+  const openEl = byId("snapshot-open");
+  openEl.textContent = formatCurrency(latestSession.open);
+  openEl.title = `Apertura exacta: ${formatExactDecimalText(latestSession.open)}`;
+  openEl.setAttribute("aria-label", `${openEl.textContent} (exacto ${formatExactDecimalText(latestSession.open)})`);
+
+  const dayRangeEl = byId("snapshot-day-range");
+  dayRangeEl.textContent = `${formatCurrency(latestSession.high)} / ${formatCurrency(latestSession.low)}`;
+  dayRangeEl.title = `Rango exacto del día: ${formatExactDecimalText(latestSession.high)} / ${formatExactDecimalText(latestSession.low)}`;
+
+  const volumeEl = byId("snapshot-volume");
+  volumeEl.textContent = formatMarketVolume(latestSession.volume, {
     compact: true,
   });
-  byId("snapshot-volume").title = `Valor exacto: ${latestSession.volume} ${marketAssetPresentation().volumeLabel}`;
+  volumeEl.title = `Valor exacto: ${latestSession.volume} ${marketAssetPresentation().volumeLabel}`;
+  volumeEl.setAttribute(
+    "aria-label",
+    `${volumeEl.textContent} (exacto ${latestSession.volume} ${marketAssetPresentation().volumeLabel})`,
+  );
   byId("snapshot-trades").textContent = latestSession.trade_count !== null
     ? formatInteger(latestSession.trade_count)
     : "—";
-  byId("snapshot-volatility").textContent = volatility
+  const volatilityEl = byId("snapshot-volatility");
+  volatilityEl.textContent = volatility
     ? formatUnsignedPercentage(volatility.value)
     : "—";
-  byId("snapshot-volatility").title = volatility ? `Valor exacto: ${volatility.value}` : "";
-  byId("snapshot-relative-volume").textContent = relativeVolume
+  volatilityEl.title = volatility ? `Valor exacto: ${formatExactDecimalText(volatility.value)}` : "";
+  if (volatility) {
+    volatilityEl.setAttribute(
+      "aria-label",
+      `${volatilityEl.textContent} (exacto ${formatExactDecimalText(volatility.value)})`,
+    );
+  } else {
+    volatilityEl.removeAttribute("aria-label");
+  }
+  const relVolEl = byId("snapshot-relative-volume");
+  relVolEl.textContent = relativeVolume
     ? formatMultiple(relativeVolume.value)
     : "—";
-  byId("snapshot-relative-volume").title = relativeVolume
-    ? `Valor exacto: ${relativeVolume.value}`
+  relVolEl.title = relativeVolume
+    ? `Valor exacto: ${formatExactDecimalText(relativeVolume.value)}`
     : "";
-  byId("snapshot-range-high").textContent = range.high ? formatCurrency(range.high) : "—";
-  byId("snapshot-range-low").textContent = range.low ? formatCurrency(range.low) : "—";
+  if (relativeVolume) {
+    relVolEl.setAttribute(
+      "aria-label",
+      `${relVolEl.textContent} (exacto ${formatExactDecimalText(relativeVolume.value)})`,
+    );
+  } else {
+    relVolEl.removeAttribute("aria-label");
+  }
+  const rangeHighEl = byId("snapshot-range-high");
+  rangeHighEl.textContent = range.high ? formatCurrency(range.high) : "—";
+  rangeHighEl.title = range.high ? `Máximo exacto: ${formatExactDecimalText(range.high)}` : "";
+  const rangeLowEl = byId("snapshot-range-low");
+  rangeLowEl.textContent = range.low ? formatCurrency(range.low) : "—";
+  rangeLowEl.title = range.low ? `Mínimo exacto: ${formatExactDecimalText(range.low)}` : "";
   byId("snapshot-quality").textContent = translated(
     latestSession.quality,
     QUALITY_LABELS,
@@ -1201,23 +1284,44 @@ function renderMarketChart(chart, { preserveViewport = false } = {}) {
   const latestPoint = allPoints[allPoints.length - 1];
   const latest = chart.latest_session || latestPoint;
   const oneDayReturn = chartStatistic(chart, "market.history.simple_return_1d");
-  const dailyChange = numericValue(oneDayReturn?.value);
-  byId("chart-latest-close").textContent = formatCurrency(latest.close);
+  const dailyParsed = parseDecimalValueForDisplay(oneDayReturn?.value);
+  const dailyTone = !dailyParsed || dailyParsed.sign === 0 ? "neutral" : dailyParsed.sign > 0 ? "positive" : "negative";
+  const dailyText = formatRangeChange(oneDayReturn?.value);
+  const chartLatestClose = byId("chart-latest-close");
+  chartLatestClose.textContent = formatCurrency(latest.close);
+  chartLatestClose.title = `Cierre exacto: ${formatExactDecimalText(latest.close)}`;
   byId("chart-latest-date").textContent = intraday
     ? `Apertura de vela: ${formatMarketTimestamp(latest.timestamp)} UTC`
     : `Cierre del ${formatCalendarDate(latest.timestamp)}`;
   const change = byId("chart-range-change");
   change.textContent = intraday
     ? `${formatInteger(chart.coverage.displayed_points)} velas locales`
-    : `${formatRangeChange(dailyChange)} variación diaria`;
-  change.className = `chart-change ${dailyChange > 0 ? "positive" : dailyChange < 0 ? "negative" : "neutral"}`;
+    : `${dailyText} variación diaria`;
+  change.className = `chart-change ${dailyTone}`;
+  change.title = !intraday && dailyParsed ? `Variación diaria exacta: ${formatExactDecimalText(oneDayReturn?.value)}` : "";
+  if (!intraday && dailyParsed) {
+    change.setAttribute("aria-label", `${dailyText} variación diaria (exacto ${formatExactDecimalText(oneDayReturn?.value)})`);
+  } else {
+    change.removeAttribute("aria-label");
+  }
 
   // Update asset header
-  byId("asset-price").textContent = formatCurrency(latest.close);
-  byId("asset-daily-change").textContent = intraday
+  const assetPriceEl = byId("asset-price");
+  assetPriceEl.textContent = formatCurrency(latest.close);
+  assetPriceEl.title = `Precio exacto: ${formatExactDecimalText(latest.close)}`;
+  const assetDailyChangeEl = byId("asset-daily-change");
+  assetDailyChangeEl.textContent = intraday
     ? `${formatInteger(chart.coverage.displayed_points)} velas locales`
-    : `${formatRangeChange(dailyChange)} diaria`;
-  byId("asset-daily-change").className = `asset-change ${dailyChange > 0 ? "positive" : dailyChange < 0 ? "negative" : "neutral"}`;
+    : `${dailyText} diaria`;
+  assetDailyChangeEl.className = `asset-change ${dailyTone}`;
+  assetDailyChangeEl.title = !intraday && dailyParsed
+    ? `Variación diaria exacta: ${formatExactDecimalText(oneDayReturn?.value)}`
+    : "";
+  if (!intraday && dailyParsed) {
+    assetDailyChangeEl.setAttribute("aria-label", `${dailyText} diaria (exacto ${formatExactDecimalText(oneDayReturn?.value)})`);
+  } else {
+    assetDailyChangeEl.removeAttribute("aria-label");
+  }
   byId("chart-latest-sma-5").textContent = latestPoint.short_sma
     ? formatCurrency(latestPoint.short_sma.value)
     : "—";
@@ -1414,47 +1518,52 @@ async function queryMarketChart(deferredRequest = null) {
 }
 
 function formatUsdBillions(value) {
-  const parsed = numericValue(value);
-  if (parsed === null) return "—";
-  return `$ ${formatNumber(parsed / 1_000_000_000, {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 1,
-  })} mil M`;
+  const parsed = parseDecimalValueForDisplay(value);
+  if (!parsed) return "—";
+  const scaled = shiftDecimalParts(parsed, 9);
+  const rounded = roundDecimalHalfUpParts(scaled, 1);
+  if (rounded.isZeroAfterRounding && parsed.sign !== 0) {
+    const signPrefix = parsed.sign < 0 ? "-" : "";
+    return `${signPrefix}$ <0.1 mil M`;
+  }
+  const signPrefix = rounded.sign < 0 ? "-" : "";
+  const trimmedFrac = rounded.fracDigits.replace(/0+$/, "");
+  const fracPart = trimmedFrac ? `.${trimmedFrac}` : "";
+  return `${signPrefix}$ ${formatGroupedIntDigits(rounded.intDigits)}${fracPart} mil M`;
 }
 
 function formatSharesBillions(value) {
-  const parsed = numericValue(value);
-  if (parsed === null) return "—";
-  return `${formatNumber(parsed / 1_000_000_000, {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  })} mil M`;
+  const parsed = parseDecimalValueForDisplay(value);
+  if (!parsed) return "—";
+  const scaled = shiftDecimalParts(parsed, 9);
+  const rounded = roundDecimalHalfUpParts(scaled, 2);
+  if (rounded.isZeroAfterRounding && parsed.sign !== 0) {
+    const signPrefix = parsed.sign < 0 ? "-" : "";
+    return `${signPrefix}<0.01 mil M`;
+  }
+  const signPrefix = rounded.sign < 0 ? "-" : "";
+  const trimmedFrac = rounded.fracDigits.replace(/0+$/, "");
+  const fracPart = trimmedFrac ? `.${trimmedFrac}` : "";
+  return `${signPrefix}${formatGroupedIntDigits(rounded.intDigits)}${fracPart} mil M`;
 }
 
 function formatCurrencyPerShare(value) {
-  const parsed = numericValue(value);
-  if (parsed === null) return "—";
-  return formatNumber(parsed, {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  });
+  return formatDecimalPrice(value, "USD");
 }
 
 function formatFundamentalResearchValue(metric) {
   const presentation = FUNDAMENTAL_RESEARCH_PRESENTATION[metric.metric_key];
-  const parsed = numericValue(metric.value);
+  const parsed = parseDecimalValueForDisplay(metric.value);
   if (parsed === null) return `${metric.value} ${metric.unit}`;
   if (presentation?.kind === "percentage") {
-    return formatNumber(parsed, {
-      style: "percent",
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 1,
+    return formatDecimalPercentFromRatio(metric.value, {
+      decimals: 1,
+      signed: false,
+      trimZeroDecimals: true,
     });
   }
   if (presentation?.kind === "multiple") {
-    return `${formatNumber(parsed, { maximumFractionDigits: 2 })}×`;
+    return formatDecimalRatio(metric.value, 2, { suffix: "×", trimTrailingZeros: true });
   }
   if (presentation?.kind === "currency_per_share") {
     return formatCurrencyPerShare(metric.value);
@@ -1465,13 +1574,32 @@ function formatFundamentalResearchValue(metric) {
   if (presentation?.kind === "currency" || metric.unit === "USD") {
     return formatUsdBillions(metric.value);
   }
-  return formatNumber(parsed, { maximumFractionDigits: 2 });
+  return formatDecimalRatio(metric.value, 2, { trimTrailingZeros: true });
 }
 
 function formatSignedNumber(value, options = {}) {
-  const parsed = numericValue(value);
-  if (parsed === null) return "—";
-  return `${parsed > 0 ? "+" : ""}${formatNumber(parsed, options)}`;
+  const parsed = parseDecimalValueForDisplay(value);
+  if (!parsed) return "—";
+  const decimals = options.maximumFractionDigits ?? 2;
+  const minDecimals = options.minimumFractionDigits ?? 0;
+  const shiftLeft = options.shiftLeft ?? 0;
+  const shifted = shiftLeft !== 0 ? shiftDecimalParts(parsed, shiftLeft) : parsed;
+  const rounded = roundDecimalHalfUpParts(shifted, decimals);
+  if (rounded.isZeroAfterRounding && parsed.sign !== 0) {
+    const signPrefix = parsed.sign < 0 ? "-" : "+";
+    const threshold = decimals > 0 ? `0.${"0".repeat(decimals - 1)}1` : "1";
+    return `${signPrefix}<${threshold}`;
+  }
+  const signPrefix = rounded.sign > 0 ? "+" : (rounded.sign < 0 ? "-" : "");
+  let frac = rounded.fracDigits;
+  if (frac) {
+    frac = frac.replace(/0+$/, "");
+    if (minDecimals > 0 && frac.length < minDecimals) {
+      frac = rounded.fracDigits.slice(0, minDecimals).padEnd(minDecimals, "0");
+    }
+  }
+  const fracPart = frac ? `.${frac}` : "";
+  return `${signPrefix}${formatGroupedIntDigits(rounded.intDigits)}${fracPart}`;
 }
 
 function fundamentalResearchTrend(metric, history, frequency) {
@@ -1480,7 +1608,7 @@ function fundamentalResearchTrend(metric, history, frequency) {
     return { text: "Sin comparación histórica", direction: null };
   }
   const presentation = FUNDAMENTAL_RESEARCH_PRESENTATION[metric.metric_key];
-  let comparison = null;
+  let comparisonParsed = null;
   let text = "Sin comparación histórica";
   if (
     ["USD", "shares", "USD/shares"].includes(metric.unit) &&
@@ -1488,40 +1616,44 @@ function fundamentalResearchTrend(metric, history, frequency) {
     statistics.compound_annual_growth_rate !== null &&
     statistics.compound_annual_growth_rate !== undefined
   ) {
-    comparison = numericValue(statistics.compound_annual_growth_rate);
-    text = `CAGR ${formatRangeChange(comparison)}`;
+    comparisonParsed = parseDecimalValueForDisplay(statistics.compound_annual_growth_rate);
+    text = `CAGR ${formatRangeChange(statistics.compound_annual_growth_rate)}`;
   } else if (
     ["USD", "shares", "USD/shares"].includes(metric.unit) &&
     statistics.latest_change_rate_from_previous_available !== null &&
     statistics.latest_change_rate_from_previous_available !== undefined
   ) {
-    comparison = numericValue(statistics.latest_change_rate_from_previous_available);
-    text = `Vs. período anterior ${formatRangeChange(comparison)}`;
+    comparisonParsed = parseDecimalValueForDisplay(statistics.latest_change_rate_from_previous_available);
+    text = `Vs. período anterior ${formatRangeChange(statistics.latest_change_rate_from_previous_available)}`;
   } else {
-    const delta = numericValue(statistics.latest_change_from_previous_available);
-    if (delta === null) return { text, direction: null };
-    comparison = delta;
+    const deltaRaw = statistics.latest_change_from_previous_available;
+    const deltaParsed = parseDecimalValueForDisplay(deltaRaw);
+    if (!deltaParsed) return { text, direction: null };
+    comparisonParsed = deltaParsed;
     if (presentation?.kind === "percentage") {
-      text = `Vs. período anterior ${formatSignedNumber(delta * 100, {
+      text = `Vs. período anterior ${formatSignedNumber(deltaRaw, {
+        shiftLeft: -2,
         maximumFractionDigits: 1,
       })} pp`;
     } else if (presentation?.kind === "multiple") {
-      text = `Vs. período anterior ${formatSignedNumber(delta, {
+      text = `Vs. período anterior ${formatSignedNumber(deltaRaw, {
         maximumFractionDigits: 2,
       })}×`;
     } else if (presentation?.kind === "currency_per_share") {
-      text = `Cambio ${formatSignedNumber(delta, {
+      text = `Cambio ${formatSignedNumber(deltaRaw, {
         maximumFractionDigits: 2,
       })} USD/acción`;
     } else if (presentation?.kind === "shares") {
-      text = `Cambio ${formatSignedNumber(delta / 1_000_000, {
+      text = `Cambio ${formatSignedNumber(deltaRaw, {
+        shiftLeft: 6,
         maximumFractionDigits: 1,
       })} M acciones`;
     } else {
-      text = `Cambio ${formatUsdBillions(delta)}`;
+      text = `Cambio ${formatUsdBillions(deltaRaw)}`;
     }
   }
-  const direction = comparison > 0 ? "increase" : comparison < 0 ? "decrease" : "unchanged";
+  const sign = comparisonParsed ? comparisonParsed.sign : 0;
+  const direction = sign > 0 ? "increase" : sign < 0 ? "decrease" : "unchanged";
   const arrow = direction === "increase" ? "↑" : direction === "decrease" ? "↓" : "→";
   return { text: `${arrow} ${text}`, direction };
 }
@@ -1557,13 +1689,14 @@ function fundamentalResearchMetricCard(metricKey, metric, definition, history, f
     : "";
   if (metric) {
     value.title = `Valor exacto: ${metric.value} ${metric.unit}`;
+    value.setAttribute("aria-label", `${value.textContent} (exacto ${metric.value} ${metric.unit})`);
     const statistics = history?.statistics;
     const historyTitle = statistics
       ? ` · media exacta ${statistics.arithmetic_mean} · rango exacto ${statistics.range}`
       : "";
     card.title = `${metric.formula} · disponible ${formatInstant(metric.available_at)}${historyTitle}`;
-    const parsed = numericValue(metric.value);
-    if (parsed !== null && parsed < 0) value.classList.add("negative");
+    const parsed = parseDecimalValueForDisplay(metric.value);
+    if (parsed && parsed.sign < 0) value.classList.add("negative");
   } else {
     card.title = definition
       ? `Sin inputs suficientes para ${definition.formula}`
@@ -1612,15 +1745,15 @@ function fundamentalResearchAuditItem(metric, history) {
   if (history?.statistics) {
     const statistics = history.statistics;
     const summary = createElement("dl", "fundamental-research-history-statistics");
-    const previousChange = numericValue(
+    const previousParsed = parseDecimalValueForDisplay(
       statistics.latest_change_from_previous_available,
     );
     const previousDirection =
-      previousChange === null
+      previousParsed === null
         ? null
-        : previousChange > 0
+        : previousParsed.sign > 0
           ? "increase"
-          : previousChange < 0
+          : previousParsed.sign < 0
             ? "decrease"
             : "unchanged";
     const previousArrow =
@@ -1637,7 +1770,7 @@ function fundamentalResearchAuditItem(metric, history) {
       ["Rango exacto", `${statistics.range} ${metric.unit}`, null],
       [
         "Cambio anterior",
-        previousChange === null
+        previousParsed === null
           ? "No calculable"
           : `${previousArrow} ${statistics.latest_change_from_previous_available} ${metric.unit}`,
         previousDirection,
@@ -1721,7 +1854,7 @@ function renderCompanyProfile(classification) {
             "li",
             "",
             `${FUNDAMENTAL_RESEARCH_PRESENTATION[item.metric_key]?.label || item.metric_key}: `
-              + `CAGR ${formatRangeChange(numericValue(item.compound_annual_growth_rate))} · `
+              + `CAGR ${formatRangeChange(item.compound_annual_growth_rate)} · `
               + `${formatInteger(item.point_count)} períodos`,
           ),
         )
@@ -1984,7 +2117,7 @@ function annualHorizonsSelectedYears() {
 function annualHorizonsCagrText(row) {
   if (row.status !== "complete") return "—";
   if (row.cagr_reason === "calculated") {
-    return `CAGR ${formatRangeChange(numericValue(row.statistics.compound_annual_growth_rate))}`;
+    return `CAGR ${formatRangeChange(row.statistics.compound_annual_growth_rate)}`;
   }
   if (row.cagr_reason === "unit_not_eligible") return "No aplica a ratios";
   if (row.cagr_reason === "nonpositive_endpoint") {
@@ -2617,20 +2750,27 @@ function valuationDisplayValue(metric, definition) {
     return renderAbsenceMark(valuationAbsenceKind(metric), VALUATION_STATUS_LABELS[metric.status] || metric.status, reason);
   }
   if (definition.unit === "USD") {
-    return createElement(
-      "span",
-      "figure",
-      formatNumber(metric.value, {
-        style: "currency",
-        currency: "USD",
-        currencyDisplay: "narrowSymbol",
-        notation: "compact",
-        maximumFractionDigits: 2,
-      }),
-    );
+    const compact = formatCompactDecimalWithUnit(metric.value, {
+      currency: "USD",
+      decimals: 2,
+    });
+    const figure = createElement("span", "figure", compact);
+    figure.title = `Valor exacto: ${metric.value} ${metric.unit}`;
+    figure.setAttribute("aria-label", `${compact} (exacto ${metric.value} ${metric.unit})`);
+    return figure;
   }
-  if (definition.unit === "percentage") return createElement("span", "figure", formatUnsignedPercentage(metric.value));
-  return createElement("span", "figure", formatMultiple(metric.value));
+  if (definition.unit === "percentage") {
+    const pct = formatUnsignedPercentage(metric.value);
+    const figure = createElement("span", "figure", pct);
+    figure.title = `Valor exacto: ${metric.value} ${metric.unit}`;
+    figure.setAttribute("aria-label", `${pct} (exacto ${metric.value} ${metric.unit})`);
+    return figure;
+  }
+  const mult = formatMultiple(metric.value);
+  const figure = createElement("span", "figure", mult);
+  figure.title = `Valor exacto: ${metric.value} ${metric.unit}`;
+  figure.setAttribute("aria-label", `${mult} (exacto ${metric.value} ${metric.unit})`);
+  return figure;
 }
 
 function resetValuationFilingOptions() {
@@ -3268,11 +3408,20 @@ function renderDiagnostic(target, title, mode, section, report) {
   const scoreValue = createElement("p", "score-value");
   scoreValue.append(document.createTextNode(formatScore(diagnostic.final_score)));
   scoreValue.appendChild(createElement("small", "", " / 100"));
+  if (diagnostic.final_score !== null && diagnostic.final_score !== undefined) {
+    scoreValue.title = `Puntuación exacta: ${formatExactDecimalText(diagnostic.final_score)} / 100`;
+    scoreValue.setAttribute("aria-label", `${formatScore(diagnostic.final_score)} / 100 (exacto ${formatExactDecimalText(diagnostic.final_score)})`);
+  }
   scoreBlock.appendChild(scoreValue);
   const confidenceBlock = createElement("div", "confidence-block");
+  const confidenceValue = createElement("strong", "", formatConfidence(diagnostic.confidence));
+  if (diagnostic.confidence !== null && diagnostic.confidence !== undefined) {
+    confidenceValue.title = `Cobertura exacta: ${formatExactDecimalText(diagnostic.confidence)}`;
+    confidenceValue.setAttribute("aria-label", `${formatConfidence(diagnostic.confidence)} (exacto ${formatExactDecimalText(diagnostic.confidence)})`);
+  }
   confidenceBlock.append(
     createElement("span", "", "Cobertura de evidencia"),
-    createElement("strong", "", formatConfidence(diagnostic.confidence)),
+    confidenceValue,
   );
   scoreRow.append(scoreBlock, confidenceBlock);
 

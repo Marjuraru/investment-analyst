@@ -586,9 +586,13 @@ const mesaInvestorUiState = {
   abortController: null,
   batchStatus: "idle",
   batchError: null,
+  pausedReason: null,
+  hasQueriedCut: "",
+  lastRequestedScope: "visible",
   loadingAssetIds: new Set(),
   failedAssetIds: new Map(),
   cancelledAssetIds: new Set(),
+  pausedAssetIds: new Set(),
 };
 
 function abortMesaInvestorRequests() {
@@ -614,10 +618,29 @@ const MESA_VALUE_STATE_LABELS = Object.freeze({
   available: "Disponible",
   missing: "Sin datos",
   not_applicable: "No aplica",
-  not_configured: "Sin configurar",
+  not_configured: "Sin config.",
   not_supported: "No soportado",
-  insufficient_data: "Datos insuficientes",
+  insufficient_data: "Insuficiente",
 });
+
+function sanitizeMesaErrorMessage(error) {
+  if (!error) return "Servicio local temporalmente no disponible.";
+  const status = Number(error.status);
+  const code = String(error.code || "").trim();
+  if (status === 503 || code === "operational_error") {
+    return "HTTP 503 · Servicio o espacio de datos temporalmente no disponible.";
+  }
+  if (error.name === "TypeError") {
+    return "Sin conexión con la interfaz local.";
+  }
+  let raw = String(error.message || "").replace(/[\r\n]+/g, " ").trim();
+  raw = raw.replace(/(?:\/[A-Za-z0-9._-]+){2,}/g, "[ruta]").replace(/[A-Za-z]:\\[^\s]+/g, "[ruta]");
+  if (raw.length > 120) raw = `${raw.slice(0, 117)}…`;
+  if (Number.isFinite(status) && status >= 400 && !raw.includes(`HTTP ${status}`)) {
+    return raw ? `HTTP ${status} · ${raw}` : `HTTP ${status}`;
+  }
+  return raw || "No se pudo completar la consulta local.";
+}
 
 function mesaCatalogEntries() {
   return Object.values(marketAssets || {}).sort((a, b) => {
@@ -703,54 +726,115 @@ function mesaSortedEntries(entries) {
   });
 }
 
+function mesaOverviewRowPriceDate(ov) {
+  if (ov?.market?.close?.state !== "available" || !ov.market.close.reference_at) return null;
+  const text = String(ov.market.close.reference_at).trim();
+  return text.length >= 10 ? text.slice(0, 10) : null;
+}
+
+function mesaBriefStateLabel(val) {
+  if (!val) return "Sin datos";
+  return MESA_VALUE_STATE_LABELS[val.state] || "Sin datos";
+}
+
+function mesaFullAbsenceDescription(val) {
+  if (!val || val.state === "available") return "";
+  const base = mesaBriefStateLabel(val);
+  const rawReason = Array.isArray(val.reason_codes) && val.reason_codes.length ? val.reason_codes[0] : "";
+  if (!rawReason) return base;
+  const detail = typeof formatOverviewAbsenceDetail === "function"
+    ? formatOverviewAbsenceDetail(rawReason)
+    : { label: translateOverviewAbsenceReason(rawReason), technicalCode: rawReason };
+  return detail.technicalCode ? `${base}: ${detail.label} (${detail.technicalCode})` : `${base}: ${detail.label}`;
+}
+
+function mesaPendingStatusPill(rowState, rowError = "") {
+  if (rowState === "loading") {
+    return createElement("span", "mesa-status-pill is-warn", "Consultando…");
+  }
+  if (rowState === "error") {
+    const pill = createElement("span", "mesa-status-pill is-error", "Error");
+    if (rowError) {
+      pill.title = rowError;
+      pill.setAttribute("aria-label", `Error al consultar: ${rowError}`);
+    }
+    return pill;
+  }
+  if (rowState === "paused") {
+    const pill = createElement("span", "mesa-status-pill is-paused", "Carga pausada");
+    if (rowError) {
+      pill.title = rowError;
+      pill.setAttribute("aria-label", `Carga pausada: ${rowError}`);
+    }
+    return pill;
+  }
+  if (rowState === "cancelled") {
+    return createElement("span", "mesa-status-pill", "Cancelado");
+  }
+  return createElement("span", "mesa-status-pill", "Pendiente");
+}
+
 function renderInvestorValueCell(val, options = {}) {
   const wrap = createElement("div", "mesa-value-cell");
   if (!val) {
-    if (options.rowState === "loading") {
-      wrap.append(createElement("span", "mesa-value-pending", "Consultando…"));
-      return wrap;
-    }
-    if (options.rowState === "error") {
-      wrap.append(createElement("span", "mesa-value-error", "Error al consultar"));
-      if (options.rowError) {
-        wrap.append(createElement("small", "mesa-value-sub", options.rowError));
-      }
-      return wrap;
-    }
-    if (options.rowState === "cancelled") {
-      wrap.append(createElement("span", "mesa-value-cancelled", "Cancelado"));
-      return wrap;
-    }
-    wrap.append(createElement("span", "mesa-value-pending", "Pendiente"));
+    wrap.append(mesaPendingStatusPill(options.rowState || "pending", options.rowError || ""));
     return wrap;
   }
   if (val.state === "available" && val.value !== null) {
-    const formatted = options.percent
-      ? decimalScalePercent(val.value, 2)
-      : `${val.value}${options.unitSuffix || ""}`;
-    wrap.append(createElement("strong", "mesa-value-main", formatted));
-    if (options.subtext) {
-      wrap.append(createElement("small", "mesa-value-sub", options.subtext));
-    } else if (val.reference_at) {
-      wrap.append(createElement("small", "mesa-value-sub", String(val.reference_at).slice(0, 10)));
+    const formatted = typeof options.formatValue === "function"
+      ? options.formatValue(val.value)
+      : options.percent
+        ? formatDecimalPercentFromRatio(val.value, { decimals: 2, signed: true })
+        : `${val.value}${options.unitSuffix || ""}`;
+    let toneClass = "";
+    if (options.signedTone) {
+      const parsed = typeof parseDecimalValueForDisplay === "function"
+        ? parseDecimalValueForDisplay(val.value)
+        : null;
+      if (parsed && parsed.sign > 0) toneClass = " is-positive";
+      else if (parsed && parsed.sign < 0) toneClass = " is-negative";
+    }
+    const primary = createElement("span", `mesa-value-primary${toneClass}`, formatted);
+    primary.title = typeof formatExactDecimalText === "function"
+      ? `Exacto: ${formatExactDecimalText(val.value, options.unitSuffix?.trim() || "")}`
+      : String(val.value);
+    wrap.append(primary);
+    if (options.isDifferentPriceDate && options.priceDate) {
+      const badgeEl = createElement("span", "mesa-date-badge", "Otra fecha");
+      badgeEl.title = `Fecha de cierre: ${options.priceDate}`;
+      badgeEl.setAttribute("aria-label", `Fecha de cierre distinta: ${options.priceDate}`);
+      wrap.append(badgeEl);
     }
     return wrap;
   }
-  const label = MESA_VALUE_STATE_LABELS[val.state] || val.state;
-  const rawReason = Array.isArray(val.reason_codes) && val.reason_codes.length ? val.reason_codes[0] : "";
-  const reason = typeof translateOverviewAbsenceReason === "function"
-    ? translateOverviewAbsenceReason(rawReason)
-    : rawReason;
-  wrap.append(createElement("span", `mesa-value-absent state-${val.state}`, label));
-  if (reason) wrap.append(createElement("small", "mesa-value-sub", reason));
-  if (options.knownAtLabel) {
-    wrap.append(createElement("small", "mesa-value-sub", `Corte ${options.knownAtLabel}`));
+  const brief = mesaBriefStateLabel(val);
+  const full = mesaFullAbsenceDescription(val);
+  const pill = createElement("span", `mesa-status-pill state-${val.state}`, brief);
+  if (full) {
+    pill.title = full;
+    pill.setAttribute("aria-label", full);
   }
+  wrap.append(pill);
   return wrap;
 }
 
 function ensureMesaRetryButton() {
   return byId("mesa-retry-load-btn");
+}
+
+function formatMesaExactDetailValue(val, kind, currency = "USD") {
+  if (!val) return "Pendiente de consulta";
+  if (val.state === "available" && val.value !== null) {
+    let display = String(val.value);
+    if (kind === "price") display = formatDecimalPrice(val.value, currency);
+    else if (kind === "percent") display = formatDecimalPercentFromRatio(val.value, { decimals: 2, signed: true });
+    else if (kind === "multiple") display = formatDecimalMultiple(val.value, 2);
+    else if (kind === "ratio") display = formatDecimalRatio(val.value, 2);
+    else if (kind === "score") display = `${formatDecimalScore(val.value, 1)}/100`;
+    const exact = formatExactDecimalText(val.value, kind === "price" ? currency : "");
+    return exact && exact !== display ? `${display} (exacto: ${exact})` : display;
+  }
+  return mesaFullAbsenceDescription(val) || mesaBriefStateLabel(val);
 }
 
 function renderMesaInvestorTable() {
@@ -763,30 +847,86 @@ function renderMesaInvestorTable() {
   const loadedCount = filtered.filter(
     (e) => Boolean(e.assetId && getCachedInvestorOverviewAsset(e.assetId, knownAt)),
   ).length;
+  const unqueriedCount = Math.max(0, filtered.length - loadedCount);
+
+  const visiblePriceDates = new Set();
+  let latestPriceDate = null;
+  for (const entry of visible) {
+    const ov = entry.assetId ? getCachedInvestorOverviewAsset(entry.assetId, knownAt) : null;
+    const refDate = mesaOverviewRowPriceDate(ov);
+    if (refDate) {
+      visiblePriceDates.add(refDate);
+      if (!latestPriceDate || refDate > latestPriceDate) latestPriceDate = refDate;
+    }
+  }
+
+  const isBusy = mesaInvestorUiState.loadingAll || mesaInvestorUiState.loadingAssetIds.size > 0;
+  const hasPausedOrFailed = Boolean(
+    mesaInvestorUiState.failedAssetIds.size > 0
+    || mesaInvestorUiState.pausedAssetIds.size > 0
+    || (mesaInvestorUiState.batchStatus === "error" && mesaInvestorUiState.batchError),
+  );
 
   const statusEl = byId("mesa-investor-status");
   if (statusEl) {
-    if (mesaInvestorUiState.batchStatus === "error" && mesaInvestorUiState.batchError) {
-      statusEl.textContent = `Error al cargar Mesa: ${mesaInvestorUiState.batchError} · Cargados ${loadedCount}/${filtered.length}`;
+    if (isBusy) {
+      statusEl.textContent = `Consultando lote… Cargados ${loadedCount}/${filtered.length} · Mostrando ${visible.length}`;
+    } else if (hasPausedOrFailed) {
+      statusEl.textContent = `Consulta incompleta · ${loadedCount} cargados, ${unqueriedCount} sin consultar`;
     } else if (mesaInvestorUiState.batchStatus === "cancelled") {
-      statusEl.textContent = `Carga cancelada · Cargados ${loadedCount}/${filtered.length} · Mostrando ${visible.length} de ${filtered.length}`;
-    } else if (mesaInvestorUiState.loadingAssetIds.size > 0 || mesaInvestorUiState.loadingAll) {
-      statusEl.textContent = `Consultando lote… Cargados ${loadedCount}/${filtered.length} · Mostrando ${visible.length} de ${filtered.length}`;
+      statusEl.textContent = `Carga cancelada · Cargados ${loadedCount}/${filtered.length}`;
     } else {
-      statusEl.textContent = `Datos cargados ${loadedCount}/${filtered.length} · Mostrando ${visible.length} de ${filtered.length}`;
+      statusEl.textContent = `Mostrando ${visible.length} de ${filtered.length} · Cargados ${loadedCount}`;
     }
   }
+
+  const bannerEl = byId("mesa-investor-banner");
+  const bannerTextEl = byId("mesa-investor-banner-text");
+  const bannerDetailEl = byId("mesa-investor-banner-detail");
+  const bannerRetryBtn = byId("mesa-banner-retry-btn");
+  const bannerSystemBtn = byId("mesa-banner-system-btn");
+  if (bannerEl) {
+    const showBanner = !isBusy && hasPausedOrFailed;
+    bannerEl.classList.toggle("hidden", !showBanner);
+    bannerEl.classList.toggle("is-error", mesaInvestorUiState.batchStatus === "error");
+    if (showBanner) {
+      if (bannerTextEl) {
+        bannerTextEl.textContent = `No se pudo completar la consulta local. ${loadedCount} cargados, ${unqueriedCount} sin consultar`;
+      }
+      const detail = mesaInvestorUiState.batchError || mesaInvestorUiState.pausedReason || "";
+      if (bannerDetailEl) {
+        bannerDetailEl.textContent = detail;
+        bannerDetailEl.classList.toggle("hidden", !detail);
+      }
+      if (bannerRetryBtn) bannerRetryBtn.classList.remove("hidden");
+      if (bannerSystemBtn) bannerSystemBtn.classList.remove("hidden");
+    }
+  }
+
   const winEl = byId("mesa-investor-window");
   if (winEl) {
-    if (investorOverviewState.windows && investorOverviewState.knownAt === knownAt) {
+    const hasOverviewWindow = Boolean(
+      investorOverviewState.windows
+      && sameIsoTimestamp(investorOverviewState.knownAt, knownAt),
+    );
+    const priceDateSummary = visiblePriceDates.size > 1
+      ? `Fechas distintas · últ. cierre ${latestPriceDate}`
+      : latestPriceDate
+        ? `Últ. cierre ${latestPriceDate}`
+        : "";
+    if (hasOverviewWindow) {
       const w = investorOverviewState.windows;
-      winEl.textContent = `Corte efectivo: ${knownAtShort} · Ventana mercado ${w.market_start}..${w.market_end} · fundamental anual ${w.fundamental_start}..${w.fundamental_end}`;
+      winEl.textContent = `Corte efectivo: ${knownAtShort} (America/Lima)${priceDateSummary ? ` · ${priceDateSummary}` : ""}`;
+      winEl.title = `Corte UTC: ${knownAt} · Ventana mercado ${w.market_start}..${w.market_end} · fundamental anual ${w.fundamental_start}..${w.fundamental_end}`;
+      winEl.setAttribute("aria-label", `${winEl.textContent}. ${winEl.title}`);
     } else {
       winEl.textContent = knownAt
-        ? `Corte efectivo: ${knownAtShort}`
+        ? `Corte efectivo: ${knownAtShort} (America/Lima)`
         : "Sin corte known_at definido";
+      winEl.title = knownAt ? `Corte UTC: ${knownAt}` : "";
     }
   }
+
   const showMoreBtn = byId("mesa-show-more-btn");
   if (showMoreBtn) {
     showMoreBtn.classList.toggle("hidden", visible.length >= filtered.length);
@@ -794,7 +934,6 @@ function renderMesaInvestorTable() {
   const loadAllBtn = byId("mesa-load-all-btn");
   const cancelBtn = byId("mesa-cancel-load-btn");
   const retryBtn = ensureMesaRetryButton();
-  const isBusy = mesaInvestorUiState.loadingAll || mesaInvestorUiState.loadingAssetIds.size > 0;
   if (loadAllBtn) {
     loadAllBtn.disabled = isBusy || loadedCount >= Math.min(filtered.length, MESA_INVESTOR_MAX_UNIVERSE);
   }
@@ -803,9 +942,11 @@ function renderMesaInvestorTable() {
   }
   if (retryBtn) {
     const hasRecoverable = Boolean(
-      mesaInvestorUiState.batchError
-      || mesaInvestorUiState.failedAssetIds.size > 0
-      || mesaInvestorUiState.cancelledAssetIds.size > 0,
+      !hasPausedOrFailed
+      && (mesaInvestorUiState.batchError
+        || mesaInvestorUiState.failedAssetIds.size > 0
+        || mesaInvestorUiState.pausedAssetIds.size > 0
+        || mesaInvestorUiState.cancelledAssetIds.size > 0),
     );
     retryBtn.classList.toggle("hidden", isBusy || !hasRecoverable);
   }
@@ -824,42 +965,72 @@ function renderMesaInvestorTable() {
   for (const entry of visible) {
     const assetId = typeof entry.assetId === "string" ? entry.assetId : "";
     const ov = assetId ? getCachedInvestorOverviewAsset(assetId, knownAt) : null;
-    const rowError = assetId ? mesaInvestorUiState.failedAssetIds.get(assetId) : "Identificador de activo inválido.";
-    const rowState = !assetId || rowError
+    const rowError = assetId
+      ? (mesaInvestorUiState.failedAssetIds.get(assetId) || mesaInvestorUiState.pausedReason || "")
+      : "Identificador de activo inválido.";
+    const rowState = !assetId || mesaInvestorUiState.failedAssetIds.has(assetId)
       ? "error"
       : mesaInvestorUiState.loadingAssetIds.has(assetId)
         ? "loading"
-        : mesaInvestorUiState.cancelledAssetIds.has(assetId)
-          ? "cancelled"
-          : "pending";
+        : mesaInvestorUiState.pausedAssetIds.has(assetId)
+          ? "paused"
+          : mesaInvestorUiState.cancelledAssetIds.has(assetId)
+            ? "cancelled"
+            : "pending";
+    const rowPriceDate = mesaOverviewRowPriceDate(ov);
+    const isDifferentPriceDate = Boolean(
+      rowPriceDate && latestPriceDate && rowPriceDate !== latestPriceDate,
+    );
+
     const tr = document.createElement("tr");
     tr.dataset.assetId = assetId;
 
-    // 1. Activo / clase
+    // 1. Activo / clase traducida
     const tdAsset = document.createElement("td");
+    const assetCell = createElement("div", "mesa-asset-cell");
+    const line1 = createElement("div", "mesa-asset-line1");
     const assetBtn = createContextualNavigationButton(
-      `${entry.symbol} · ${entry.name}`,
+      entry.symbol,
       { board: "activo", assetId, subtab: "mercado" },
-      "link-button mesa-asset-link",
+      "mesa-asset-ticker-btn",
     );
-    tdAsset.append(assetBtn, createElement("small", "mesa-value-sub", `${entry.assetClass} · ${entry.exchange || "UNKNOWN"}`));
+    assetBtn.title = `${entry.symbol} — ${entry.name}`;
+    assetBtn.setAttribute("aria-label", `Abrir ${entry.symbol}, ${entry.name}`);
+    line1.append(assetBtn);
+    const classLabel = typeof translateAssetClass === "function"
+      ? translateAssetClass(entry.assetClass)
+      : entry.assetClass;
+    const exchangeLabel = entry.exchange || "Sin bolsa";
+    const line2 = createElement("div", "mesa-asset-line2");
+    const nameSpan = createElement("span", "mesa-asset-name", entry.name || entry.symbol);
+    nameSpan.title = `${entry.name || entry.symbol} (${assetId})`;
+    const subSpan = createElement("span", "mesa-asset-submeta", `· ${classLabel} · ${exchangeLabel}`);
+    line2.append(nameSpan, subSpan);
+    assetCell.append(line1, line2);
+    tdAsset.append(assetCell);
 
     // 2. Último cierre conocido
     const tdClose = document.createElement("td");
+    tdClose.className = "is-numeric";
+    const rowCurrency = ov?.market?.currency || entry.quoteCurrency || "USD";
     tdClose.append(
       renderInvestorValueCell(ov?.market?.close, {
-        unitSuffix: ov?.market?.currency ? ` ${ov.market.currency}` : "",
+        formatValue: (raw) => formatDecimalPrice(raw, rowCurrency),
+        unitSuffix: ` ${rowCurrency}`,
+        isDifferentPriceDate,
+        priceDate: rowPriceDate,
         rowState,
         rowError,
-        knownAtLabel: knownAtShort,
       }),
     );
 
     // 3. Var 1d
     const tdChange = document.createElement("td");
+    tdChange.className = "is-numeric";
     tdChange.append(
       renderInvestorValueCell(ov?.market?.change_1d, {
-        percent: true,
+        formatValue: (raw) => formatDecimalPercentFromRatio(raw, { decimals: 2, signed: true }),
+        signedTone: true,
         rowState,
         rowError,
       }),
@@ -867,21 +1038,23 @@ function renderMesaInvestorTable() {
 
     // 4. Diagnóstico fundamental
     const tdScore = document.createElement("td");
-    if (ov?.fundamental?.score?.state === "available") {
+    tdScore.className = "is-numeric";
+    if (ov?.fundamental?.score?.state === "available" && ov.fundamental.score.value !== null) {
       const scoreVal = ov.fundamental.score.value;
-      const verdict = MESA_VERDICT_LABELS[ov.fundamental.verdict] || ov.fundamental.verdict || "";
+      const verdictKey = ov.fundamental.verdict || "";
+      const verdict = MESA_VERDICT_LABELS[verdictKey] || verdictKey;
       const wrap = createElement("div", "mesa-score-cell");
-      wrap.append(createElement("strong", "", `${scoreVal}/100 ${verdict ? `· ${verdict}` : ""}`));
-      const bar = createElement("div", "mesa-score-bar");
-      bar.setAttribute("role", "progressbar");
-      bar.setAttribute("aria-valuemin", "0");
-      bar.setAttribute("aria-valuemax", "100");
-      bar.setAttribute("aria-valuenow", String(scoreVal));
-      const fill = createElement("span", "mesa-score-fill");
-      const clamped = Math.max(0, Math.min(100, Number(scoreVal) || 0));
-      fill.style.width = `${clamped}%`;
-      bar.append(fill);
-      wrap.append(bar);
+      const scorePrimary = createElement("strong", "mesa-value-primary", formatDecimalScore(scoreVal, 1));
+      scorePrimary.title = `Score exacto: ${formatExactDecimalText(scoreVal)}/100`;
+      wrap.append(scorePrimary, createElement("span", "mesa-value-sub", "/100"));
+      if (verdict) {
+        const verdictTone = verdictKey === "favorable"
+          ? " is-good"
+          : verdictKey === "unfavorable"
+            ? " is-error"
+            : "";
+        wrap.append(createElement("span", `mesa-status-pill${verdictTone}`, verdict));
+      }
       tdScore.append(wrap);
     } else {
       tdScore.append(
@@ -894,23 +1067,27 @@ function renderMesaInvestorTable() {
 
     // 5. P/E anual
     const tdPe = document.createElement("td");
-    const peSub = ov?.valuation?.annual_period_end ? String(ov.valuation.annual_period_end).slice(0, 10) : "";
+    tdPe.className = "is-numeric";
     tdPe.append(
       renderInvestorValueCell(ov?.valuation?.price_to_earnings, {
-        subtext: peSub,
+        formatValue: (raw) => formatDecimalMultiple(raw, 2),
         rowState,
         rowError,
       }),
     );
 
-    // 6. Detalle / acciones
+    // 6. Detalle
     const tdActions = document.createElement("td");
+    const isExpanded = mesaInvestorUiState.expandedAssetIds.has(assetId);
     const expandBtn = createElement(
       "button",
-      "button secondary compact",
-      mesaInvestorUiState.expandedAssetIds.has(assetId) ? "Ocultar" : "Detalle",
+      "mesa-detail-btn",
+      isExpanded ? "Ocultar" : "Detalle",
     );
     expandBtn.type = "button";
+    expandBtn.setAttribute("aria-expanded", String(isExpanded));
+    expandBtn.setAttribute("aria-label", `${isExpanded ? "Ocultar" : "Ver"} detalle de ${entry.symbol}`);
+    expandBtn.dataset.detailTriggerFor = assetId;
     expandBtn.addEventListener("click", () => {
       if (!assetId) return;
       if (mesaInvestorUiState.expandedAssetIds.has(assetId)) {
@@ -919,26 +1096,44 @@ function renderMesaInvestorTable() {
         mesaInvestorUiState.expandedAssetIds.add(assetId);
       }
       renderMesaInvestorTable();
+      const restored = body.querySelector?.(`[data-detail-trigger-for="${assetId}"]`);
+      if (restored && typeof restored.focus === "function") restored.focus();
     });
     tdActions.append(expandBtn);
 
     tr.append(tdAsset, tdClose, tdChange, tdScore, tdPe, tdActions);
     body.append(tr);
 
-    if (mesaInvestorUiState.expandedAssetIds.has(assetId) && ov) {
+    if (isExpanded) {
       const detailTr = document.createElement("tr");
       detailTr.className = "mesa-investor-detail-row";
       const detailTd = document.createElement("td");
       detailTd.colSpan = 6;
       const grid = createElement("div", "mesa-detail-grid");
-      grid.append(
-        createElement("span", "", `P/B: ${ov.valuation?.price_to_book?.value ?? (MESA_VALUE_STATE_LABELS[ov.valuation?.price_to_book?.state] || "—")}`),
-        createElement("span", "", `EV/EBITDA: ${ov.valuation?.enterprise_value_to_ebitda?.value ?? (MESA_VALUE_STATE_LABELS[ov.valuation?.enterprise_value_to_ebitda?.state] || "—")}`),
-        createElement("span", "", `Margen neto: ${ov.fundamental?.net_margin?.value ? decimalScalePercent(ov.fundamental.net_margin.value, 2) : (MESA_VALUE_STATE_LABELS[ov.fundamental?.net_margin?.state] || "—")}`),
-        createElement("span", "", `Pasivos/Activos: ${ov.fundamental?.liabilities_to_assets?.value ?? (MESA_VALUE_STATE_LABELS[ov.fundamental?.liabilities_to_assets?.state] || "—")}`),
-      );
-      if (Array.isArray(ov.limitations) && ov.limitations.length) {
-        grid.append(createElement("small", "mesa-detail-limitations", `Limitaciones: ${ov.limitations.join(" · ")}`));
+      if (ov) {
+        const verdictText = ov.fundamental?.verdict
+          ? ` (${MESA_VERDICT_LABELS[ov.fundamental.verdict] || ov.fundamental.verdict})`
+          : "";
+        grid.append(
+          createElement("span", "", `${entry.name} (${assetId}) · ${classLabel} · ${exchangeLabel}`),
+          createElement("span", "", `Cierre: ${formatMesaExactDetailValue(ov.market?.close, "price", rowCurrency)}${rowPriceDate ? ` · fecha precio ${rowPriceDate}` : ""}`),
+          createElement("span", "", `Var. 1d: ${formatMesaExactDetailValue(ov.market?.change_1d, "percent")}`),
+          createElement("span", "", `Fund. anual: ${formatMesaExactDetailValue(ov.fundamental?.score, "score")}${verdictText}`),
+          createElement("span", "", `P/E anual: ${formatMesaExactDetailValue(ov.valuation?.price_to_earnings, "multiple")}${ov.valuation?.annual_period_end ? ` · ejercicio ${String(ov.valuation.annual_period_end).slice(0, 10)}` : ""}`),
+          createElement("span", "", `P/B: ${formatMesaExactDetailValue(ov.valuation?.price_to_book, "multiple")}`),
+          createElement("span", "", `EV/EBITDA: ${formatMesaExactDetailValue(ov.valuation?.enterprise_value_to_ebitda, "multiple")}`),
+          createElement("span", "", `Margen neto: ${formatMesaExactDetailValue(ov.fundamental?.net_margin, "percent")}`),
+          createElement("span", "", `Pasivos/Activos: ${formatMesaExactDetailValue(ov.fundamental?.liabilities_to_assets, "ratio")}`),
+          createElement("span", "", `Corte UTC: ${knownAt || investorOverviewState.knownAt || "—"}`),
+        );
+        if (Array.isArray(ov.limitations) && ov.limitations.length) {
+          grid.append(createElement("small", "mesa-detail-limitations", `Limitaciones: ${ov.limitations.join(" · ")}`));
+        }
+      } else {
+        grid.append(
+          createElement("span", "", `${entry.name} (${assetId}) · ${classLabel} · ${exchangeLabel}`),
+          createElement("span", "", `Estado: ${rowState === "error" ? `Error (${rowError || "consulta fallida"})` : rowState === "paused" ? `Carga pausada (${rowError || "lote anterior falló"})` : rowState === "cancelled" ? "Cancelado" : "Pendiente"}`),
+        );
       }
       const links = createElement("div", "mesa-detail-links");
       links.append(
@@ -953,6 +1148,23 @@ function renderMesaInvestorTable() {
           "button secondary compact",
         ),
       );
+      if (!ov && (rowState === "error" || rowState === "paused" || rowState === "cancelled")) {
+        const retryOne = createElement("button", "button secondary compact", "Reintentar pendientes");
+        retryOne.type = "button";
+        retryOne.addEventListener("click", () => {
+          void retryMesaPendingAssets().catch(() => {});
+        });
+        links.append(retryOne);
+      }
+      detailTr.addEventListener?.("keydown", (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          mesaInvestorUiState.expandedAssetIds.delete(assetId);
+          renderMesaInvestorTable();
+          const trigger = body.querySelector?.(`[data-detail-trigger-for="${assetId}"]`);
+          if (trigger && typeof trigger.focus === "function") trigger.focus();
+        }
+      });
       detailTd.append(grid, links);
       detailTr.append(detailTd);
       body.append(detailTr);
@@ -964,7 +1176,15 @@ function bindMesaInvestorControls() {
   if (mesaInvestorUiState.controlsBound) return;
   mesaInvestorUiState.controlsBound = true;
   byId("mesa-retry-load-btn")?.addEventListener("click", () => {
-    void loadMesaInvestorVisibleBatch().catch(() => {});
+    void retryMesaPendingAssets().catch(() => {});
+  });
+  byId("mesa-banner-retry-btn")?.addEventListener("click", () => {
+    void retryMesaPendingAssets().catch(() => {});
+  });
+  byId("mesa-banner-system-btn")?.addEventListener("click", () => {
+    if (typeof activateBoard === "function") {
+      activateBoard("sistema", { focus: true });
+    }
   });
   byId("mesa-search")?.addEventListener("input", (e) => {
     mesaInvestorUiState.search = e.target.value;
@@ -1024,10 +1244,109 @@ function bindMesaInvestorControls() {
   });
 }
 
+async function runMesaBatchSequence(targetIds, knownAt, { seq, controller } = {}) {
+  mesaInvestorUiState.hasQueriedCut = knownAt;
+  if (!Array.isArray(targetIds) || targetIds.length === 0) {
+    mesaInvestorUiState.batchStatus = "ready";
+    mesaInvestorUiState.batchError = null;
+    mesaInvestorUiState.pausedReason = null;
+    renderMesaInvestorTable();
+    return;
+  }
+  mesaInvestorUiState.batchStatus = "loading";
+  mesaInvestorUiState.batchError = null;
+  mesaInvestorUiState.pausedReason = null;
+  for (const id of targetIds) {
+    mesaInvestorUiState.failedAssetIds.delete(id);
+    mesaInvestorUiState.cancelledAssetIds.delete(id);
+    mesaInvestorUiState.pausedAssetIds.delete(id);
+  }
+  try {
+    for (let i = 0; i < targetIds.length; i += MESA_INVESTOR_BATCH_SIZE) {
+      if (
+        seq !== mesaInvestorUiState.requestSequence
+        || mesaInvestorUiState.cancelRequested
+        || controller?.signal?.aborted
+      ) {
+        if (seq === mesaInvestorUiState.requestSequence) {
+          for (const id of targetIds.slice(i)) {
+            if (!getCachedInvestorOverviewAsset(id, knownAt)) {
+              mesaInvestorUiState.cancelledAssetIds.add(id);
+            }
+          }
+          mesaInvestorUiState.batchStatus = "cancelled";
+        }
+        return;
+      }
+      const chunk = targetIds.slice(i, i + MESA_INVESTOR_BATCH_SIZE);
+      for (const id of chunk) mesaInvestorUiState.loadingAssetIds.add(id);
+      renderMesaInvestorTable();
+      try {
+        await fetchInvestorOverviewBatch(chunk, knownAt, { signal: controller?.signal });
+      } catch (error) {
+        for (const id of chunk) mesaInvestorUiState.loadingAssetIds.delete(id);
+        if (error?.name === "AbortError") {
+          if (seq === mesaInvestorUiState.requestSequence) {
+            for (const id of targetIds.slice(i)) {
+              if (!getCachedInvestorOverviewAsset(id, knownAt)) {
+                mesaInvestorUiState.cancelledAssetIds.add(id);
+              }
+            }
+            mesaInvestorUiState.batchStatus = "cancelled";
+            renderMesaInvestorTable();
+          }
+          return;
+        }
+        if (seq !== mesaInvestorUiState.requestSequence) return;
+        const safeMsg = sanitizeMesaErrorMessage(error);
+        for (const id of chunk) {
+          if (!getCachedInvestorOverviewAsset(id, knownAt)) {
+            mesaInvestorUiState.failedAssetIds.set(id, safeMsg);
+          }
+        }
+        for (const id of targetIds.slice(i + chunk.length)) {
+          if (!getCachedInvestorOverviewAsset(id, knownAt)) {
+            mesaInvestorUiState.pausedAssetIds.add(id);
+          }
+        }
+        mesaInvestorUiState.pausedReason = safeMsg;
+        mesaInvestorUiState.batchStatus = "error";
+        mesaInvestorUiState.batchError = safeMsg;
+        renderMesaInvestorTable();
+        throw error;
+      }
+      for (const id of chunk) {
+        mesaInvestorUiState.loadingAssetIds.delete(id);
+        mesaInvestorUiState.failedAssetIds.delete(id);
+        mesaInvestorUiState.pausedAssetIds.delete(id);
+        mesaInvestorUiState.cancelledAssetIds.delete(id);
+      }
+      if (seq !== mesaInvestorUiState.requestSequence) return;
+      renderMesaInvestorTable();
+    }
+    if (seq === mesaInvestorUiState.requestSequence && mesaInvestorUiState.batchStatus === "loading") {
+      mesaInvestorUiState.batchStatus = "ready";
+      mesaInvestorUiState.batchError = null;
+      mesaInvestorUiState.pausedReason = null;
+    }
+  } finally {
+    if (seq === mesaInvestorUiState.requestSequence) {
+      mesaInvestorUiState.loadingAssetIds.clear();
+      mesaInvestorUiState.loadingAll = false;
+      mesaInvestorUiState.cancelRequested = false;
+      if (mesaInvestorUiState.abortController === controller) {
+        mesaInvestorUiState.abortController = null;
+      }
+      renderMesaInvestorTable();
+    }
+  }
+}
+
 async function loadMesaInvestorVisibleBatch() {
   const knownAt = byId("report-known-at")?.value.trim() || "";
   if (!knownAt) return;
   abortMesaInvestorRequests();
+  mesaInvestorUiState.lastRequestedScope = "visible";
   const seq = mesaInvestorUiState.requestSequence;
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   mesaInvestorUiState.abortController = controller;
@@ -1040,171 +1359,151 @@ async function loadMesaInvestorVisibleBatch() {
     renderMesaInvestorTable();
     throw new Error(mesaInvestorUiState.batchError);
   }
-  const visible = visibleEntries.map((e) => e.assetId);
-  const missing = visible.filter((id) => !getCachedInvestorOverviewAsset(id, knownAt));
-  if (missing.length === 0) {
-    mesaInvestorUiState.batchStatus = "ready";
-    mesaInvestorUiState.batchError = null;
-    renderMesaInvestorTable();
-    return;
-  }
-  mesaInvestorUiState.batchStatus = "loading";
-  mesaInvestorUiState.batchError = null;
-  for (const id of missing) {
-    mesaInvestorUiState.failedAssetIds.delete(id);
-    mesaInvestorUiState.cancelledAssetIds.delete(id);
-  }
-  try {
-    for (let i = 0; i < missing.length; i += MESA_INVESTOR_BATCH_SIZE) {
-      if (seq !== mesaInvestorUiState.requestSequence || mesaInvestorUiState.cancelRequested) return;
-      const chunk = missing.slice(i, i + MESA_INVESTOR_BATCH_SIZE);
-      for (const id of chunk) mesaInvestorUiState.loadingAssetIds.add(id);
-      renderMesaInvestorTable();
-      try {
-        await fetchInvestorOverviewBatch(chunk, knownAt, { signal: controller?.signal });
-      } catch (error) {
-        for (const id of chunk) mesaInvestorUiState.loadingAssetIds.delete(id);
-        if (error?.name === "AbortError") {
-          if (seq === mesaInvestorUiState.requestSequence) {
-            for (const id of chunk) mesaInvestorUiState.cancelledAssetIds.add(id);
-            mesaInvestorUiState.batchStatus = "cancelled";
-            renderMesaInvestorTable();
-          }
-          return;
-        }
-        if (seq !== mesaInvestorUiState.requestSequence) return;
-        for (const id of chunk) {
-          mesaInvestorUiState.failedAssetIds.set(id, error?.message || "Error al consultar");
-        }
-        mesaInvestorUiState.batchStatus = "error";
-        mesaInvestorUiState.batchError = error?.message || "No se pudo cargar el lote de Mesa.";
-        renderMesaInvestorTable();
-        throw error;
-      }
-      for (const id of chunk) mesaInvestorUiState.loadingAssetIds.delete(id);
-      if (seq !== mesaInvestorUiState.requestSequence) return;
-      renderMesaInvestorTable();
-    }
-    if (seq === mesaInvestorUiState.requestSequence) {
-      mesaInvestorUiState.batchStatus = "ready";
-      renderMesaInvestorTable();
-    }
-  } finally {
-    if (mesaInvestorUiState.abortController === controller) {
-      mesaInvestorUiState.abortController = null;
-    }
-  }
+  const missing = visibleEntries
+    .map((e) => e.assetId)
+    .filter((id) => !getCachedInvestorOverviewAsset(id, knownAt));
+  await runMesaBatchSequence(missing, knownAt, { seq, controller });
 }
 
 async function loadMesaInvestorSelectedUniverse() {
   const knownAt = byId("report-known-at")?.value.trim() || "";
   if (!knownAt || mesaInvestorUiState.loadingAll) return;
   abortMesaInvestorRequests();
+  mesaInvestorUiState.lastRequestedScope = "selected";
   const seq = mesaInvestorUiState.requestSequence;
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   mesaInvestorUiState.abortController = controller;
   mesaInvestorUiState.loadingAll = true;
   mesaInvestorUiState.cancelRequested = false;
-  mesaInvestorUiState.batchStatus = "loading";
-  mesaInvestorUiState.batchError = null;
-  renderMesaInvestorTable();
-  try {
-    const selectedEntries = mesaFilteredCatalogEntries().slice(0, MESA_INVESTOR_MAX_UNIVERSE);
-    const invalidEntry = selectedEntries.find((e) => typeof e.assetId !== "string" || !e.assetId.trim());
-    if (invalidEntry) {
-      mesaInvestorUiState.batchStatus = "error";
-      mesaInvestorUiState.batchError = "El catálogo contiene una entrada sin identificador válido.";
-      return;
-    }
-    const targets = selectedEntries
-      .map((e) => e.assetId)
-      .filter((id) => !getCachedInvestorOverviewAsset(id, knownAt));
-    for (const id of targets) {
-      mesaInvestorUiState.failedAssetIds.delete(id);
-      mesaInvestorUiState.cancelledAssetIds.delete(id);
-    }
-    for (let i = 0; i < targets.length; i += MESA_INVESTOR_BATCH_SIZE) {
-      if (seq !== mesaInvestorUiState.requestSequence || mesaInvestorUiState.cancelRequested) {
-        for (const id of targets.slice(i)) mesaInvestorUiState.cancelledAssetIds.add(id);
-        mesaInvestorUiState.batchStatus = "cancelled";
-        break;
-      }
-      const chunk = targets.slice(i, i + MESA_INVESTOR_BATCH_SIZE);
-      for (const id of chunk) mesaInvestorUiState.loadingAssetIds.add(id);
-      renderMesaInvestorTable();
-      try {
-        await fetchInvestorOverviewBatch(chunk, knownAt, { signal: controller?.signal });
-      } catch (error) {
-        for (const id of chunk) mesaInvestorUiState.loadingAssetIds.delete(id);
-        if (error?.name === "AbortError") {
-          for (const id of targets.slice(i)) mesaInvestorUiState.cancelledAssetIds.add(id);
-          if (seq === mesaInvestorUiState.requestSequence) {
-            mesaInvestorUiState.batchStatus = "cancelled";
-          }
-          break;
-        }
-        if (seq === mesaInvestorUiState.requestSequence) {
-          for (const id of chunk) {
-            mesaInvestorUiState.failedAssetIds.set(id, error?.message || "Error al consultar");
-          }
-          mesaInvestorUiState.batchStatus = "error";
-          mesaInvestorUiState.batchError = error?.message || "No se pudo cargar el universo.";
-        }
-        throw error;
-      }
-      for (const id of chunk) mesaInvestorUiState.loadingAssetIds.delete(id);
-      if (seq !== mesaInvestorUiState.requestSequence) break;
-      renderMesaInvestorTable();
-    }
-    if (seq === mesaInvestorUiState.requestSequence && mesaInvestorUiState.batchStatus === "loading") {
-      mesaInvestorUiState.batchStatus = "ready";
-    }
-  } finally {
-    mesaInvestorUiState.loadingAssetIds.clear();
+  const selectedEntries = mesaFilteredCatalogEntries().slice(0, MESA_INVESTOR_MAX_UNIVERSE);
+  const invalidEntry = selectedEntries.find((e) => typeof e.assetId !== "string" || !e.assetId.trim());
+  if (invalidEntry) {
     mesaInvestorUiState.loadingAll = false;
-    mesaInvestorUiState.cancelRequested = false;
-    if (mesaInvestorUiState.abortController === controller) {
-      mesaInvestorUiState.abortController = null;
-    }
+    mesaInvestorUiState.batchStatus = "error";
+    mesaInvestorUiState.batchError = "El catálogo contiene una entrada sin identificador válido.";
     renderMesaInvestorTable();
+    return;
   }
+  const targets = selectedEntries
+    .map((e) => e.assetId)
+    .filter((id) => !getCachedInvestorOverviewAsset(id, knownAt));
+  await runMesaBatchSequence(targets, knownAt, { seq, controller });
+}
+
+async function retryMesaPendingAssets() {
+  const knownAt = byId("report-known-at")?.value.trim() || "";
+  if (!knownAt || mesaInvestorUiState.loadingAll || mesaInvestorUiState.loadingAssetIds.size > 0) {
+    return;
+  }
+  abortMesaInvestorRequests();
+  const seq = mesaInvestorUiState.requestSequence;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  mesaInvestorUiState.abortController = controller;
+  mesaInvestorUiState.cancelRequested = false;
+  const isSelectedScope = mesaInvestorUiState.lastRequestedScope === "selected"
+    || mesaInvestorUiState.pausedAssetIds.size > 0;
+  if (isSelectedScope) mesaInvestorUiState.loadingAll = true;
+  const candidates = isSelectedScope
+    ? mesaSortedEntries(mesaFilteredCatalogEntries()).slice(0, MESA_INVESTOR_MAX_UNIVERSE)
+    : mesaSortedEntries(mesaFilteredCatalogEntries()).slice(0, mesaInvestorUiState.visibleLimit);
+  const pendingSet = new Set([
+    ...mesaInvestorUiState.failedAssetIds.keys(),
+    ...mesaInvestorUiState.pausedAssetIds,
+    ...mesaInvestorUiState.cancelledAssetIds,
+  ]);
+  const targets = [];
+  for (const entry of candidates) {
+    const id = typeof entry.assetId === "string" ? entry.assetId : "";
+    if (!id || getCachedInvestorOverviewAsset(id, knownAt)) continue;
+    if (pendingSet.size === 0 || pendingSet.has(id) || isSelectedScope) {
+      targets.push(id);
+    }
+  }
+  for (const id of pendingSet) {
+    if (id && !getCachedInvestorOverviewAsset(id, knownAt) && !targets.includes(id)) {
+      targets.push(id);
+    }
+  }
+  await runMesaBatchSequence(targets, knownAt, { seq, controller });
 }
 
 async function loadMesaInvestorOverview() {
   bindMesaInvestorControls();
+  const knownAt = byId("report-known-at")?.value.trim() || "";
+  if (
+    knownAt
+    && sameIsoTimestamp(mesaInvestorUiState.hasQueriedCut, knownAt)
+    && (mesaInvestorUiState.failedAssetIds.size > 0
+      || mesaInvestorUiState.pausedAssetIds.size > 0
+      || mesaInvestorUiState.batchStatus === "error")
+  ) {
+    renderMesaInvestorTable();
+    return;
+  }
   renderMesaInvestorTable();
   await loadMesaInvestorVisibleBatch();
 }
 
-function renderActivoCompactHeader(ov) {
+function renderActivoCompactHeader(ov, cutIso = null) {
   const container = byId("asset-compact-header");
   if (!container || !ov) return;
   container.replaceChildren();
-  const knownAt = typeof formatKnownAtLabel === "function" ? formatKnownAtLabel(ov.known_at) : (ov.known_at || "");
+  const resolvedCut = String(
+    cutIso
+    || ov.known_at
+    || investorOverviewState.knownAt
+    || byId("report-known-at")?.value?.trim()
+    || "",
+  ).trim();
+  const knownAtShort = resolvedCut && typeof formatKnownAtLabel === "function"
+    ? formatKnownAtLabel(resolvedCut)
+    : (resolvedCut || "Sin corte");
+  const metaBar = createElement("div", "asset-compact-meta-bar");
+  const cutLabel = createElement("span", "", `Resumen al corte: ${knownAtShort} (America/Lima)`);
+  if (resolvedCut) {
+    cutLabel.title = `Corte UTC: ${resolvedCut}`;
+    cutLabel.setAttribute("aria-label", `Resumen al corte ${knownAtShort}, UTC ${resolvedCut}`);
+  }
+  metaBar.append(cutLabel);
+  if (ov.valuation?.annual_period_end) {
+    metaBar.append(createElement("span", "", `Últ. anual: ${String(ov.valuation.annual_period_end).slice(0, 10)}`));
+  }
+
   const grid = createElement("div", "asset-compact-grid");
+  const marketCurrency = ov.market?.currency || "USD";
   const marketCard = createElement("div", "asset-compact-domain");
+  const priceDate = ov.market?.close?.reference_at ? String(ov.market.close.reference_at).slice(0, 10) : "";
   marketCard.append(
-    createElement("small", "", `Último cierre conocido · corte ${knownAt}`),
+    createElement("small", "", `Último cierre${priceDate ? ` (${priceDate})` : ""}`),
     renderInvestorValueCell(ov.market?.close, {
-      unitSuffix: ov.market?.currency ? ` ${ov.market.currency}` : "",
-      knownAtLabel: knownAt,
+      formatValue: (raw) => formatDecimalPrice(raw, marketCurrency),
+      unitSuffix: ` ${marketCurrency}`,
     }),
   );
   const fundCard = createElement("div", "asset-compact-domain");
-  fundCard.append(
-    createElement("small", "", `Diagnóstico fundamental · corte ${knownAt}`),
-    ov.fundamental?.score?.state === "available"
-      ? createElement("strong", "", `${ov.fundamental.score.value}/100 · ${MESA_VERDICT_LABELS[ov.fundamental.verdict] || ov.fundamental.verdict || ""}`)
-      : renderInvestorValueCell(ov.fundamental?.score, { knownAtLabel: knownAt }),
-  );
+  fundCard.append(createElement("small", "", "Diagnóstico fundamental"));
+  if (ov.fundamental?.score?.state === "available" && ov.fundamental.score.value !== null) {
+    const verdictKey = ov.fundamental.verdict || "";
+    const verdict = MESA_VERDICT_LABELS[verdictKey] || verdictKey;
+    const scoreWrap = createElement("div", "mesa-score-cell");
+    scoreWrap.append(
+      createElement("strong", "mesa-value-primary", `${formatDecimalScore(ov.fundamental.score.value, 1)}/100`),
+    );
+    if (verdict) {
+      const tone = verdictKey === "favorable" ? " is-good" : verdictKey === "unfavorable" ? " is-error" : "";
+      scoreWrap.append(createElement("span", `mesa-status-pill${tone}`, verdict));
+    }
+    fundCard.append(scoreWrap);
+  } else {
+    fundCard.append(renderInvestorValueCell(ov.fundamental?.score));
+  }
   const valCard = createElement("div", "asset-compact-domain");
   valCard.append(
-    createElement("small", "", `P/E anual · corte ${knownAt}`),
+    createElement("small", "", "P/E anual"),
     renderInvestorValueCell(ov.valuation?.price_to_earnings, {
-      subtext: ov.valuation?.annual_period_end ? String(ov.valuation.annual_period_end).slice(0, 10) : "",
-      knownAtLabel: knownAt,
+      formatValue: (raw) => formatDecimalMultiple(raw, 2),
     }),
   );
   grid.append(marketCard, fundCard, valCard);
-  container.append(grid);
+  container.append(metaBar, grid);
 }

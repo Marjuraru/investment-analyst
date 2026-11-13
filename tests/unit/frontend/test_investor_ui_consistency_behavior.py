@@ -365,6 +365,7 @@ assetPreferencesSnapshot = {{
 
   mesaInvestorUiState.search = "";
   mesaInvestorUiState.expandedAssetIds.add("equity:us:googl");
+  mesaInvestorUiState.expandedAssetIds.add("crypto:coinbase:ada-usd");
   renderMesaInvestorTable();
   const detailText = nodeText(byId("mesa-investor-table-body"));
 
@@ -392,10 +393,12 @@ assetPreferencesSnapshot = {{
     assert result["googlExchange"] == "NASDAQ"
     row_by_id = {row["id"]: row["text"] for row in result["rowsAfterLoad"]}
     assert "NASDAQ" in row_by_id["equity:us:googl"]
-    assert "Sin diagnóstico anual disponible al corte" in row_by_id["equity:us:googl"]
+    assert "Sin datos" in row_by_id["equity:us:googl"]
+    assert "Sin diagnóstico anual disponible al corte" in result["detailText"]
     assert "ARCA" in row_by_id["etf:us:spy"]
     assert "COINBASE" in row_by_id["crypto:coinbase:ada-usd"]
-    assert "Sin barras elegibles para este corte/ventana" in row_by_id["crypto:coinbase:ada-usd"]
+    assert "Sin datos" in row_by_id["crypto:coinbase:ada-usd"]
+    assert "Sin barras elegibles para este corte/ventana" in result["detailText"]
     assert result["favoriteIds"] == ["equity:us:googl"]
     assert result["searchIds"] == ["crypto:coinbase:ada-usd"]
     assert result["clearedOnInvalid"] == []
@@ -572,7 +575,8 @@ let peakActivo = 0;
     mesaErrorCaught = true;
   }}
   const failedRowText = nodeText(byId("mesa-investor-table-body"));
-  const retryHidden = byId("mesa-retry-load-btn").classList.contains("hidden");
+  const bannerHidden = byId("mesa-investor-banner").classList.contains("hidden");
+  const retryHidden = byId("mesa-banner-retry-btn").classList.contains("hidden");
 
   console.log(JSON.stringify({{
     c1Aborted,
@@ -585,6 +589,7 @@ let peakActivo = 0;
     keyAfterRetry,
     mesaErrorCaught,
     failedRowText,
+    bannerHidden,
     retryHidden,
   }}));
 }})();
@@ -600,8 +605,9 @@ let peakActivo = 0;
     assert result["keyAfterFailure"] is False
     assert isinstance(result["keyAfterRetry"], str) and "equity:us:googl" in result["keyAfterRetry"]
     assert result["mesaErrorCaught"] is True
-    assert "Error al consultar" in result["failedRowText"]
+    assert "Error" in result["failedRowText"]
     assert "Pendiente" not in result["failedRowText"]
+    assert result["bannerHidden"] is False
     assert result["retryHidden"] is False
 
 

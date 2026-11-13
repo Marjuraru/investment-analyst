@@ -49,9 +49,21 @@
 
 .cazatiburones-universe-table-scroll table {
   width: 100%;
-  min-width: 1080px;
+  table-layout: auto;
   border-collapse: collapse;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
+}
+
+.cazatiburones-universe-table-scroll .absence-mark {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: break-word;
+  align-items: flex-start;
+  line-height: 1.25;
+}
+
+.cazatiburones-universe-table-scroll .absence-mark-label {
+  white-space: nowrap;
 }
 
 .cazatiburones-universe-table-scroll caption {
@@ -65,19 +77,20 @@
 
 .cazatiburones-universe-table-scroll th,
 .cazatiburones-universe-table-scroll td {
-  min-width: 118px;
+  min-width: 0;
   height: var(--row-height);
-  padding: 0.45rem 0.65rem;
+  padding: 0.38rem 0.45rem;
   border-bottom: var(--row-rule-width) solid var(--line);
   color: var(--ink-strong);
-  font-size: var(--base-font-size);
+  font-size: 0.76rem;
   text-align: left;
   vertical-align: middle;
+  overflow-wrap: break-word;
 }
 
 .cazatiburones-universe-table-scroll th:first-child,
 .cazatiburones-universe-table-scroll td:first-child {
-  min-width: 210px;
+  width: 188px;
 }
 
 .cazatiburones-universe-table-scroll thead th {
@@ -87,9 +100,10 @@
   background: var(--surface-subtle);
   color: var(--muted-strong);
   font-size: var(--label-font-size);
-  letter-spacing: var(--label-tracking);
+  letter-spacing: 0.04em;
+  line-height: 1.25;
   text-transform: uppercase;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .cazatiburones-universe-table-scroll tbody th {
@@ -189,6 +203,13 @@
   margin: 0.75rem 0 0;
   border: 1px solid var(--line);
   background: var(--surface-subtle);
+}
+
+@media (max-width: 960px) {
+  .cazatiburones-universe-table-scroll table {
+    table-layout: auto;
+    min-width: 720px;
+  }
 }
 
 @media (max-width: 760px) {

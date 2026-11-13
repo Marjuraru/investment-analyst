@@ -635,9 +635,42 @@ const loadedBoardIds = new Set();
 const INVESTOR_OVERVIEW_BATCH_SIZE = 10;
 const INVESTOR_OVERVIEW_MAX_SNAPSHOT = 100;
 const INVESTOR_OVERVIEW_MAX_BYTES = 2 * 1024 * 1024;
+const ASSET_CLASS_LABELS = Object.freeze({
+  equity: "Acción",
+  etf: "ETF",
+  crypto: "Cripto",
+});
+
 const INVESTOR_OVERVIEW_ABSENCE_REASONS = Object.freeze({
+  market_not_configured: "Mercado no configurado",
   no_bar_in_window: "Sin barras elegibles para este corte/ventana",
+  simple_return_1d_not_derived_for_selected_bar: "Sin barra previa para calcular variación diaria",
+  asset_class_has_no_fundamentals: "Este tipo de activo no reporta fundamentales",
+  fundamentals_not_configured: "Fundamentales no configurados",
+  annual_frequency_not_supported: "Frecuencia anual no implementada para este emisor",
   no_annual_diagnostic_at_known_at: "Sin diagnóstico anual disponible al corte",
+  annual_diagnostic_outside_window: "Diagnóstico anual fuera de la ventana consultada",
+  diagnostic_insufficient_data: "Datos insuficientes para evaluar el diagnóstico",
+  metric_not_in_selected_diagnostic: "Métrica ausente en el diagnóstico seleccionado",
+  asset_class_has_no_valuation: "La valoración corporativa no aplica a este activo",
+  valuation_not_configured: "Valoración corporativa no configurada",
+  asset_not_applicable: "No aplica al tipo de activo",
+  share_basis_unavailable: "Base entre título y acción no disponible",
+  security_unit_mismatch: "Unidad del título incompatible",
+  corporate_action_basis_unavailable: "Base de acción corporativa no demostrable",
+  price_unavailable: "Precio no disponible en el corte",
+  price_ambiguous: "Revisión de precio ambigua",
+  fundamentals_unavailable: "Ejercicio anual no disponible en el corte",
+  fundamental_revision_ambiguous: "Revisión fundamental ambigua",
+  period_mismatch: "Períodos incompatibles",
+  source_mismatch: "Fuentes incompatibles",
+  frequency_mismatch: "Frecuencias incompatibles",
+  accounting_basis_mismatch: "Taxonomías contables incompatibles",
+  currency_mismatch: "Monedas incompatibles; no se aplica FX",
+  unit_mismatch: "Unidades financieras incompatibles",
+  missing_input: "Falta un dato oficial requerido",
+  invalid_denominator: "Denominador nulo, negativo o inválido",
+  ebitda_unavailable: "D&A anual oficial compatible no disponible",
 });
 const investorOverviewState = {
   contextKey: null,
@@ -660,9 +693,25 @@ function setActiveAssetContextState(patch = {}) {
   Object.assign(activeAssetContextState, patch);
 }
 
+function translateAssetClass(assetClass) {
+  const key = String(assetClass || "").trim().toLowerCase();
+  return ASSET_CLASS_LABELS[key] || "Activo";
+}
+
 function translateOverviewAbsenceReason(reason) {
   if (!reason) return "";
-  return INVESTOR_OVERVIEW_ABSENCE_REASONS[reason] || String(reason);
+  const code = String(reason).trim();
+  if (!code) return "";
+  return INVESTOR_OVERVIEW_ABSENCE_REASONS[code] || "Detalle no disponible";
+}
+
+function formatOverviewAbsenceDetail(reason) {
+  const technicalCode = String(reason || "").trim();
+  if (!technicalCode) return { label: "", technicalCode: "" };
+  return {
+    label: translateOverviewAbsenceReason(technicalCode),
+    technicalCode,
+  };
 }
 
 function formatKnownAtLabel(knownAt) {
@@ -1509,14 +1558,15 @@ function cryptoDerivativesRange(knownAt) {
 
 function formatDerivativeValue(value, unit = "") {
   if (!value || typeof value.value !== "string") return "No disponible";
-  const numeric = numericValue(value.value);
-  if (numeric === null) return value.value;
+  const parsed = parseDecimalValueForDisplay(value.value);
+  if (!parsed) return value.value;
   const suffix = unit || value.unit || "";
-  if (suffix === "bps") return `${formatNumber(numeric, { maximumFractionDigits: 2 })} bps`;
+  if (suffix === "bps") return `${formatDecimalRatio(value.value, 2)} bps`;
   if (suffix === "percent" || suffix === "%") {
-    return formatNumber(numeric, { style: "percent", maximumFractionDigits: 4 });
+    return formatDecimalPercentFromRatio(value.value, { decimals: 4, signed: false });
   }
-  return `${formatNumber(numeric, { maximumFractionDigits: 6 })}${suffix ? ` ${suffix}` : ""}`;
+  const roundedText = formatDecimalRatio(value.value, 6, { trimTrailingZeros: true, minDecimals: 2 });
+  return `${roundedText}${suffix ? ` ${suffix}` : ""}`;
 }
 
 function derivativeDirection(value) {
@@ -1967,44 +2017,28 @@ function formatInteger(value) {
 }
 
 function formatScore(value) {
-  return formatNumber(value, { maximumFractionDigits: 1 });
+  return formatDecimalScore(value, 1);
 }
 
 function formatConfidence(value) {
-  const parsed = numericValue(value);
-  if (parsed === null) return "—";
-  return formatNumber(parsed, {
-    style: "percent",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 1,
-  });
+  return formatDecimalPercentFromRatio(value, { decimals: 1, signed: false, trimZeroDecimals: true });
 }
 
 function formatMetricValue(metric) {
   const presentation = METRIC_PRESENTATION[metric.metric_key];
   const kind = presentation?.kind;
-  const parsed = numericValue(metric.value);
-  if (parsed === null) return `${metric.value} ${metric.unit}`;
+  const parsed = parseDecimalValueForDisplay(metric.value);
+  if (!parsed) return `${metric.value} ${metric.unit}`;
   if (kind === "percentage") {
-    return formatNumber(parsed, {
-      style: "percent",
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 2,
-    });
+    return formatDecimalPercentFromRatio(metric.value, { decimals: 2, signed: false });
   }
   if (kind === "multiple") {
-    return `${formatNumber(parsed, { maximumFractionDigits: 2 })}×`;
+    return formatDecimalMultiple(metric.value, 2);
   }
   if (kind === "currency" || metric.unit === "USD") {
-    return formatNumber(parsed, {
-      style: "currency",
-      currency: "USD",
-      currencyDisplay: "narrowSymbol",
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    });
+    return formatDecimalPrice(metric.value, "USD");
   }
-  return `${formatNumber(parsed, { maximumFractionDigits: 4 })} ${metric.unit}`;
+  return `${formatDecimalRatio(metric.value, 4, { trimTrailingZeros: true })} ${metric.unit}`;
 }
 
 function metricContext(metric) {
@@ -2031,22 +2065,12 @@ function formatAge(days) {
   return `Hace ${formatInteger(days)} días`;
 }
 
-function formatCurrency(value) {
-  return formatNumber(value, {
-    style: "currency",
-    currency: "USD",
-    currencyDisplay: "narrowSymbol",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+function formatCurrency(value, currency = "USD") {
+  return formatDecimalPrice(value, currency);
 }
 
 function formatCompactVolume(value) {
-  return formatNumber(value, {
-    notation: "compact",
-    compactDisplay: "short",
-    maximumFractionDigits: 1,
-  });
+  return formatCompactDecimalWithUnit(value, { decimals: 1 });
 }
 
 function formatMarketVolume(value, { compact = false, includeUnit = true } = {}) {
@@ -2054,41 +2078,34 @@ function formatMarketVolume(value, { compact = false, includeUnit = true } = {})
   const formatted = compact
     ? formatCompactVolume(value)
     : presentation.volumeUnit === "BTC"
-      ? formatNumber(value, { maximumFractionDigits: 2 })
+      ? formatDecimalRatio(value, 2, { trimTrailingZeros: true })
       : formatInteger(value);
   return includeUnit ? `${formatted} ${presentation.volumeLabel}` : formatted;
 }
 
 function formatRangeChange(value) {
-  if (!Number.isFinite(value)) return "—";
-  const sign = value > 0 ? "+" : "";
-  return `${sign}${formatNumber(value, {
-    style: "percent",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  })}`;
+  return formatDecimalPercentFromRatio(value, { decimals: 2, signed: true });
 }
 
 function setSignedPercentage(target, value, title) {
-  const parsed = numericValue(value);
-  target.textContent = parsed === null ? "—" : formatRangeChange(parsed);
-  target.className = `stat-move ${parsed > 0 ? "positive" : parsed < 0 ? "negative" : "neutral"}`;
-  target.title = value === null || value === undefined ? "" : `${title}: ${value}`;
+  const parsed = parseDecimalValueForDisplay(value);
+  target.textContent = parsed === null ? "—" : formatDecimalPercentFromRatio(value, { decimals: 2, signed: true });
+  const tone = !parsed || parsed.sign === 0 ? "neutral" : parsed.sign > 0 ? "positive" : "negative";
+  target.className = `stat-move ${tone}`;
+  target.title = value === null || value === undefined ? "" : `${title}: ${formatExactDecimalText(value)}`;
+  if (value !== null && value !== undefined) {
+    target.setAttribute("aria-label", `${title}: ${target.textContent} (exacto ${formatExactDecimalText(value)})`);
+  } else {
+    target.removeAttribute("aria-label");
+  }
 }
 
 function formatMultiple(value) {
-  const parsed = numericValue(value);
-  return parsed === null ? "—" : `${formatNumber(parsed, { maximumFractionDigits: 2 })}×`;
+  return formatDecimalMultiple(value, 2);
 }
 
-function formatUnsignedPercentage(value) {
-  const parsed = numericValue(value);
-  if (parsed === null) return "—";
-  return formatNumber(parsed, {
-    style: "percent",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  });
+function formatUnsignedPercentage(value, decimals = 2) {
+  return formatDecimalPercentFromRatio(value, { decimals, signed: false });
 }
 
 function localizedIssue(issue) {
@@ -2281,6 +2298,386 @@ function decimalScalePercent(raw, decimals = 2) {
   if (decimals <= 0) return `${signPrefix}${intPart}%`;
   const paddedFrac = extraFrac.padEnd(decimals, "0").slice(0, decimals);
   return `${signPrefix}${intPart}.${paddedFrac}%`;
+}
+
+function normalizeDecimalInput(raw) {
+  if (raw === null || raw === undefined) return null;
+  let text;
+  if (typeof raw === "number") {
+    if (!Number.isFinite(raw)) return null;
+    text = Object.is(raw, -0) ? "0" : String(raw);
+  } else {
+    text = String(raw).trim();
+  }
+  if (!text) return null;
+  const sci = text.match(/^([+-])?(?:(\d+)(?:\.(\d*))?|\.(\d+))[eE]([+-]?\d+)$/);
+  if (sci) {
+    const signStr = sci[1] === "-" ? "-" : "";
+    const intPart = sci[2] || "0";
+    const fracPart = sci[3] || sci[4] || "";
+    const exp = Number.parseInt(sci[5], 10);
+    if (!Number.isFinite(exp)) return null;
+    const digits = (intPart + fracPart).replace(/^0+/, "");
+    if (!digits) return "0";
+    const pointPos = intPart.length + exp;
+    if (pointPos <= 0) {
+      return `${signStr}0.${"0".repeat(-pointPos)}${digits}`;
+    }
+    if (pointPos >= digits.length) {
+      return `${signStr}${digits}${"0".repeat(pointPos - digits.length)}`;
+    }
+    return `${signStr}${digits.slice(0, pointPos)}.${digits.slice(pointPos)}`;
+  }
+  return text;
+}
+
+function parseDecimalValueForDisplay(raw) {
+  const normalized = normalizeDecimalInput(raw);
+  if (normalized === null) return null;
+  return parseDecimalString(normalized);
+}
+
+function shiftDecimalParts(parsed, shiftLeftCount) {
+  if (!parsed || parsed.sign === 0) {
+    return { sign: 0, intDigits: "0", fracDigits: "" };
+  }
+  const allDigits = `${parsed.intDigits}${parsed.fracDigits}`;
+  const pointPos = parsed.intDigits.length - shiftLeftCount;
+  let nextInt = "0";
+  let nextFrac = "";
+  if (pointPos <= 0) {
+    nextFrac = `${"0".repeat(-pointPos)}${allDigits}`;
+  } else if (pointPos >= allDigits.length) {
+    nextInt = `${allDigits}${"0".repeat(pointPos - allDigits.length)}`;
+  } else {
+    nextInt = allDigits.slice(0, pointPos);
+    nextFrac = allDigits.slice(pointPos);
+  }
+  nextInt = nextInt.replace(/^0+(?=\d)/, "") || "0";
+  nextFrac = nextFrac.replace(/0+$/, "");
+  const isZero = nextInt === "0" && nextFrac.length === 0;
+  return {
+    sign: isZero ? 0 : parsed.sign,
+    intDigits: isZero ? "0" : nextInt,
+    fracDigits: isZero ? "" : nextFrac,
+  };
+}
+
+function addOneToDigitArray(digits) {
+  let carry = 1;
+  for (let i = digits.length - 1; i >= 0 && carry > 0; i -= 1) {
+    const sum = digits[i] + carry;
+    if (sum >= 10) {
+      digits[i] = sum - 10;
+      carry = 1;
+    } else {
+      digits[i] = sum;
+      carry = 0;
+    }
+  }
+  if (carry > 0) digits.unshift(carry);
+  return digits;
+}
+
+function roundDecimalHalfUpParts(parsed, decimals = 2) {
+  const precision = Math.max(0, Number(decimals) || 0);
+  if (!parsed || parsed.sign === 0) {
+    return {
+      sign: 0,
+      intDigits: "0",
+      fracDigits: "0".repeat(precision),
+      isZeroAfterRounding: true,
+    };
+  }
+  const fracPadded = parsed.fracDigits.padEnd(precision + 1, "0");
+  const keptFrac = fracPadded.slice(0, precision);
+  const nextDigit = Number(fracPadded[precision] || "0");
+  let intDigits = parsed.intDigits;
+  let outFrac = keptFrac;
+  if (nextDigit >= 5) {
+    const combined = `${intDigits}${keptFrac}`.split("").map((ch) => Number(ch));
+    addOneToDigitArray(combined);
+    const splitAt = combined.length - precision;
+    intDigits = combined.slice(0, splitAt).join("").replace(/^0+(?=\d)/, "") || "0";
+    outFrac = precision > 0 ? combined.slice(splitAt).join("") : "";
+  }
+  const isZeroAfterRounding = /^0+$/.test(intDigits) && /^0*$/.test(outFrac);
+  return {
+    sign: isZeroAfterRounding ? 0 : parsed.sign,
+    intDigits: isZeroAfterRounding ? "0" : intDigits,
+    fracDigits: isZeroAfterRounding ? "0".repeat(precision) : outFrac,
+    isZeroAfterRounding,
+  };
+}
+
+function formatGroupedIntDigits(intDigits) {
+  return String(intDigits || "0").replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+function formatExactDecimalText(raw, suffix = "") {
+  const normalized = normalizeDecimalInput(raw);
+  if (normalized === null) return "—";
+  const cleaned = normalized.replace(/^\+/, "");
+  return suffix ? `${cleaned} ${suffix}` : cleaned;
+}
+
+function formatDecimalPrice(raw, currency = "USD") {
+  const parsed = parseDecimalValueForDisplay(raw);
+  if (!parsed) return "—";
+  const prefix = currency === "USD" ? "$ " : `${currency} `;
+  if (parsed.sign === 0) {
+    return `${prefix}0.00`;
+  }
+  if (parsed.intDigits === "0") {
+    const rounded = roundDecimalHalfUpParts(parsed, 8);
+    if (rounded.isZeroAfterRounding) {
+      const signPrefix = parsed.sign < 0 ? "-" : "";
+      return `${signPrefix}${prefix}<0.00000001`;
+    }
+    if (rounded.intDigits !== "0") {
+      const signPrefix = rounded.sign < 0 ? "-" : "";
+      const carryRounded = roundDecimalHalfUpParts(parsed, 2);
+      return `${signPrefix}${prefix}${formatGroupedIntDigits(carryRounded.intDigits)}.${carryRounded.fracDigits}`;
+    }
+    const signPrefix = rounded.sign < 0 ? "-" : "";
+    let trimmedFrac = rounded.fracDigits.replace(/0+$/, "");
+    if (trimmedFrac.length < 2) trimmedFrac = rounded.fracDigits.slice(0, 2).padEnd(2, "0");
+    return `${signPrefix}${prefix}0.${trimmedFrac}`;
+  }
+  const rounded = roundDecimalHalfUpParts(parsed, 2);
+  const signPrefix = rounded.sign < 0 ? "-" : "";
+  return `${signPrefix}${prefix}${formatGroupedIntDigits(rounded.intDigits)}.${rounded.fracDigits}`;
+}
+
+function formatDecimalPercentFromRatio(raw, {
+  decimals = 2,
+  signed = false,
+  alreadyPercent = false,
+  trimZeroDecimals = false,
+} = {}) {
+  const parsed = parseDecimalValueForDisplay(raw);
+  if (!parsed) return "—";
+  const precision = Math.max(0, Number(decimals) || 0);
+  if (parsed.sign === 0) {
+    if (trimZeroDecimals || precision === 0) return "0%";
+    return `0.${"0".repeat(precision)}%`;
+  }
+  const pctParts = alreadyPercent ? parsed : shiftDecimalParts(parsed, -2);
+  const rounded = roundDecimalHalfUpParts(pctParts, precision);
+  if (rounded.isZeroAfterRounding) {
+    const signPrefix = parsed.sign < 0 ? "-" : (signed ? "+" : "");
+    const threshold = precision > 0 ? `0.${"0".repeat(precision - 1)}1` : "1";
+    return `${signPrefix}<${threshold}%`;
+  }
+  const signPrefix = rounded.sign < 0 ? "-" : (signed && rounded.sign > 0 ? "+" : "");
+  let fracText = rounded.fracDigits;
+  if (trimZeroDecimals && fracText) {
+    fracText = fracText.replace(/0+$/, "");
+  }
+  const fracPart = fracText ? `.${fracText}` : "";
+  return `${signPrefix}${formatGroupedIntDigits(rounded.intDigits)}${fracPart}%`;
+}
+
+function formatDecimalRatio(raw, decimals = 2, {
+  signed = false,
+  suffix = "",
+  trimTrailingZeros = false,
+  minDecimals = 0,
+} = {}) {
+  const parsed = parseDecimalValueForDisplay(raw);
+  if (!parsed) return "—";
+  const precision = Math.max(0, Number(decimals) || 0);
+  if (parsed.sign === 0) {
+    const zeroFrac = precision > 0 && !trimTrailingZeros
+      ? `.${"0".repeat(precision)}`
+      : (minDecimals > 0 ? `.${"0".repeat(minDecimals)}` : "");
+    return `0${zeroFrac}${suffix}`;
+  }
+  const rounded = roundDecimalHalfUpParts(parsed, precision);
+  if (rounded.isZeroAfterRounding) {
+    const signPrefix = parsed.sign < 0 ? "-" : (signed ? "+" : "");
+    const threshold = precision > 0 ? `0.${"0".repeat(precision - 1)}1` : "1";
+    return `${signPrefix}<${threshold}${suffix}`;
+  }
+  const signPrefix = rounded.sign < 0 ? "-" : (signed && rounded.sign > 0 ? "+" : "");
+  let fracText = rounded.fracDigits;
+  if (trimTrailingZeros && fracText) {
+    fracText = fracText.replace(/0+$/, "");
+    if (minDecimals > 0 && fracText.length < minDecimals) {
+      fracText = rounded.fracDigits.slice(0, minDecimals).padEnd(minDecimals, "0");
+    }
+  }
+  const fracPart = fracText ? `.${fracText}` : "";
+  return `${signPrefix}${formatGroupedIntDigits(rounded.intDigits)}${fracPart}${suffix}`;
+}
+
+function formatDecimalMultiple(raw, decimals = 2) {
+  return formatDecimalRatio(raw, decimals, { suffix: "×" });
+}
+
+function formatDecimalScore(raw, decimals = 1) {
+  return formatDecimalRatio(raw, decimals, { suffix: "" });
+}
+
+function formatCompactDecimalWithUnit(raw, {
+  currency = "",
+  unit = "",
+  decimals = 1,
+} = {}) {
+  const parsed = parseDecimalValueForDisplay(raw);
+  if (!parsed) return "—";
+  const prefix = currency === "USD" ? "$ " : (currency ? `${currency} ` : "");
+  if (parsed.sign === 0) {
+    return `${prefix}0${unit ? ` ${unit}` : ""}`;
+  }
+  const digitsLen = parsed.intDigits === "0" ? 0 : parsed.intDigits.length;
+  let shiftLeft = 0;
+  let compactSuffix = "";
+  if (digitsLen >= 10) {
+    shiftLeft = 9;
+    compactSuffix = " mil M";
+  } else if (digitsLen >= 7) {
+    shiftLeft = 6;
+    compactSuffix = " M";
+  } else if (digitsLen >= 4) {
+    shiftLeft = 3;
+    compactSuffix = " K";
+  }
+  const scaled = shiftLeft > 0 ? shiftDecimalParts(parsed, shiftLeft) : parsed;
+  const rounded = roundDecimalHalfUpParts(scaled, decimals);
+  const signPrefix = rounded.sign < 0 ? "-" : "";
+  const trimmedFrac = rounded.fracDigits.replace(/0+$/, "");
+  const fracPart = trimmedFrac ? `.${trimmedFrac}` : "";
+  const unitPart = unit ? ` ${unit}` : "";
+  return `${signPrefix}${prefix}${formatGroupedIntDigits(rounded.intDigits)}${fracPart}${compactSuffix}${unitPart}`;
+}
+
+let exactDetailReturnFocusElement = null;
+
+function ensureExactDetailDialog() {
+  if (typeof document === "undefined") return null;
+  let dialog = byId("exact-detail-dialog");
+  if (!dialog && document.body && typeof document.createElement === "function") {
+    dialog = createElement("dialog", "exact-detail-dialog");
+    dialog.id = "exact-detail-dialog";
+    dialog.setAttribute("aria-labelledby", "exact-detail-title");
+    const header = createElement("div", "exact-detail-header");
+    const titleWrap = createElement("div", "exact-detail-title-wrap");
+    const title = createElement("h3", "exact-detail-title", "Detalle exacto");
+    title.id = "exact-detail-title";
+    const subtitle = createElement("p", "exact-detail-subtitle", "");
+    subtitle.id = "exact-detail-subtitle";
+    titleWrap.append(title, subtitle);
+    const closeBtn = createElement("button", "button secondary compact", "Cerrar");
+    closeBtn.id = "exact-detail-close";
+    closeBtn.type = "button";
+    header.append(titleWrap, closeBtn);
+    const body = createElement("dl", "exact-detail-list");
+    body.id = "exact-detail-list";
+    const notes = createElement("div", "exact-detail-notes");
+    notes.id = "exact-detail-notes";
+    const actions = createElement("div", "exact-detail-actions");
+    actions.id = "exact-detail-actions";
+    dialog.append(header, body, notes, actions);
+    document.body.append(dialog);
+  }
+  const closeBtn = byId("exact-detail-close");
+  if (closeBtn && !closeBtn.dataset?.bound) {
+    if (closeBtn.dataset) closeBtn.dataset.bound = "true";
+    closeBtn.addEventListener("click", () => closeExactDetailDialog());
+  }
+  if (dialog && !dialog.dataset?.bound) {
+    if (dialog.dataset) dialog.dataset.bound = "true";
+    dialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeExactDetailDialog();
+    });
+  }
+  return dialog;
+}
+
+function closeExactDetailDialog() {
+  const dialog = byId("exact-detail-dialog");
+  if (dialog) {
+    if (typeof dialog.close === "function" && dialog.open) {
+      dialog.close();
+    } else {
+      dialog.open = false;
+      dialog.removeAttribute?.("open");
+    }
+    dialog.classList?.add("hidden");
+  }
+  const target = exactDetailReturnFocusElement;
+  exactDetailReturnFocusElement = null;
+  if (target && typeof target.focus === "function") {
+    target.focus();
+  }
+}
+
+function openExactDetailDialog({
+  title = "Detalle exacto",
+  subtitle = "",
+  items = [],
+  notes = [],
+  actions = [],
+  trigger = null,
+} = {}) {
+  const dialog = ensureExactDetailDialog();
+  if (!dialog) return;
+  exactDetailReturnFocusElement = trigger || document.activeElement || null;
+  const titleEl = byId("exact-detail-title");
+  if (titleEl) titleEl.textContent = title;
+  const subEl = byId("exact-detail-subtitle");
+  if (subEl) {
+    subEl.textContent = subtitle || "";
+    subEl.classList?.toggle("hidden", !subtitle);
+  }
+  const listEl = byId("exact-detail-list");
+  if (listEl) {
+    listEl.replaceChildren();
+    for (const item of items) {
+      if (!item || !item.label) continue;
+      const row = createElement("div", "exact-detail-row");
+      row.append(
+        createElement("dt", "exact-detail-term", item.label),
+        createElement("dd", "exact-detail-value", String(item.value ?? "—")),
+      );
+      listEl.append(row);
+    }
+  }
+  const notesEl = byId("exact-detail-notes");
+  if (notesEl) {
+    notesEl.replaceChildren();
+    for (const note of notes) {
+      if (!note) continue;
+      notesEl.append(createElement("p", "exact-detail-note", note));
+    }
+    notesEl.classList?.toggle("hidden", notesEl.children.length === 0);
+  }
+  const actionsEl = byId("exact-detail-actions");
+  if (actionsEl) {
+    actionsEl.replaceChildren();
+    for (const act of actions) {
+      if (!act || !act.label || typeof act.onClick !== "function") continue;
+      const btn = createElement("button", act.primary ? "button primary compact" : "button secondary compact", act.label);
+      btn.type = "button";
+      btn.addEventListener("click", () => {
+        closeExactDetailDialog();
+        act.onClick();
+      });
+      actionsEl.append(btn);
+    }
+    actionsEl.classList?.toggle("hidden", actionsEl.children.length === 0);
+  }
+  dialog.classList?.remove("hidden");
+  if (typeof dialog.showModal === "function") {
+    if (!dialog.open) dialog.showModal();
+  } else {
+    dialog.open = true;
+    dialog.setAttribute?.("open", "open");
+  }
+  const closeBtn = byId("exact-detail-close");
+  if (closeBtn && typeof closeBtn.focus === "function") closeBtn.focus();
 }
 
 function clearActiveAssetContextSync(nextPresentation = null) {

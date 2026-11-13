@@ -1686,7 +1686,9 @@ function renderRevisarExploreResults() {
   if (!host || !statusEl) return;
   const knownAt = byId("report-known-at")?.value.trim() || "";
   const totalCatalog = Object.keys(marketAssets || {}).length;
-  const loadedAssets = Array.from(investorOverviewState.knownAt === knownAt ? investorOverviewState.byAssetId.values() : []);
+  const loadedAssets = Array.from(
+    sameIsoTimestamp(investorOverviewState.knownAt, knownAt) ? investorOverviewState.byAssetId.values() : [],
+  );
 
   const rawPe = byId("review-filter-pe-max")?.value.trim() || "";
   const rawMargin = byId("review-filter-margin-min")?.value.trim() || "";
@@ -1746,12 +1748,35 @@ function renderRevisarExploreResults() {
   }
   for (const ov of matches) {
     const row = createElement("div", "review-explore-item");
-    const peText = ov.valuation?.price_to_earnings?.value ?? "—";
-    const nmText = ov.fundamental?.net_margin?.value ? decimalScalePercent(ov.fundamental.net_margin.value, 2) : "—";
-    const levText = ov.fundamental?.liabilities_to_assets?.value ?? "—";
+    const peRaw = ov.valuation?.price_to_earnings?.value;
+    const nmRaw = ov.fundamental?.net_margin?.value;
+    const levRaw = ov.fundamental?.liabilities_to_assets?.value;
+    const peText = formatDecimalMultiple(peRaw, 2);
+    const nmText = formatDecimalPercentFromRatio(nmRaw, { decimals: 2, signed: true });
+    const levText = formatDecimalRatio(levRaw, 2);
+    const metricsEl = createElement(
+      "span",
+      "review-explore-metrics",
+      `P/E: ${peText} · Margen neto: ${nmText} · Pasivos/Activos: ${levText}`,
+    );
+    const exactSummary = [
+      peRaw !== null && peRaw !== undefined && String(peRaw).trim() !== "" ? `P/E exacto: ${peRaw}` : null,
+      nmRaw !== null && nmRaw !== undefined && String(nmRaw).trim() !== ""
+        ? `Margen neto exacto: ${formatExactDecimalText(nmRaw)}`
+        : null,
+      levRaw !== null && levRaw !== undefined && String(levRaw).trim() !== "" ? `Pasivos/Activos exacto: ${levRaw}` : null,
+    ].filter(Boolean);
+    if (exactSummary.length) {
+      const exactText = exactSummary.join(" · ");
+      metricsEl.title = exactText;
+      metricsEl.setAttribute(
+        "aria-label",
+        `P/E: ${peText}, Margen neto: ${nmText}, Pasivos/Activos: ${levText} (${exactText})`,
+      );
+    }
     row.append(
       createElement("strong", "", `${ov.symbol} · ${ov.name}`),
-      createElement("span", "review-explore-metrics", `P/E: ${peText} · Margen neto: ${nmText} · Pasivos/Activos: ${levText}`),
+      metricsEl,
       createContextualNavigationButton(
         "Abrir activo",
         { board: "activo", assetId: ov.asset_id, subtab: "mercado" },
