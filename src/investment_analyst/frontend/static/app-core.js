@@ -2590,46 +2590,51 @@ async function fetchInvestorOverviewBatch(assetIds, knownAt, options = {}) {
   };
 }
 
-async function executeApiFetch(path, fetchOptions = {}) {
-  const response = await fetch(path, {
-    cache: "no-store",
-    headers: { "Content-Type": "application/json", ...(fetchOptions.headers || {}) },
-    ...fetchOptions,
-  });
-  const rawText = typeof response.text === "function"
-    ? await response.text()
-    : JSON.stringify(await response.json());
-  let payload = null;
-  if (rawText) {
-    try {
-      payload = JSON.parse(rawText);
-    } catch {
-      payload = null;
+function api(path, options = {}) {
+  const makeAbortError = () => {
+    const error = new Error("La consulta fue cancelada.");
+    error.name = "AbortError";
+    return error;
+  };
+  const runFetch = async (fetchOptions = {}) => {
+    const response = await fetch(path, {
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", ...(fetchOptions.headers || {}) },
+      ...fetchOptions,
+    });
+    const rawText = typeof response.text === "function"
+      ? await response.text()
+      : JSON.stringify(await response.json());
+    let payload = null;
+    if (rawText) {
+      try {
+        payload = JSON.parse(rawText);
+      } catch {
+        payload = null;
+      }
     }
-  }
-  if (!response.ok) {
-    const error = payload?.error || {};
-    const message = ERROR_MESSAGES[error.code] || error.message || `Error HTTP ${response.status}`;
-    const failure = new Error(message);
-    failure.code = error.code;
-    failure.status = response.status;
-    throw failure;
-  }
-  if (payload === null) {
-    throw new Error("La respuesta del servidor no es JSON válido.");
-  }
-  return payload;
-}
+    if (!response.ok) {
+      const error = payload?.error || {};
+      const message = ERROR_MESSAGES[error.code] || error.message || `Error HTTP ${response.status}`;
+      const failure = new Error(message);
+      failure.code = error.code;
+      failure.status = response.status;
+      throw failure;
+    }
+    if (payload === null) {
+      throw new Error("La respuesta del servidor no es JSON válido.");
+    }
+    return payload;
+  };
 
-async function api(path, options = {}) {
   const method = String(options.method || "GET").toUpperCase();
   const consumerSignal = options.signal || null;
   if (consumerSignal?.aborted) {
-    throw createAbortError();
+    return Promise.reject(makeAbortError());
   }
   const canCoalesce = method === "GET" && options.dedupe !== false;
   if (!canCoalesce) {
-    return await executeApiFetch(path, options);
+    return runFetch(options);
   }
 
   let entry = apiInFlightRequests.get(path);
@@ -2642,7 +2647,7 @@ async function api(path, options = {}) {
     } else {
       delete fetchOptions.signal;
     }
-    const promise = executeApiFetch(path, fetchOptions);
+    const promise = runFetch(fetchOptions);
     entry = { promise, controller: sharedController, consumers };
     apiInFlightRequests.set(path, entry);
     promise.finally(() => {
@@ -2652,7 +2657,7 @@ async function api(path, options = {}) {
     }).catch(() => {});
   }
 
-  return await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     let settled = false;
     const consumerToken = Symbol("api-consumer");
     entry.consumers.add(consumerToken);
@@ -2674,7 +2679,7 @@ async function api(path, options = {}) {
           entry.controller?.abort();
         } catch {}
       }
-      reject(createAbortError());
+      reject(makeAbortError());
     };
     if (consumerSignal) {
       consumerSignal.addEventListener("abort", onAbort, { once: true });
