@@ -14,18 +14,31 @@ queda disponible para las lecturas documentales existentes sin mezclarla con fun
 - **Contrato `GET /api/v1/investor-overview`**: lectura `READ_ONLY` por lotes de hasta 10 activos y
   corte `known_at` con selección point-in-time `available_at <= known_at` y valores `Decimal`
   serializados como cadenas exactas. Nunca dispara proveedores ni escrituras de dominio.
-- **Mesa (`#board-mesa`)**: muestra de forma inmediata el catálogo de activos y carga
-  secuencialmente lotes de `<=10` activos (cancelable al cambiar filtros o corte, tope 100 activos)
-  con filtros locales por búsqueda, clase, watchlist y estado de diagnóstico, ordenación decimal
-  por cadena con nulos siempre al final y desempate estable por `asset_id`, y fila expandible de
-  detalle por activo.
+- **Mesa (`#board-mesa`)**: muestra de forma inmediata el catálogo de activos usando identidad
+  canónica (`assetId`, `exchange`, `hasCorporateValuation`) y preferencias vivas desde
+  `assetPreferencesSnapshot`, y carga secuencialmente lotes de `<=10` activos (cancelable al
+  cambiar filtros o corte, tope `100` activos y `2 MiB` en memoria) con filtros locales por
+  búsqueda, clase, watchlist y estado de diagnóstico, ordenación decimal por cadena con nulos
+  siempre al final y desempate estable por `assetId`, fila expandible de detalle y botón
+  «Reintentar» tras error o cancelación. Los motivos de ausencia point-in-time se muestran en
+  español junto al corte efectivo (`no_bar_in_window` → «Sin barras elegibles para este
+  corte/ventana»; `no_annual_diagnostic_at_known_at` → «Sin diagnóstico anual disponible al corte»).
+  Una fila fallida o cancelada nunca conserva la etiqueta «Pendiente».
 - **Activo (`#board-activo`)**: al cambiar activo, corte, rango o frecuencia ejecuta limpieza
-  síncrona inmediata (`clearActiveAssetContextSync`) antes del primer `await` y aborta peticiones
-  en vuelo con `AbortController`. Despacha únicamente la subpestaña activa mediante
-  `loadActivoCurrentSubtab()` sin fan-out de peticiones entre subpestañas, muestra el encabezado
-  compacto `#asset-compact-header`, añade el gráfico comparativo de márgenes de hasta 4 ejercicios
-  (`#fundamental-margins-chart`) en Fundamentales y mantiene compactados los controles de
-  histórico de Valoración (`#valuation-history-controls-disclosure`).
+  síncrona inmediata (`clearActiveAssetContextSync`) antes del primer `await` (incluyendo
+  `resetMarketSnapshot`, totales de cabecera, exports y avisos vacíos) y aborta peticiones en
+  vuelo con `AbortController` mediante coalescing multi-consumidor sin dañar consumidores
+  activos y un límite de `2` consultas concurrentes de Activo. Despacha únicamente la subpestaña
+  activa mediante `loadActivoCurrentSubtab()` validando `presentation.hasFundamentals` para
+  `fundamentales`, `valoracion` y `analisis` sin fan-out ni carga anticipada de pestañas ocultas,
+  conserva claves de subpestaña únicamente tras completar sin error ni cancelación, muestra el
+  encabezado compacto `#asset-compact-header` con corte efectivo, añade el gráfico comparativo de
+  márgenes de hasta 4 ejercicios (`#fundamental-margins-chart`) en Fundamentales y mantiene
+  compactados los controles de histórico de Valoración (`#valuation-history-controls-disclosure`).
+- **Corte explícito `known_at` y botón «Ahora» (`#known-at-now-btn`)**: la barra superior conserva
+  el corte vigente visible en todos los tableros e incluye la acción explícita «Ahora» para fijar
+  `#report-known-at` a la hora UTC vigente e invalidar contexto y cachés; cambiar de activo jamás
+  reemplaza ni avanza silenciosamente el corte explícito.
 - **Revisar (`#board-revisar`) y Sistema (`#board-sistema`)**: Revisar incorpora `"Explorar
   valores"` (`#review-explore-panel`) con filtros AND decimales (P/E máximo positivo excluyendo
   `<= 0`, margen neto mínimo `%`, pasivos/activos máximo). La cobertura detallada, registro BVL,

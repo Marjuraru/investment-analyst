@@ -107,6 +107,14 @@
                 <span class="absence-mark-label">Sin evidencia</span>
               </span>
             </strong>
+            <button
+              id="known-at-now-btn"
+              class="button secondary compact"
+              type="button"
+              title="Consultar al momento UTC actual"
+            >
+              Ahora
+            </button>
           </div>
         </header>
 
@@ -202,6 +210,7 @@
                       <div class="mesa-investor-actions">
                         <button id="mesa-load-all-btn" class="button secondary compact" type="button">Cargar datos del universo seleccionado</button>
                         <button id="mesa-cancel-load-btn" class="button secondary compact hidden" type="button">Cancelar</button>
+                        <button id="mesa-retry-load-btn" class="button secondary compact hidden" type="button">Reintentar</button>
                       </div>
                     </div>
                     <div class="universe-matrix-scroll">
@@ -968,7 +977,7 @@
                     aria-describedby="known-at-help"
                     required
                   >
-                  <small id="known-at-help">Fecha y hora ISO 8601 con zona; define el corte histórico.</small>
+                  <small id="known-at-help">Fecha y hora ISO 8601 con zona; define el corte histórico. Usa «Ahora» en la barra superior para consultar el corte UTC actual.</small>
                 </label>
                 <label class="field">
                   <span>Frecuencia fundamental</span>
