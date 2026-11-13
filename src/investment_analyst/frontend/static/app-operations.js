@@ -1666,3 +1666,118 @@ async function sendDesktopNotificationTest() {
     button.disabled = desktopNotificationPayload?.enabled !== true;
   }
 }
+
+let revisarExploreBound = false;
+
+function decimalPercentToRatioString(rawPercent) {
+  const parsed = parseDecimalString(rawPercent);
+  if (!parsed) return null;
+  const paddedInt = parsed.intDigits.padStart(3, "0");
+  const shiftIdx = paddedInt.length - 2;
+  const newInt = paddedInt.slice(0, shiftIdx).replace(/^0+(?=\d)/, "") || "0";
+  const newFrac = (paddedInt.slice(shiftIdx) + parsed.fracDigits).replace(/0+$/, "");
+  const sign = parsed.sign < 0 ? "-" : "";
+  return newFrac ? `${sign}${newInt}.${newFrac}` : `${sign}${newInt}`;
+}
+
+function renderRevisarExploreResults() {
+  const host = byId("review-explore-results");
+  const statusEl = byId("review-filter-status");
+  if (!host || !statusEl) return;
+  const knownAt = byId("report-known-at")?.value.trim() || "";
+  const totalCatalog = Object.keys(marketAssets || {}).length;
+  const loadedAssets = Array.from(investorOverviewState.knownAt === knownAt ? investorOverviewState.byAssetId.values() : []);
+
+  const rawPe = byId("review-filter-pe-max")?.value.trim() || "";
+  const rawMargin = byId("review-filter-margin-min")?.value.trim() || "";
+  const rawLev = byId("review-filter-leverage-max")?.value.trim() || "";
+
+  if ((rawPe && !parseDecimalString(rawPe)) || (rawMargin && !parseDecimalString(rawMargin)) || (rawLev && !parseDecimalString(rawLev))) {
+    statusEl.textContent = "Entrada numérica inválida: usa números decimales válidos (sin texto).";
+    host.replaceChildren();
+    return;
+  }
+  const marginRatio = rawMargin ? decimalPercentToRatioString(rawMargin) : null;
+
+  let excludedByAbsence = 0;
+  const matches = [];
+  for (const ov of loadedAssets) {
+    let ok = true;
+    if (rawPe) {
+      const pe = ov.valuation?.price_to_earnings;
+      if (!pe || pe.state !== "available" || pe.value === null) {
+        excludedByAbsence += 1;
+        ok = false;
+      } else if (compareDecimalStrings(pe.value, "0") <= 0 || compareDecimalStrings(pe.value, rawPe) > 0) {
+        ok = false;
+      }
+    }
+    if (ok && marginRatio !== null) {
+      const nm = ov.fundamental?.net_margin;
+      if (!nm || nm.state !== "available" || nm.value === null) {
+        excludedByAbsence += 1;
+        ok = false;
+      } else if (compareDecimalStrings(nm.value, marginRatio) < 0) {
+        ok = false;
+      }
+    }
+    if (ok && rawLev) {
+      const lev = ov.fundamental?.liabilities_to_assets;
+      if (!lev || lev.state !== "available" || lev.value === null) {
+        excludedByAbsence += 1;
+        ok = false;
+      } else if (compareDecimalStrings(lev.value, rawLev) > 0) {
+        ok = false;
+      }
+    }
+    if (ok) matches.push(ov);
+  }
+
+  matches.sort((a, b) => String(a.asset_id).localeCompare(String(b.asset_id)));
+  statusEl.textContent = `Catálogo: ${totalCatalog} · Cargados al corte: ${loadedAssets.length} · Coinciden: ${matches.length} · Excluidos por ausencia: ${excludedByAbsence}`;
+  host.replaceChildren();
+  if (!loadedAssets.length) {
+    host.append(createElement("p", "chart-status", "No hay datos cargados al corte. Carga lotes en Mesa o pulsa Aplicar."));
+    return;
+  }
+  if (!matches.length) {
+    host.append(createElement("p", "chart-status", "Ningún activo cargado cumple todos los filtros."));
+    return;
+  }
+  for (const ov of matches) {
+    const row = createElement("div", "review-explore-item");
+    const peText = ov.valuation?.price_to_earnings?.value ?? "—";
+    const nmText = ov.fundamental?.net_margin?.value ? decimalScalePercent(ov.fundamental.net_margin.value, 2) : "—";
+    const levText = ov.fundamental?.liabilities_to_assets?.value ?? "—";
+    row.append(
+      createElement("strong", "", `${ov.symbol} · ${ov.name}`),
+      createElement("span", "review-explore-metrics", `P/E: ${peText} · Margen neto: ${nmText} · Pasivos/Activos: ${levText}`),
+      createContextualNavigationButton(
+        "Abrir activo",
+        { board: "activo", assetId: ov.asset_id, subtab: "mercado" },
+        "button secondary compact",
+      ),
+    );
+    host.append(row);
+  }
+}
+
+function bindRevisarExploreControls() {
+  if (revisarExploreBound) return;
+  revisarExploreBound = true;
+  byId("review-explore-form")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    renderRevisarExploreResults();
+  });
+  byId("review-filter-reset")?.addEventListener("click", () => {
+    if (byId("review-filter-pe-max")) byId("review-filter-pe-max").value = "";
+    if (byId("review-filter-margin-min")) byId("review-filter-margin-min").value = "";
+    if (byId("review-filter-leverage-max")) byId("review-filter-leverage-max").value = "";
+    renderRevisarExploreResults();
+  });
+}
+
+async function loadRevisarOverview() {
+  bindRevisarExploreControls();
+  renderRevisarExploreResults();
+}

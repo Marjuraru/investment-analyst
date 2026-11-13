@@ -72,6 +72,13 @@
 > MOG.A, GOOGL y NKE; la adopción operativa y de preferencias sigue siendo el gate postmerge. La
 > fila `ASSET-EXPANSION` permanece `PLANNED` y `PREDICTIVE-RESEARCH` sigue siendo el único `NEXT`.
 >
+> `INVESTOR-WORKFLOW-UX`/#440 (`ADVANCES`, sin cierre) reorganiza la interfaz local alrededor del
+> flujo del inversor (`investor-overview-v1` en lotes `<=10` `READ_ONLY`, Mesa con tabla filtrable
+> y ordenación decimal, Activo con limpieza síncrona + `AbortController` + carga por subpestaña sin
+> fan-out + gráfico de márgenes 4Y, Revisar con «Explorar valores» y traslado de cobertura
+> operativa/alertas/ML-PIT a `#board-sistema`). La fila `PREDICTIVE-RESEARCH` permanece `NEXT` y
+> V1 sigue **NO ACEPTADA**.
+>
 > Las notas y cronologías fechadas de este documento son registro histórico. No describen un Issue
 > activo ni autorizan ejecución; la única autoridad de Work Block es el Issue abierto con
 > `workflow:active` resuelto desde GitHub vivo.

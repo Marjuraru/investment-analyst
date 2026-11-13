@@ -1042,3 +1042,55 @@ def test_component_and_evidence_order_does_not_create_false_conflict(tmp_path) -
 
         assert view.market.diagnostic == first
         assert view.market.revisions_superseded == 1
+
+
+def test_fundamental_selection_never_reads_market_diagnostics_or_metrics(tmp_path) -> None:
+    from investment_analyst.analytics.consolidated_diagnostic_models import (
+        ListedCompanyDiagnosticRequest,
+    )
+    from investment_analyst.analytics.consolidated_diagnostic_service import (
+        ListedCompanyConsolidatedDiagnosticService,
+    )
+
+    known_at = datetime(2026, 7, 14, tzinfo=UTC)
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        market, market_metric, fundamental, fundamental_metric = _seed_two_modes(storage)
+        recorder = _RecordingMetricResults(storage.metric_results)
+        storage.metric_results = recorder  # type: ignore[method-assign]
+        request = ListedCompanyDiagnosticRequest(
+            asset_id=AAPL_ASSET_ID,
+            known_at=known_at,
+            fundamental_frequency=DataFrequency.QUARTERLY,
+        )
+
+        section, index = ListedCompanyConsolidatedDiagnosticService(
+            storage
+        ).query_fundamental_selection(request)
+        full = ListedCompanyConsolidatedDiagnosticService(storage).query(request)
+
+        assert section.diagnostic == fundamental
+        assert section == full.fundamental
+        assert market_metric.result_id not in index
+        assert set(index) == {fundamental_metric.result_id}
+        assert market.diagnostic_id != fundamental.diagnostic_id
+
+
+def test_fundamental_selection_surfaces_ambiguity_and_frequency_isolation(tmp_path) -> None:
+    from investment_analyst.analytics.consolidated_diagnostic_models import (
+        ListedCompanyDiagnosticRequest,
+    )
+    from investment_analyst.analytics.consolidated_diagnostic_service import (
+        ListedCompanyConsolidatedDiagnosticService,
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        _seed_two_modes(storage)
+        service = ListedCompanyConsolidatedDiagnosticService(storage)
+        annual, _ = service.query_fundamental_selection(
+            ListedCompanyDiagnosticRequest(
+                asset_id=AAPL_ASSET_ID,
+                known_at=datetime(2026, 7, 14, tzinfo=UTC),
+                fundamental_frequency=DataFrequency.ANNUAL,
+            )
+        )
+        assert annual.status is ConsolidatedSectionStatus.NOT_FOUND

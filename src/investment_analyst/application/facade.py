@@ -185,6 +185,11 @@ from investment_analyst.application.crypto_spot_daily_models import (
 from investment_analyst.application.crypto_spot_daily_planner import (
     CryptoSpotDailyRefreshPlanner,
 )
+from investment_analyst.application.investor_overview import InvestorOverviewApplication
+from investment_analyst.application.investor_overview_models import (
+    InvestorOverviewRequest,
+    InvestorOverviewResult,
+)
 from investment_analyst.application.listed_market_refresh import ListedMarketRefreshPipeline
 from investment_analyst.application.listed_market_refresh_models import (
     ListedMarketRefreshRequest,
@@ -1005,6 +1010,15 @@ class InvestmentAnalystApplication:
     ) -> UniverseCoverageResult:
         """Execute a point-in-time universe coverage query."""
         return UniverseCoverageApplication(self._runtime).query(location, request)
+
+    def query_investor_overview(
+        self,
+        request: InvestorOverviewRequest,
+        *,
+        location: StorageLocationRequest,
+    ) -> InvestorOverviewResult:
+        """Execute one bounded point-in-time investor overview query."""
+        return InvestorOverviewApplication(self._runtime).query(location, request)
 
     def query_cazatiburones_universe_activity(
         self,

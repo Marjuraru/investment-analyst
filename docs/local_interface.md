@@ -9,6 +9,30 @@ El refresh incremental de documentos SEC primarios se ejecuta sólo desde el sch
 el mutex writer compartido; no añade endpoint, botón, polling ni cambios de assets. Su evidencia
 queda disponible para las lecturas documentales existentes sin mezclarla con fundamentales.
 
+## Flujo de inversor y contrato `investor-overview-v1` (`INVESTOR-WORKFLOW-UX`)
+
+- **Contrato `GET /api/v1/investor-overview`**: lectura `READ_ONLY` por lotes de hasta 10 activos y
+  corte `known_at` con selección point-in-time `available_at <= known_at` y valores `Decimal`
+  serializados como cadenas exactas. Nunca dispara proveedores ni escrituras de dominio.
+- **Mesa (`#board-mesa`)**: muestra de forma inmediata el catálogo de activos y carga
+  secuencialmente lotes de `<=10` activos (cancelable al cambiar filtros o corte, tope 100 activos)
+  con filtros locales por búsqueda, clase, watchlist y estado de diagnóstico, ordenación decimal
+  por cadena con nulos siempre al final y desempate estable por `asset_id`, y fila expandible de
+  detalle por activo.
+- **Activo (`#board-activo`)**: al cambiar activo, corte, rango o frecuencia ejecuta limpieza
+  síncrona inmediata (`clearActiveAssetContextSync`) antes del primer `await` y aborta peticiones
+  en vuelo con `AbortController`. Despacha únicamente la subpestaña activa mediante
+  `loadActivoCurrentSubtab()` sin fan-out de peticiones entre subpestañas, muestra el encabezado
+  compacto `#asset-compact-header`, añade el gráfico comparativo de márgenes de hasta 4 ejercicios
+  (`#fundamental-margins-chart`) en Fundamentales y mantiene compactados los controles de
+  histórico de Valoración (`#valuation-history-controls-disclosure`).
+- **Revisar (`#board-revisar`) y Sistema (`#board-sistema`)**: Revisar incorpora `"Explorar
+  valores"` (`#review-explore-panel`) con filtros AND decimales (P/E máximo positivo excluyendo
+  `<= 0`, margen neto mínimo `%`, pasivos/activos máximo). La cobertura detallada, registro BVL,
+  fuentes bloqueadas, incidencias y alertas operativas viven en `#sistema-verificacion` y
+  `#sistema-incidencias`; los paneles experimentales ML/PIT permanecen en `#sistema-investigacion`
+  sin carga automática.
+
 ## Eficiencia y reapertura (`DATA-CHASSIS-47`)
 
 La vista local conserva un contexto versionado por UUID, generación/release, tablero, activo,

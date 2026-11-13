@@ -514,13 +514,27 @@ byId("screening-rules-panel").addEventListener("toggle", (event) => {
   if (event.currentTarget.open) void loadScreeningRules();
 });
 
+byId("sistema-verificacion")?.addEventListener("toggle", (event) => {
+  if (event.currentTarget.open && typeof loadMesaUniverseCoverage === "function") {
+    void loadMesaUniverseCoverage();
+  }
+});
+
+byId("sistema-incidencias")?.addEventListener("toggle", (event) => {
+  if (event.currentTarget.open) {
+    if (typeof loadMesaIncidents === "function") void loadMesaIncidents();
+    if (typeof loadAlertInbox === "function") void loadAlertInbox();
+  }
+});
+
 byId("crypto-derivatives-panel").addEventListener("toggle", (event) => {
   if (event.currentTarget.open && cryptoDerivativesPayload === null) void queryCryptoDerivatives();
 });
 
 byId("report-known-at").addEventListener("change", () => {
   renderKnownAtCut(byId("report-known-at").value.trim());
-  resetListedCompanyReport();
+  resetInvestorOverviewCache();
+  clearActiveAssetContextSync(marketAssetPresentation());
   invalidateValuationFilingSelection();
   invalidateDeferredBoardLoads();
   if (marketAssetPresentation().supportsCryptoDerivatives && byId("crypto-derivatives-panel").open) {
@@ -662,6 +676,15 @@ async function navigateToAssetContext(target) {
 }
 
 function navigateToReviewContext(target) {
+  if (target.family === "alert") {
+    activateBoard("sistema", { focus: true });
+    const panel = byId("sistema-incidencias");
+    if (panel) panel.open = true;
+    void loadAlertInbox().then(() => {
+      reviewSelectItem(target.family, target.id);
+    });
+    return true;
+  }
   activateBoard("revisar", { focus: true });
   reviewSelectItem(target.family, target.id);
   return true;
@@ -691,25 +714,82 @@ function navigateToContext(request) {
 // another endpoint, parameter or transport contract.
 const BOARD_DEFERRED_LOADS = Object.freeze({
   mesa: Object.freeze([
-    loadMesaUniverseCoverage,
+    loadMesaInvestorOverview,
     refreshOverview,
     loadMesaAnalyticalNews,
     loadMesaCazatiburonesNewsFamilies,
-    loadMesaIncidents,
   ]),
-  activo: Object.freeze([
-    queryReport,
-    queryMarketChart,
-    queryFundamentalTrend,
-    queryFundamentalResearch,
-  ]),
+  activo: Object.freeze([loadActivoCurrentSubtab]),
   tecnico: Object.freeze([]),
-  revisar: Object.freeze([loadCandidateInbox, loadAlertInbox]),
+  revisar: Object.freeze([loadCandidateInbox, loadRevisarOverview]),
   cazatiburones: Object.freeze([loadCazatiburonesUniverseIndex]),
   sistema: Object.freeze([]),
 });
 
 const DEFAULT_BOARD_ID = BOARD_REGISTRY[0].id;
+
+async function loadActivoCompactHeader(deferredRequest = null) {
+  const container = byId("asset-compact-header");
+  if (!container || !selectedMarketAsset) return;
+  const knownAt = byId("report-known-at").value.trim();
+  const cached = getCachedInvestorOverviewAsset(selectedMarketAsset, knownAt);
+  if (cached) {
+    if (typeof renderActivoCompactHeader === "function") {
+      renderActivoCompactHeader(cached);
+    }
+    return;
+  }
+  const signal = activeAssetAbortController ? activeAssetAbortController.signal : undefined;
+  try {
+    const overview = await fetchInvestorOverviewBatch([selectedMarketAsset], knownAt, { signal });
+    if (deferredRequest && !isCurrentActivoBoardRequest(deferredRequest)) return;
+    if (selectedMarketAsset !== overview?.assets?.[0]?.asset_id) return;
+    if (typeof renderActivoCompactHeader === "function" && overview?.assets?.[0]) {
+      renderActivoCompactHeader(overview.assets[0]);
+    }
+  } catch (error) {
+    if (error && error.name === "AbortError") return;
+    if (deferredRequest && !isCurrentActivoBoardRequest(deferredRequest)) return;
+    container.replaceChildren(
+      createElement("p", "asset-compact-error", `Resumen no disponible: ${error.message}`),
+    );
+  }
+}
+
+async function loadActivoCurrentSubtab(deferredRequest = null) {
+  if (!selectedMarketAsset) return;
+  const subtab = activeAssetSubtabId || "mercado";
+  const knownAt = byId("report-known-at").value.trim();
+  const contextKey = `${selectedMarketAsset}|${knownAt}|${subtab}|${selectedFundamentalFrequency || ""}`;
+  if (activeAssetSubtabKeys.get(subtab) === contextKey) return;
+  activeAssetSubtabKeys.set(subtab, contextKey);
+
+  const req = deferredRequest || Object.freeze({
+    sequence: activoBoardRequestSequence,
+    assetId: selectedMarketAsset,
+    knownAt,
+  });
+
+  const tasks = [loadActivoCompactHeader(req)];
+  const presentation = marketAssetPresentation();
+  if (subtab === "mercado") {
+    tasks.push(queryMarketChart(req));
+  } else if (subtab === "fundamentales" && presentation.hasFundamentals) {
+    tasks.push(queryFundamentalTrend(req), queryFundamentalResearch(req));
+  } else if (subtab === "valoracion" && presentation.hasValuation) {
+    tasks.push(queryValuation(req));
+  } else if (subtab === "analisis" && presentation.hasCompleteAnalysis) {
+    tasks.push(queryReport(req));
+  } else if (subtab === "derivados-crypto" && presentation.supportsCryptoDerivatives) {
+    tasks.push(queryCryptoDerivatives());
+  }
+
+  const results = await Promise.allSettled(tasks);
+  if (!isCurrentActivoBoardRequest(req)) return;
+  if (results.some((r) => r.status === "rejected")) {
+    activeAssetSubtabKeys.delete(subtab);
+  }
+}
 
 function isCurrentActivoBoardRequest(deferredRequest) {
   return (

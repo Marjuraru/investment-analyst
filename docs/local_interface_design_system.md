@@ -739,6 +739,24 @@ sin celdas de relleno. El formulario de Comparación es una sola superficie con 
 interno responsive, no dos tarjetas contiguas. Estas reglas no cambian los datos, la muestra 2–5,
 los destinos de navegación ni el orden de los resultados.
 
+## INVESTOR-WORKFLOW-UX: jerarquía de inversor y consolidación en Sistema
+
+La reorganización `INVESTOR-WORKFLOW-UX` conserva los seis tableros (`mesa`, `activo`, `tecnico`,
+`revisar`, `cazatiburones`, `sistema` al final) y los tokens existentes de `tokens.css` sin
+introducir literales de color ni dependencias externas:
+
+- **`#board-mesa`**: reemplaza la matriz operativa directa por la tabla de inversor
+  (`#mesa-investor-section`) con carga por lotes sobre `investor-overview-v1`, ordenación decimal
+  estable y fila expandible.
+- **`#board-activo`**: añade `#asset-compact-header`, `#fundamental-margins-chart` (hasta 4
+  ejercicios fiscales) y `#valuation-history-controls-disclosure`, manteniendo `#tecnico` libre de
+  paneles experimentales ML/PIT.
+- **`#board-revisar`**: añade `#review-explore-panel` («Explorar valores») y traslada las alertas
+  operativas a Sistema.
+- **`#board-sistema`**: aloja `#sistema-verificacion` (cobertura del corte, matriz del universo,
+  registro BVL y fuentes bloqueadas), `#sistema-incidencias` (alertas e incidencias operativas) y
+  `#sistema-investigacion` (paneles no operacionales ML/PIT, sin carga automática).
+
 ## Qué no son estas pruebas
 
 `tests/unit/frontend/test_design_system.py` es una suite de contrato

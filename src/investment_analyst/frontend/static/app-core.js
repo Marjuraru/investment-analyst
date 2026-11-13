@@ -615,8 +615,20 @@ let marketChartRequestSequence = 0;
 let fundamentalTrendRequestSequence = 0;
 let fundamentalResearchRequestSequence = 0;
 let activoBoardRequestSequence = 0;
+let activeAssetAbortController = null;
+const activeAssetSubtabKeys = new Map();
 let boardDataReady = false;
 const loadedBoardIds = new Set();
+const INVESTOR_OVERVIEW_BATCH_SIZE = 10;
+const INVESTOR_OVERVIEW_MAX_SNAPSHOT = 100;
+const investorOverviewState = {
+  contextKey: null,
+  knownAt: null,
+  catalogVersion: null,
+  catalogSha256: null,
+  windows: null,
+  byAssetId: new Map(),
+};
 let chartSettings = { ...DEFAULT_CHART_SETTINGS, ...DEFAULT_SMA_COLORS };
 const chartSeriesVisibility = {
   "sma-5": true,
@@ -819,16 +831,11 @@ async function loadMarketAssets() {
     closeListbox();
     marketStartByAsset.set(selectedMarketAsset, byId("market-start").value);
     knownAtByAsset.set(selectedMarketAsset, byId("report-known-at").value.trim());
-    resetListedCompanyReport();
     selectedMarketAsset = assetId;
     if (typeof invalidateScreeningOutcomes === "function") invalidateScreeningOutcomes();
     byId("report-known-at").value = knownAtByAsset.get(assetId) || defaultKnownAtCut();
     renderKnownAtCut(byId("report-known-at").value.trim());
-    marketChartPayload = null;
-    marketChartViewport = null;
-    marketChartDrag = null;
-    resetValuation();
-    resetCryptoDerivatives();
+    clearActiveAssetContextSync(presentation);
     // An asset switch starts at the market surface, as the former sidebar
     // navigation did; capability changes still use the same deterministic
     // fallback in selectAssetSubtab().
@@ -1128,6 +1135,14 @@ function selectAssetSubtab(requestedId) {
     button.tabIndex = selected ? 0 : -1;
     const section = byId(button.getAttribute("aria-controls"));
     if (section) section.hidden = !selected;
+  }
+  if (
+    boardDataReady
+    && typeof loadActivoCurrentSubtab === "function"
+    && typeof boardIdFromLocationHash === "function"
+    && boardIdFromLocationHash() === "activo"
+  ) {
+    void loadActivoCurrentSubtab();
   }
 }
 
@@ -2025,9 +2040,193 @@ function loadViewPreview(key) {
   }
 }
 
+function parseDecimalString(raw) {
+  if (raw === null || raw === undefined) return null;
+  const text = String(raw).trim();
+  const match = text.match(/^([+-])?(?:(\d+)(?:\.(\d*))?|\.(\d+))$/);
+  if (!match) return null;
+  const sign = match[1] === "-" ? -1 : 1;
+  const rawInt = (match[2] || "0").replace(/^0+(?=\d)/, "");
+  const rawFrac = (match[3] || match[4] || "").replace(/0+$/, "");
+  const isZero = /^0+$/.test(rawInt) && rawFrac.length === 0;
+  return {
+    sign: isZero ? 0 : sign,
+    intDigits: isZero ? "0" : rawInt,
+    fracDigits: isZero ? "" : rawFrac,
+  };
+}
+
+function compareDecimalStrings(rawA, rawB, direction = "asc") {
+  const a = parseDecimalString(rawA);
+  const b = parseDecimalString(rawB);
+  if (!a && !b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+  const orderMul = direction === "desc" ? -1 : 1;
+  if (a.sign !== b.sign) return (a.sign < b.sign ? -1 : 1) * orderMul;
+  if (a.sign === 0) return 0;
+  const dir = a.sign * orderMul;
+  if (a.intDigits.length !== b.intDigits.length) {
+    return (a.intDigits.length < b.intDigits.length ? -1 : 1) * dir;
+  }
+  if (a.intDigits !== b.intDigits) {
+    return (a.intDigits < b.intDigits ? -1 : 1) * dir;
+  }
+  const maxFrac = Math.max(a.fracDigits.length, b.fracDigits.length);
+  const fa = a.fracDigits.padEnd(maxFrac, "0");
+  const fb = b.fracDigits.padEnd(maxFrac, "0");
+  if (fa === fb) return 0;
+  return (fa < fb ? -1 : 1) * dir;
+}
+
+function decimalScalePercent(raw, decimals = 2) {
+  const parsed = parseDecimalString(raw);
+  if (!parsed) return null;
+  const combined = parsed.intDigits + parsed.fracDigits.padEnd(2, "0");
+  const extraFrac = parsed.fracDigits.slice(2);
+  const intPart = combined.slice(0, parsed.intDigits.length + 2).replace(/^0+(?=\d)/, "") || "0";
+  const signPrefix = parsed.sign < 0 ? "-" : "";
+  if (decimals <= 0) return `${signPrefix}${intPart}%`;
+  const paddedFrac = extraFrac.padEnd(decimals, "0").slice(0, decimals);
+  return `${signPrefix}${intPart}.${paddedFrac}%`;
+}
+
+function clearActiveAssetContextSync(nextPresentation = null) {
+  if (activeAssetAbortController) {
+    try {
+      activeAssetAbortController.abort();
+    } catch {}
+  }
+  activeAssetAbortController = typeof AbortController === "function" ? new AbortController() : null;
+  activeAssetSubtabKeys.clear();
+  if (marketChartRenderFrame !== null) {
+    cancelAnimationFrame(marketChartRenderFrame);
+    marketChartRenderFrame = null;
+  }
+  marketChartPayload = null;
+  marketChartViewport = null;
+  marketChartDrag = null;
+  selectedChartPoint = -1;
+  const label = nextPresentation ? `${nextPresentation.symbol} — ${nextPresentation.name}` : "activo";
+  const chartHost = byId("market-chart");
+  if (chartHost) chartHost.replaceChildren();
+  const chartEmpty = byId("chart-empty");
+  if (chartEmpty) chartEmpty.classList.add("hidden");
+  for (const id of [
+    "chart-latest-close",
+    "chart-range-change",
+    "chart-point-date",
+    "chart-point-open",
+    "chart-point-high",
+    "chart-point-low",
+    "chart-point-close",
+    "chart-point-sma-5",
+    "chart-point-sma-20",
+    "chart-point-sma-50",
+    "chart-point-bollinger",
+    "chart-point-volume",
+    "chart-visible-sessions",
+    "chart-latest-sma-5",
+    "chart-latest-sma-20",
+    "chart-latest-sma-50",
+  ]) {
+    const el = byId(id);
+    if (el) el.textContent = "—";
+  }
+  const latestDate = byId("chart-latest-date");
+  if (latestDate) latestDate.textContent = `Cargando ${label}…`;
+  const pointsBody = byId("chart-table-body");
+  if (pointsBody) pointsBody.replaceChildren();
+  const chartStatus = byId("chart-status");
+  if (chartStatus) chartStatus.textContent = `Cargando ${label}…`;
+  const exportCsv = byId("export-market-csv");
+  if (exportCsv) exportCsv.disabled = true;
+  const compactHeader = byId("asset-compact-header");
+  if (compactHeader) {
+    compactHeader.replaceChildren(
+      createElement("p", "asset-compact-loading", `Cargando ${label}…`),
+    );
+  }
+  const marginsChart = byId("fundamental-margins-chart");
+  if (marginsChart) marginsChart.replaceChildren();
+  if (typeof resetListedCompanyReport === "function") resetListedCompanyReport();
+  if (typeof resetValuation === "function") resetValuation();
+  if (typeof resetCryptoDerivatives === "function") resetCryptoDerivatives();
+  if (typeof resetFundamentalTrend === "function") resetFundamentalTrend();
+  if (typeof resetFundamentalResearch === "function") resetFundamentalResearch();
+  if (typeof resetAnnualHorizons === "function") {
+    resetAnnualHorizons({ clearAnchor: true, clearMetrics: true });
+  }
+}
+
+function resetInvestorOverviewCache() {
+  investorOverviewState.contextKey = null;
+  investorOverviewState.knownAt = null;
+  investorOverviewState.catalogVersion = null;
+  investorOverviewState.catalogSha256 = null;
+  investorOverviewState.windows = null;
+  investorOverviewState.byAssetId.clear();
+}
+
+function getCachedInvestorOverviewAsset(assetId, knownAt) {
+  if (!investorOverviewState.contextKey || investorOverviewState.knownAt !== knownAt) return null;
+  return investorOverviewState.byAssetId.get(assetId) || null;
+}
+
+async function fetchInvestorOverviewBatch(assetIds, knownAt, options = {}) {
+  const uniqueIds = Array.from(new Set(assetIds.filter(Boolean))).sort();
+  if (uniqueIds.length === 0) return null;
+  if (investorOverviewState.knownAt !== knownAt) {
+    resetInvestorOverviewCache();
+  }
+  const missing = uniqueIds.filter((id) => !investorOverviewState.byAssetId.has(id));
+  if (missing.length === 0) {
+    return {
+      schema_version: "investor-overview-v1",
+      known_at: investorOverviewState.knownAt,
+      catalog_version: investorOverviewState.catalogVersion,
+      catalog_sha256: investorOverviewState.catalogSha256,
+      windows: investorOverviewState.windows,
+      assets: uniqueIds.map((id) => investorOverviewState.byAssetId.get(id)).filter(Boolean),
+    };
+  }
+  for (let i = 0; i < missing.length; i += INVESTOR_OVERVIEW_BATCH_SIZE) {
+    const chunk = missing.slice(i, i + INVESTOR_OVERVIEW_BATCH_SIZE);
+    const params = new URLSearchParams({ known_at: knownAt });
+    for (const id of chunk) params.append("asset_id", id);
+    const payload = await api(`/api/v1/investor-overview?${params.toString()}`, options);
+    if (
+      investorOverviewState.catalogSha256 &&
+      payload.catalog_sha256 !== investorOverviewState.catalogSha256
+    ) {
+      resetInvestorOverviewCache();
+    }
+    investorOverviewState.knownAt = payload.known_at;
+    investorOverviewState.catalogVersion = payload.catalog_version;
+    investorOverviewState.catalogSha256 = payload.catalog_sha256;
+    investorOverviewState.windows = payload.windows;
+    investorOverviewState.contextKey = `${payload.known_at}|${payload.catalog_sha256}`;
+    for (const asset of payload.assets || []) {
+      if (investorOverviewState.byAssetId.size >= INVESTOR_OVERVIEW_MAX_SNAPSHOT) {
+        const oldestKey = investorOverviewState.byAssetId.keys().next().value;
+        if (oldestKey) investorOverviewState.byAssetId.delete(oldestKey);
+      }
+      investorOverviewState.byAssetId.set(asset.asset_id, asset);
+    }
+  }
+  return {
+    schema_version: "investor-overview-v1",
+    known_at: investorOverviewState.knownAt,
+    catalog_version: investorOverviewState.catalogVersion,
+    catalog_sha256: investorOverviewState.catalogSha256,
+    windows: investorOverviewState.windows,
+    assets: uniqueIds.map((id) => investorOverviewState.byAssetId.get(id)).filter(Boolean),
+  };
+}
+
 async function api(path, options = {}) {
   const method = String(options.method || "GET").toUpperCase();
-  const dedupeKey = method === "GET" ? path : null;
+  const dedupeKey = method === "GET" && !options.signal ? path : null;
   if (dedupeKey && apiInFlightRequests.has(dedupeKey)) {
     return apiInFlightRequests.get(dedupeKey);
   }

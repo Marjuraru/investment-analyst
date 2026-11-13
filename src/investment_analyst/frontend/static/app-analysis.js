@@ -1306,15 +1306,18 @@ async function queryMarketChart(deferredRequest = null) {
     parameters.set("bollinger_window", String(chartSettings.bollingerWindow));
     parameters.set("bollinger_multiplier", chartSettings.bollingerMultiplier);
   }
+  const signal = activeAssetAbortController ? activeAssetAbortController.signal : undefined;
   try {
     const payload = await api(
       `${intraday ? "/api/market-intraday" : "/api/market-chart"}?${parameters.toString()}`,
+      { signal },
     );
     if (!isCurrentRequest()) return;
     rememberViewPreview(`market-chart:${assetId}:${knownAt}`, payload);
     clearPreviousCutNotice();
     renderMarketChart(intraday ? normalizeBtcIntradayChart(payload) : payload);
   } catch (error) {
+    if (error && error.name === "AbortError") return;
     if (!isCurrentRequest()) return;
     marketChartPayload = null;
     marketChartViewport = null;
@@ -1651,6 +1654,76 @@ function renderCompanyProfile(classification) {
   );
 }
 
+function renderFundamentalMarginsChart(periods) {
+  const host = byId("fundamental-margins-chart");
+  if (!host) return;
+  host.replaceChildren();
+  const recent = (periods || []).slice(-4);
+  if (!recent.length) {
+    host.append(createElement("p", "chart-status", "Sin ejercicios anuales disponibles para márgenes."));
+    return;
+  }
+  const marginSpecs = [
+    { key: "fundamental.gross_margin", label: "Bruto", cls: "margin-gross" },
+    { key: "fundamental.operating_margin", label: "Operativo", cls: "margin-operating" },
+    { key: "fundamental.net_margin", label: "Neto", cls: "margin-net" },
+  ];
+  const rows = recent.map((period) => {
+    const map = new Map((period.metrics || []).map((m) => [m.metric_key, m]));
+    return {
+      label: String(period.period_end || period.fiscal_year || "").slice(0, 10),
+      values: marginSpecs.map((spec) => {
+        const m = map.get(spec.key);
+        const num = m && m.value !== null && m.value !== undefined ? Number(m.value) * 100 : null;
+        return {
+          ...spec,
+          pct: Number.isFinite(num) ? num : null,
+          raw: m?.value ?? null,
+        };
+      }),
+    };
+  });
+  const allNums = rows.flatMap((r) => r.values.map((v) => v.pct)).filter((n) => n !== null);
+  if (!allNums.length) {
+    host.append(createElement("p", "chart-status", "Sin márgenes calculados en estos ejercicios."));
+    return;
+  }
+  const minVal = Math.min(0, ...allNums);
+  const maxVal = Math.max(0, ...allNums);
+  const span = maxVal - minVal || 1;
+  const zeroRatio = (maxVal / span) * 100;
+
+  const grid = createElement("div", "margins-bars-grid");
+  for (const row of rows) {
+    const col = createElement("div", "margins-year-col");
+    const barsWrap = createElement("div", "margins-year-bars");
+    const zeroLine = createElement("div", "margins-zero-axis");
+    zeroLine.style.top = `${zeroRatio.toFixed(2)}%`;
+    barsWrap.append(zeroLine);
+    for (const item of row.values) {
+      const slot = createElement("div", "margins-bar-slot");
+      if (item.pct === null) {
+        const gap = createElement("span", "margins-bar-gap", "—");
+        gap.title = `${item.label}: Sin datos`;
+        slot.append(gap);
+      } else {
+        const bar = createElement("span", `margins-bar ${item.cls}${item.pct < 0 ? " is-negative" : ""}`);
+        const heightPct = (Math.abs(item.pct) / span) * 100;
+        bar.style.height = `${Math.max(2, heightPct).toFixed(2)}%`;
+        bar.style.top = item.pct >= 0
+          ? `${(zeroRatio - heightPct).toFixed(2)}%`
+          : `${zeroRatio.toFixed(2)}%`;
+        bar.title = `${row.label} · ${item.label}: ${item.pct.toFixed(2)}%`;
+        slot.append(bar);
+      }
+      barsWrap.append(slot);
+    }
+    col.append(barsWrap, createElement("small", "margins-year-label", row.label));
+    grid.append(col);
+  }
+  host.append(grid);
+}
+
 function renderFundamentalResearch(payload) {
   fundamentalResearchPayload = payload;
   const historyPayload = payload.history || payload;
@@ -1660,6 +1733,7 @@ function renderFundamentalResearch(payload) {
   );
   renderCompanyProfile(payload.classification);
   const periods = research.periods || [];
+  renderFundamentalMarginsChart(periods);
   const empty = byId("fundamental-research-empty");
   setExportAvailable("export-fundamental-research-csv", periods.length > 0);
   if (!periods.length) {
@@ -2283,11 +2357,13 @@ async function queryFundamentalTrend(deferredRequest = null) {
     known_at: knownAt,
     frequency,
   });
+  const signal = activeAssetAbortController ? activeAssetAbortController.signal : undefined;
   try {
-    const payload = await api(`/api/fundamental-trend?${parameters.toString()}`);
+    const payload = await api(`/api/fundamental-trend?${parameters.toString()}`, { signal });
     if (!isCurrentRequest()) return;
     renderFundamentalTrend(payload);
   } catch (error) {
+    if (error && error.name === "AbortError") return;
     if (!isCurrentRequest()) return;
     fundamentalTrendPayload = null;
     setExportAvailable("export-fundamental-csv", false);
@@ -2322,13 +2398,15 @@ async function queryFundamentalResearch(deferredRequest = null) {
     known_at: knownAt,
     frequency,
   });
+  const signal = activeAssetAbortController ? activeAssetAbortController.signal : undefined;
   try {
-    const payload = await api(`/api/fundamental-analysis?${parameters.toString()}`);
+    const payload = await api(`/api/fundamental-analysis?${parameters.toString()}`, { signal });
     if (!isCurrentRequest()) return;
     rememberViewPreview(`fundamental-analysis:${assetId}:${knownAt}:${frequency}`, payload);
     clearPreviousCutNotice();
     renderFundamentalResearch(payload);
   } catch (error) {
+    if (error && error.name === "AbortError") return;
     if (!isCurrentRequest()) return;
     fundamentalResearchPayload = null;
     setExportAvailable("export-fundamental-research-csv", false);
@@ -2909,8 +2987,10 @@ function renderValuation(payload) {
   setExportAvailable("export-valuation-json", true);
 }
 
-async function queryValuation() {
+async function queryValuation(deferredRequest = null) {
   if (!marketAssetPresentation().hasFundamentals) return;
+  const assetId = deferredRequest?.assetId ?? selectedMarketAsset;
+  const knownAt = deferredRequest?.knownAt ?? byId("report-known-at").value.trim();
   const card = byId("valuation-card");
   const button = byId("query-valuation");
   card.setAttribute("aria-busy", "true");
@@ -2923,14 +3003,19 @@ async function queryValuation() {
   byId("valuation-filing-reset").disabled = true;
   setValuationBasisHeader(false);
   const parameters = new URLSearchParams({
-    asset_id: selectedMarketAsset,
-    known_at: byId("report-known-at").value.trim(),
+    asset_id: assetId,
+    known_at: knownAt,
     valuation_date: byId("valuation-date").value,
     basis: "latest_annual",
   });
+  const signal = activeAssetAbortController ? activeAssetAbortController.signal : undefined;
   try {
-    renderValuation(await api(`/api/v1/valuation?${parameters.toString()}`));
+    const payload = await api(`/api/v1/valuation?${parameters.toString()}`, { signal });
+    if (assetId !== selectedMarketAsset || knownAt !== byId("report-known-at").value.trim()) return;
+    renderValuation(payload);
   } catch (error) {
+    if (error && error.name === "AbortError") return;
+    if (assetId !== selectedMarketAsset || knownAt !== byId("report-known-at").value.trim()) return;
     resetValuation();
     byId("valuation-status").textContent = error.message;
   } finally {
@@ -3215,7 +3300,9 @@ async function queryReport() {
   }
   try {
     parameters.set("asset_id", assetId);
-    const report = await api(`/api/listed-company-report?${parameters.toString()}`);
+    const report = await api(`/api/listed-company-report?${parameters.toString()}`, {
+      signal: activeAssetAbortController?.signal,
+    });
     if (
       request !== listedCompanyReportRequest
       || assetId !== selectedMarketAsset
@@ -3228,6 +3315,7 @@ async function queryReport() {
     renderReport(report);
     setMessage(operationalIssues.join(" · "), operationalIssues.length > 0);
   } catch (error) {
+    if (error?.name === "AbortError") return;
     if (!isCurrentRequest()) return;
     setMessage(error.message, true);
   } finally {

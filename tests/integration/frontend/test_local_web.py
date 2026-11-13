@@ -2246,8 +2246,8 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert '"aggregation_algorithm_version"' in javascript
     assert 'id="chart-point-period-label"' in html
     assert "renderFundamentalTrend" in javascript
-    assert "api(`/api/fundamental-trend?${parameters.toString()}`)" in javascript
-    assert "api(`/api/fundamental-analysis?${parameters.toString()}`)" in javascript
+    assert "api(`/api/fundamental-trend?${parameters.toString()}`" in javascript
+    assert "api(`/api/fundamental-analysis?${parameters.toString()}`" in javascript
     assert "asset_id: selectedMarketAsset" in javascript
     assert "data-fundamental-only" in html
     assert "data-apple-only" not in html
@@ -2374,11 +2374,9 @@ def test_asset_selection_invalidates_and_binds_listed_company_reports_by_asset()
             javascript.index("async function selectComboboxOption(assetId)"),
         )
     ]
-    assert selection.index("resetListedCompanyReport();") < selection.index(
-        "selectedMarketAsset = assetId;"
-    )
-    assert "presentation.hasFundamentals" in selection
-    assert "queryReport()" in selection
+    assert "clearActiveAssetContextSync(presentation);" in selection
+    assert "invalidateDeferredBoardLoads();" in selection
+    assert "activateBoard(" in selection
 
     query = javascript[
         javascript.index("async function queryReport()") : javascript.index(
