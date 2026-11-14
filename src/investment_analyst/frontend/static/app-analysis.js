@@ -890,26 +890,33 @@ function updateChartSelection(index, points, values, yPosition) {
   byId("chart-point-high").textContent = formatCurrency(point.high);
   byId("chart-point-low").textContent = formatCurrency(point.low);
   byId("chart-point-close").textContent = formatCurrency(point.close);
-  byId("chart-point-sma-5").textContent = point.short_sma
-    ? formatCurrency(point.short_sma.value)
-    : isIntradayInterval()
-      ? "No aplica"
-      : "En calentamiento";
-  byId("chart-point-sma-20").textContent = point.long_sma
-    ? formatCurrency(point.long_sma.value)
-    : isIntradayInterval()
-      ? "No aplica"
-      : "En calentamiento";
-  byId("chart-point-sma-50").textContent = point.third_sma
-    ? formatCurrency(point.third_sma.value)
-    : isIntradayInterval()
-      ? "No aplica"
-      : "En calentamiento";
-  byId("chart-point-bollinger").textContent = point.bollinger
-    ? `Sup. ${formatCurrency(point.bollinger.upper)} · Media ${formatCurrency(point.bollinger.middle)} · Inf. ${formatCurrency(point.bollinger.lower)}`
-    : isIntradayInterval()
-      ? "No aplica"
-      : "En calentamiento";
+  const setSmaOrIntradayNotApplicable = (elId, item, formatter) => {
+    const node = byId(elId);
+    if (!node) return;
+    if (item) {
+      node.textContent = formatter(item);
+      node.removeAttribute("aria-label");
+      node.removeAttribute("title");
+    } else if (isIntradayInterval()) {
+      node.replaceChildren(
+        typeof renderValueNotApplicableDash === "function"
+          ? renderValueNotApplicableDash("Las medias móviles y Bollinger diarias no aplican al intervalo intradía.")
+          : "—",
+      );
+    } else {
+      node.textContent = "En calentamiento";
+      node.removeAttribute("aria-label");
+      node.removeAttribute("title");
+    }
+  };
+  setSmaOrIntradayNotApplicable("chart-point-sma-5", point.short_sma, (item) => formatCurrency(item.value));
+  setSmaOrIntradayNotApplicable("chart-point-sma-20", point.long_sma, (item) => formatCurrency(item.value));
+  setSmaOrIntradayNotApplicable("chart-point-sma-50", point.third_sma, (item) => formatCurrency(item.value));
+  setSmaOrIntradayNotApplicable(
+    "chart-point-bollinger",
+    point.bollinger,
+    (item) => `Sup. ${formatCurrency(item.upper)} · Media ${formatCurrency(item.middle)} · Inf. ${formatCurrency(item.lower)}`,
+  );
   byId("chart-point-volume").textContent = formatMarketVolume(point.volume);
   byId("chart-point-volume").title = `Valor exacto: ${point.volume} ${marketAssetPresentation().volumeLabel}`;
 }
@@ -2747,7 +2754,10 @@ function valuationAbsenceKind(metric) {
 function valuationDisplayValue(metric, definition) {
   if (metric.status !== "evaluated") {
     const reason = VALUATION_REASON_LABELS[metric.reason_code] || metric.reason_code || "Sin evidencia suficiente";
-    return renderAbsenceMark(valuationAbsenceKind(metric), VALUATION_STATUS_LABELS[metric.status] || metric.status, reason);
+    const mark = renderAbsenceMark(valuationAbsenceKind(metric), VALUATION_STATUS_LABELS[metric.status] || metric.status, reason);
+    return typeof wrapValueAbsenceMark === "function"
+      ? wrapValueAbsenceMark(mark, valuationAbsenceKind(metric), reason)
+      : mark;
   }
   if (definition.unit === "USD") {
     const compact = formatCompactDecimalWithUnit(metric.value, {
@@ -3370,12 +3380,13 @@ function renderUnavailable(target, title, section) {
   const heading = createElement("div", "diagnostic-heading");
   const titleGroup = createElement("div");
   titleGroup.append(createElement("p", "", "DIMENSIÓN INDEPENDIENTE"), createElement("h3", "", title));
-  heading.append(titleGroup, createElement("span", "diagnostic-verdict insufficient_data", "No disponible"));
-  const message = createElement(
-    "p",
-    "empty-state",
-    "No existe un diagnóstico elegible para el corte y las fechas de referencia solicitadas. Ajusta los filtros o actualiza las fuentes.",
-  );
+  const isFundamental = title === "Fundamentales";
+  const badgeText = isFundamental ? "Sin diagnóstico anual elegible" : "No disponible";
+  heading.append(titleGroup, createElement("span", "diagnostic-verdict insufficient_data", badgeText));
+  const messageText = isFundamental
+    ? "Sin diagnóstico fundamental elegible en el algoritmo vigente al corte y frecuencia solicitados; los hechos SEC disponibles siguen consultables en la serie fundamental inferior."
+    : "No existe un diagnóstico de mercado elegible para el corte y las fechas de referencia solicitadas. Ajusta los filtros o actualiza las fuentes.";
+  const message = createElement("p", "empty-state", messageText);
   target.append(heading, message);
   target.dataset.status = section.status;
 }

@@ -648,10 +648,10 @@ const INVESTOR_OVERVIEW_ABSENCE_REASONS = Object.freeze({
   asset_class_has_no_fundamentals: "Este tipo de activo no reporta fundamentales",
   fundamentals_not_configured: "Fundamentales no configurados",
   annual_frequency_not_supported: "Frecuencia anual no implementada para este emisor",
-  no_annual_diagnostic_at_known_at: "Sin diagnóstico anual disponible al corte",
+  no_annual_diagnostic_at_known_at: "Sin diagnóstico anual elegible al corte",
   annual_diagnostic_outside_window: "Diagnóstico anual fuera de la ventana consultada",
   diagnostic_insufficient_data: "Datos insuficientes para evaluar el diagnóstico",
-  metric_not_in_selected_diagnostic: "Métrica ausente en el diagnóstico seleccionado",
+  metric_not_in_selected_diagnostic: "Métrica no disponible en esta proyección sin diagnóstico anual elegible",
   asset_class_has_no_valuation: "La valoración corporativa no aplica a este activo",
   valuation_not_configured: "Valoración corporativa no configurada",
   asset_not_applicable: "No aplica al tipo de activo",
@@ -1916,6 +1916,136 @@ function renderAbsenceMark(kind, label, reason) {
     mark.setAttribute("aria-label", label);
   }
   return mark;
+}
+
+function renderValueNotApplicableDash(reason = "") {
+  const cleanReason = String(reason || "").trim();
+  const fullLabel = cleanReason ? `No aplica a este perfil: ${cleanReason}` : "No aplica a este perfil";
+  const dash = createElement("span", "mesa-value-dash is-not-applicable", "—");
+  dash.setAttribute("aria-label", fullLabel);
+  dash.title = fullLabel;
+  return dash;
+}
+
+function wrapValueAbsenceMark(mark, kind = "", reason = "") {
+  if (kind !== "not-applicable") return mark;
+  const wrap = createElement("span", "value-absence-slot");
+  const cleanReason = String(reason || "").trim();
+  const accessible = cleanReason ? `No aplica a este perfil: ${cleanReason}` : "No aplica a este perfil";
+  wrap.title = accessible;
+  const visible = createElement("span", "value-dash-visible", "—");
+  visible.setAttribute("aria-hidden", "true");
+  mark.setAttribute("aria-label", accessible);
+  wrap.append(visible, mark);
+  return wrap;
+}
+
+const CAZATIBURONES_NOTIFICATION_METRIC_LABELS = Object.freeze({
+  "cazatiburones.institutional.declared_position_value_weight": "Peso declarado de posición 13F",
+  "cazatiburones.institutional.declared_option_position_value_weight": "Peso declarado en opciones 13F",
+  "cazatiburones.institutional.delta_reported_shares": "Variación declarada de acciones 13F",
+  "cazatiburones.institutional.delta_reported_fair_value": "Variación declarada de valor razonable 13F",
+  "cazatiburones.institutional.reported_shares_delta_ratio": "Variación porcentual de acciones 13F",
+  "cazatiburones.institutional.delta_option_underlying_shares": "Variación de subyacentes en opciones 13F",
+  "cazatiburones.institutional.delta_option_fair_value": "Variación de valor en opciones 13F",
+  "cazatiburones.insider.holding_delta_ratio": "Variación de tenencia declarada (insider)",
+  "cazatiburones.beneficial.delta_percent_of_class": "Variación de porcentaje de clase (13D/13G)",
+  "cazatiburones.beneficial.delta_shares_beneficially_owned": "Variación de acciones declaradas (13D/13G)",
+});
+
+const CAZATIBURONES_NOTIFICATION_RULE_LABELS = Object.freeze({
+  "institutional-position-entry": "Aparición de posición declarada 13F",
+  "institutional-position-exit": "Salida de posición declarada 13F",
+  "institutional-position-concentration": "Concentración de posición declarada 13F",
+  "institutional-robust-percentile-high": "Percentil robusto elevado 13F",
+  "insider-acquisition-declared": "Adquisición declarada (insider, código A)",
+  "insider-disposition-declared": "Disposición declarada (insider, código D)",
+  "insider-holding-increased": "Incremento de tenencia declarada (insider)",
+  "insider-holding-reduced": "Reducción de tenencia declarada (insider)",
+  "insider-clustered-activity": "Agrupación temporal de transacciones (insider)",
+  "insider-filing-delay-beyond-threshold": "Demora de presentación declarada (insider)",
+  "beneficial-threshold-appearance": "Aparición de umbral 13D/13G",
+  "beneficial-threshold-exit": "Salida de umbral 13D/13G",
+  "beneficial-percent-increase": "Incremento de porcentaje de clase (13D/13G)",
+  "beneficial-percent-increased": "Incremento de porcentaje de clase (13D/13G)",
+  "beneficial-percent-decrease": "Reducción de porcentaje de clase (13D/13G)",
+  "beneficial-percent-reduced": "Reducción de porcentaje de clase (13D/13G)",
+  "beneficial-shares-increased": "Incremento de acciones beneficiarias (13D/13G)",
+  "beneficial-shares-reduced": "Reducción de acciones beneficiarias (13D/13G)",
+});
+
+function formatCazatiburonesNotificationValue(notification) {
+  if (!notification || notification.value === null || notification.value === undefined) return "";
+  const unit = String(notification.unit || "").trim();
+  const metricKey = String(notification.metric_key || "").trim();
+  const raw = String(notification.value).trim();
+  if (!raw) return "";
+  if (unit === "boolean") return raw === "true" || raw === "1" ? "Declarada" : "No";
+  if (unit === "ratio") {
+    const isWeight = metricKey.includes("weight") || metricKey.includes("concentration") || metricKey.includes("percentile");
+    if (typeof formatDecimalPercentFromRatio === "function") {
+      return formatDecimalPercentFromRatio(raw, { decimals: 2, signed: !isWeight });
+    }
+    return raw;
+  }
+  if (unit === "percentage_points") {
+    return typeof formatSignedPercentagePoints === "function" ? formatSignedPercentagePoints(raw) : `${raw} pp`;
+  }
+  if (unit === "USD") {
+    if (typeof formatCompactDecimalWithUnit === "function") {
+      return formatCompactDecimalWithUnit(raw, { currency: "USD", decimals: 2 });
+    }
+    return `${raw} USD`;
+  }
+  if (unit === "shares") {
+    return typeof formatDecimalRatio === "function" ? `${formatDecimalRatio(raw, 0)} acc.` : `${raw} acc.`;
+  }
+  if (typeof formatDecimalRatio === "function") {
+    const formatted = formatDecimalRatio(raw, 2, { trimTrailingZeros: true });
+    return unit ? `${formatted} ${unit}` : formatted;
+  }
+  return unit ? `${raw} ${unit}` : raw;
+}
+
+function describeCazatiburonesNotice(notification, family = notification?.family) {
+  const resolvedFamily = family === "institutional" ? "institutional" : "activity";
+  const metricKey = String(notification?.metric_key || "").trim();
+  const ruleId = String(notification?.rule_id || "").trim();
+  const payload = notification?.payload && typeof notification.payload === "object" ? notification.payload : null;
+  const label = CAZATIBURONES_NOTIFICATION_METRIC_LABELS[metricKey]
+    || CAZATIBURONES_NOTIFICATION_RULE_LABELS[ruleId]
+    || payload?.rule_name_es
+    || payload?.operating_title
+    || notification?.title
+    || (resolvedFamily === "institutional" ? "Declaración institucional" : "Actividad declarada");
+  const formattedValue = formatCazatiburonesNotificationValue(notification);
+  const managerName = String(notification?.manager_name || payload?.manager_name || "").trim();
+  const managerCik = String(notification?.manager_cik || "").trim();
+  const participantCik = String(notification?.participant_cik || "").trim();
+  const actor = managerName || (managerCik ? `CIK ${managerCik}` : participantCik ? `CIK ${participantCik}` : "");
+  const priorPeriod = String(notification?.prior_report_period || "").trim();
+  const reportPeriod = String(notification?.report_period || "").trim();
+  const period = priorPeriod && reportPeriod
+    ? `${priorPeriod} → ${reportPeriod}`
+    : (reportPeriod || priorPeriod || "");
+  const title = formattedValue ? `${label} (${formattedValue})` : label;
+  const assetLabel = typeof assetDisplayLabel === "function" && notification?.asset_id
+    ? assetDisplayLabel(notification.asset_id)
+    : String(notification?.asset_id || "");
+  const summaryParts = [assetLabel, actor, period].filter(Boolean);
+  return Object.freeze({
+    family: resolvedFamily,
+    familyLabel: resolvedFamily === "institutional" ? "Institucional 13F" : "Actividad declarada",
+    title,
+    label,
+    formattedValue,
+    actor,
+    period,
+    assetLabel,
+    subtitle: summaryParts.join(" · "),
+    metricKey,
+    ruleId,
+  });
 }
 
 function translated(value, dictionary, fallback = value) {

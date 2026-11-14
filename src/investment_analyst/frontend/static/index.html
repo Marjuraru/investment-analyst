@@ -215,44 +215,65 @@
                     </div>
                   </section>
 
-                  <section class="mesa-layer mesa-news" aria-labelledby="mesa-news-titulo">
-                    <details id="mesa-news-disclosure" class="mesa-news-disclosure">
-                      <summary>
-                        <span id="mesa-news-titulo">Novedades de las bandejas</span>
-                        <span class="mesa-news-disclosure-hint">Ver 3 bandejas independientes</span>
-                      </summary>
-                      <div class="mesa-news-families">
-                        <article class="mesa-news-family" id="mesa-news-analytical">
-                          <header class="mesa-news-family-header">
-                            <strong>Reglas analíticas</strong>
-                            <span id="mesa-news-analytical-count" class="mesa-news-count">—</span>
-                          </header>
-                          <div id="mesa-news-analytical-list" class="alert-inbox" aria-live="polite" aria-busy="false">
-                            <p>Cargando…</p>
-                          </div>
-                        </article>
-                        <article class="mesa-news-family" id="mesa-news-institutional">
-                          <header class="mesa-news-family-header">
-                            <strong>Institucional 13F</strong>
-                            <span id="mesa-news-institutional-count" class="mesa-news-count">—</span>
-                          </header>
-                          <div id="mesa-news-institutional-list" class="alert-inbox" aria-live="polite" aria-busy="false">
-                            <p>Cargando…</p>
-                          </div>
-                        </article>
-                        <article class="mesa-news-family" id="mesa-news-activity">
-                          <header class="mesa-news-family-header">
-                            <strong>Actividad declarada</strong>
-                            <span id="mesa-news-activity-count" class="mesa-news-count">—</span>
-                          </header>
-                          <div id="mesa-news-activity-list" class="alert-inbox" aria-live="polite" aria-busy="false">
-                            <p>Cargando…</p>
-                          </div>
-                        </article>
-                      </div>
-                    </details>
-                  </section>
                 </div>
+
+                <aside class="mesa-aside" id="mesa-quick-panel" aria-label="Vista rápida y novedades">
+                  <section class="mesa-aside-card mesa-news-family" id="mesa-news-analytical" aria-labelledby="mesa-news-analytical-titulo">
+                    <header class="mesa-news-family-header">
+                      <div class="mesa-aside-title-group">
+                        <strong id="mesa-news-analytical-titulo">Screening</strong>
+                        <span class="mesa-aside-kind-badge">Reglas determinísticas</span>
+                      </div>
+                      <button id="mesa-screening-all-btn" class="mesa-aside-link" type="button">Ver todas</button>
+                    </header>
+                    <div class="mesa-aside-meta-row">
+                      <span id="mesa-news-analytical-count" class="mesa-news-count">—</span>
+                      <button id="mesa-news-analytical-retry" class="mesa-aside-retry hidden" type="button">Reintentar</button>
+                    </div>
+                    <p class="mesa-aside-note">Candidatos por regla determinística local; no son predicciones ni recomendaciones.</p>
+                    <div id="mesa-news-analytical-list" class="alert-inbox" aria-live="polite" aria-busy="false">
+                      <p>Cargando…</p>
+                    </div>
+                  </section>
+
+                  <section class="mesa-aside-card mesa-news-family" id="mesa-quick-cazatiburones" aria-labelledby="mesa-quick-caza-titulo">
+                    <header class="mesa-news-family-header">
+                      <div class="mesa-aside-title-group">
+                        <strong id="mesa-quick-caza-titulo">Cazatiburones</strong>
+                        <span class="mesa-aside-kind-badge">Muestra reciente (máx. 3)</span>
+                      </div>
+                      <button id="mesa-caza-board-btn" class="mesa-aside-link" type="button">Ver tablero</button>
+                    </header>
+                    <div class="mesa-caza-counts" aria-label="Contadores independientes por familia">
+                      <div class="mesa-caza-count-row">
+                        <span>Institucional 13F:</span>
+                        <span id="mesa-news-institutional-count" class="mesa-news-count">—</span>
+                        <button id="mesa-news-institutional-retry" class="mesa-aside-retry hidden" type="button">Reintentar</button>
+                      </div>
+                      <div class="mesa-caza-count-row">
+                        <span>Actividad declarada:</span>
+                        <span id="mesa-news-activity-count" class="mesa-news-count">—</span>
+                        <button id="mesa-news-activity-retry" class="mesa-aside-retry hidden" type="button">Reintentar</button>
+                      </div>
+                    </div>
+                    <p class="mesa-aside-note">Top 3 reciente por fecha de conocimiento; contadores separados por familia, muestra parcial y no noticias de mercado.</p>
+                    <div id="mesa-cazatiburones-quick-list" class="alert-inbox" aria-live="polite" aria-busy="false">
+                      <p>Cargando…</p>
+                    </div>
+                  </section>
+
+                  <section class="mesa-aside-card mesa-news-family mesa-research-card" id="mesa-quick-research" aria-labelledby="mesa-quick-research-titulo">
+                    <header class="mesa-news-family-header">
+                      <div class="mesa-aside-title-group">
+                        <strong id="mesa-quick-research-titulo">Predicciones / investigación</strong>
+                        <span class="mesa-aside-kind-badge">No operativo</span>
+                      </div>
+                    </header>
+                    <p id="mesa-research-honest-state" class="mesa-research-state">Sin predictor validado; no hay alertas predictivas operativas</p>
+                    <p class="mesa-aside-note">Sin alertas ni inferencia en Mesa; la investigación experimental vive aislada en Sistema.</p>
+                    <button id="mesa-research-system-btn" class="button secondary compact mesa-research-link" type="button">Ir a Investigación experimental</button>
+                  </section>
+                </aside>
               </div>
             </section>
           </div>
@@ -1247,8 +1268,8 @@
             <div class="section-intro">
               <div>
                 <p class="eyebrow">CAZATIBURONES</p>
-                <h2 id="cazatiburones-titulo">Actividad institucional declarada</h2>
-                <p>Tres lecturas descriptivas independientes al corte global vigente; ninguna combina familias, activos ni infiere una cartera efectiva.</p>
+                <h2 id="cazatiburones-titulo">Quién declaró actividad sobre este activo, qué declaró y cuándo se conoció</h2>
+                <p>Tres lecturas descriptivas al corte global vigente; sin combinar familias ni inferir posiciones netas o carteras efectivas.</p>
               </div>
             </div>
             <div id="cazatiburones-not-applicable" class="hidden"></div>
@@ -1316,11 +1337,25 @@
                   <small>Detalle local</small>
                   <strong id="cazatiburones-detail-asset">Sin activo seleccionado</strong>
                 </span>
-                <button id="cazatiburones-open-asset" class="button secondary compact" type="button">Abrir en Activo</button>
-                <button id="cazatiburones-detail-close" class="button secondary compact" type="button">Volver al índice</button>
+                <div class="cazatiburones-detail-actions">
+                  <button id="cazatiburones-jump-evidence" class="button secondary compact" type="button">Ver evidencia documental</button>
+                  <button id="cazatiburones-open-asset" class="button secondary compact" type="button">Abrir en Activo</button>
+                  <button id="cazatiburones-detail-close" class="button secondary compact" type="button">Volver al índice</button>
+                </div>
               </div>
               <p id="cazatiburones-detail-empty" class="chart-status" role="status" aria-live="polite">Selecciona un activo del índice para consultar sus lecturas detalladas.</p>
               <div id="cazatiburones-detail-content" class="hidden" hidden>
+                <section id="cazatiburones-selected-context" class="operation-panel cazatiburones-context-panel hidden" aria-labelledby="cazatiburones-context-titulo" hidden>
+                  <div class="panel-header">
+                    <span>
+                      <strong id="cazatiburones-context-titulo">Declaración seleccionada</strong>
+                      <small id="cazatiburones-context-summary">Sin contexto puntual</small>
+                    </span>
+                    <button id="cazatiburones-context-clear" class="button secondary compact" type="button">Limpiar selección</button>
+                  </div>
+                  <div id="cazatiburones-context-body" class="cazatiburones-context-body"></div>
+                </section>
+
                 <section id="cazatiburones-declared-activity" class="operation-panel" aria-labelledby="cazatiburones-declared-activity-titulo">
                   <div class="panel-header">
                     <span>
@@ -1338,19 +1373,23 @@
                       <strong id="cazatiburones-institutional-observations-titulo">Observaciones institucionales 13F</strong>
                       <small id="cazatiburones-institutional-observations-summary">Sin consultar</small>
                     </span>
+                    <button id="cazatiburones-load-full-btn" class="button secondary compact hidden" type="button">Cargar detalle completo 13F</button>
                   </div>
                   <div id="cazatiburones-institutional-observations-rows" class="cazatiburones-feature-group"></div>
                 </section>
 
                 <section id="cazatiburones-document-timeline" class="operation-panel" aria-labelledby="cazatiburones-document-timeline-titulo">
-                  <div class="panel-header">
-                    <span>
-                      <strong id="cazatiburones-document-timeline-titulo">Línea temporal documental SEC</strong>
-                      <small id="cazatiburones-document-timeline-summary">Sin consultar</small>
-                    </span>
-                  </div>
-                  <div id="cazatiburones-timeline-asset-document" class="cazatiburones-feature-group"></div>
-                  <div id="cazatiburones-timeline-filer-document" class="cazatiburones-feature-group"></div>
+                  <details id="cazatiburones-evidence-disclosure" class="cazatiburones-evidence-disclosure">
+                    <summary class="panel-header">
+                      <span>
+                        <strong id="cazatiburones-document-timeline-titulo">Línea temporal documental SEC</strong>
+                        <small id="cazatiburones-document-timeline-summary">Sin consultar</small>
+                      </span>
+                      <span class="cazatiburones-evidence-hint">Ver documentos SEC</span>
+                    </summary>
+                    <div id="cazatiburones-timeline-asset-document" class="cazatiburones-feature-group"></div>
+                    <div id="cazatiburones-timeline-filer-document" class="cazatiburones-feature-group"></div>
+                  </details>
                 </section>
               </div>
             </div>

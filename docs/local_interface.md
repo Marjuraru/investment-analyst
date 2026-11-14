@@ -26,11 +26,15 @@ queda disponible para las lecturas documentales existentes sin mezclarla con fun
   «No se pudo completar la consulta local. X cargados, Y sin consultar» y ofrece «Reintentar
   pendientes» (que reconsulta sólo los faltantes en lotes `<=10` con bloqueo de reentrada) más
   «Ver estado en Sistema»; la ausencia legítima (`missing`, `not_applicable`, `no_bar_in_window`)
-  nunca dispara reintentos. Las celdas conservan etiquetas breves («Sin datos», «No aplica», «Otra
-  fecha» cuando la fecha de cierre difiere del corte) y exponen el motivo point-in-time completo en
-  español y el código técnico dentro del detalle y atributos accesibles (`no_bar_in_window` → «Sin
-  barras elegibles para este corte/ventana»; `no_annual_diagnostic_at_known_at` → «Sin diagnóstico
-  anual disponible al corte»; más los códigos de valoración y fallback «Detalle no disponible»).
+  nunca dispara reintentos. Las celdas conservan la gramática unificada de ausencia (`«—»` sin
+  repetir el texto «No aplica» para `not_applicable`, `«—»` con marca discreta `i`/`!` y tooltip o
+  `aria-label` completo para ausencia/configuración, y subrayado punteado más superíndice `†`
+  posicionado sin desplazamiento cuando la fecha de cierre difiere del corte, preservando sin cambio
+  «Error», «Carga pausada», «Cancelado», «Pendiente» y «Consultando…»). Exponen el motivo
+  point-in-time completo en español y código técnico dentro del detalle y atributos accesibles
+  (`no_bar_in_window` → «Sin barras elegibles para este corte/ventana»;
+  `no_annual_diagnostic_at_known_at` → «Sin diagnóstico anual elegible al corte»; más los códigos
+  de valoración y fallback «Detalle no disponible»).
 - **Activo (`#board-activo`)**: al cambiar activo, corte, rango o frecuencia ejecuta limpieza
   síncrona inmediata (`clearActiveAssetContextSync`) antes del primer `await` (incluyendo
   `resetMarketSnapshot`, totales de cabecera, exports y avisos vacíos) y aborta peticiones en
@@ -324,25 +328,36 @@ activo selecciona localmente su `asset_id`, conserva los filtros y abre un
 encabezado con retorno al índice; sólo entonces reactiva las tres lecturas con
 el mismo corte global, sin cambiar el activo global.
 
-## Mesa: composición y cobertura (`UI-9`)
+## Mesa: composición y cobertura (`UI-9` / `INVESTOR-DESK-CLOSURE`)
 
 El rail global ya ocupa la primera columna de la aplicación; `mesa` no lo duplica. Dentro del
-tablero, una columna principal a ancho completo (`minmax(0, 1fr)`) presenta primero
-**Universo y lectura compacta** (`#mesa-investor-section`) seguido de **Novedades de las bandejas**
-en un bloque colapsable por defecto (`#mesa-news-disclosure`), mientras **Cobertura del corte**,
-**Fuentes bloqueadas**, **Registro BVL**, **Universo** e **Incidencias** residen en `#board-sistema`.
-Las tablas conservan encabezados compactos y son el único desplazamiento horizontal propio. El corte
-`known_at` y el reloj siguen en la cabecera compartida y no se crea un score, ranking ni veredicto
-que mezcle los dominios.
+tablero, una retícula desktop 70/30 (`.mesa-layout`, `minmax(640px, 7fr) minmax(280px, 3fr)`)
+presenta **Universo y lectura compacta** (`#mesa-investor-section`) junto al panel lateral
+`.mesa-aside#mesa-quick-panel`; en viewports estrechos (`<= 1190px`), `.mesa-aside` se apila arriba
+(`order: -1`) antes de la tabla. **Cobertura del corte**, **Fuentes bloqueadas**, **Registro BVL**,
+**Universo** e **Incidencias** residen en `#board-sistema`. En columna 1 de la tabla de Mesa sólo se
+muestran el ticker y una línea truncada del nombre del activo (la clase, bolsa y motivo completo
+permanecen en atributos accesibles y en la fila `Detalle`). Las tablas conservan encabezados
+compactos y son el único desplazamiento horizontal propio. El corte `known_at` y el reloj siguen en
+la cabecera compartida y no se crea un score, ranking ni veredicto que mezcle los dominios.
 
-Novedades conserva tres bloques de procedencia independiente -- institucional 13F, actividad
-declarada y reglas analíticas -- sin total, orden ni score común. Reglas analíticas sigue leyendo
-`GET /api/v1/candidate-notifications`; institucional 13F y actividad declarada siguen usando la
-outbox Cazatiburones mediante `GET /api/v1/cazatiburones/notifications`, sin restringirse a un
-activo. Las tres bandejas conservan procedencia y conteos independientes; la interfaz no presenta
-una afirmación adicional de corte global.
+El panel rápido `#mesa-quick-panel` reemplaza el desplegable inferior `#mesa-news-disclosure` con
+tres módulos independientes:
+1. **Screening** (`#mesa-news-analytical`): reutiliza `GET /api/v1/candidate-notifications` (compartido
+   en memoria con `Revisar` mediante `shareCandidateNotificationPayload`), muestra `total` y
+   `pending_count` («sin acuse») y lista hasta **3** candidatos por regla determinística en orden de
+   bandeja; pulsar un ítem navega a `Revisar` sin acusar recibo y «Ver todas» abre la bandeja.
+2. **Cazatiburones** (`#mesa-quick-cazatiburones`): consulta por separado
+   `GET /api/v1/cazatiburones/notifications?family=institutional&limit=5` y `family=activity&limit=5`,
+   mantiene separados sus contadores (`#mesa-news-institutional-count` y `#mesa-news-activity-count`,
+   nunca sumados) y lista hasta **3** avisos combinados recientes ordenados por `available_at` descendente
+   (desempate por `notification_id`), con chip de familia y aclaración explícita de muestra parcial (no
+   noticias de mercado). Cada módulo conserva carga/error/reintento independiente sin mostrar `0` ante error.
+3. **Predicciones / investigación** (`#mesa-quick-research`): card estática honesta que declara
+   «Sin predictor validado; no hay alertas predictivas operativas» y enlaza directo a
+   `#sistema-investigacion`, sin contadores falsos ni llamadas de inferencia.
 Incidencias sigue siendo una lectura de solo lectura de hasta cinco incidencias operativas desde
-`GET /api/alerts`, separada de aquellas tres familias.
+`GET /api/alerts`, alojada en `#sistema-incidencias` dentro de Sistema.
 
 Universo consume `GET /api/v1/universe-coverage` exactamente una vez por activación, nunca por
 activo. La ventana de cuatro fechas se deriva del corte global con una regla fija -- fin en el
@@ -392,7 +407,7 @@ Las colecciones largas conservan el payload completo en memoria, pero comienzan 
 muestran `Mostrando X de Y`. `Mostrar 10 más` incrementa por diez sin superar el total y `Mostrar
 menos` vuelve a diez. El cambio de filtro, activo, corte o payload reinicia la ventana; las
 colecciones vacías o de hasta diez filas no muestran controles inútiles. Mesa mantiene exactamente
-cinco novedades e incidencias por familia y Comparación conserva su muestra explícita de 2–5 activos.
+cinco novedades e incidencias por familia y `#mesa-quick-panel` acota Screening y Cazatiburones a tres avisos recientes por tarjeta; Comparación conserva su muestra explícita de 2–5 activos.
 
 El formulario `run-form` aparece una sola vez bajo `Sistema > Mantenimiento manual avanzado`,
 cerrado por defecto. El resumen es genérico; al abrirlo se muestran el último activo y las fuentes.
@@ -1465,3 +1480,28 @@ refresh y sin agregar puntuaciones, veredictos ni rankings:
   total.
 - Se cachea en memoria bajo la misma cota compartida `_MAX_READ_CACHE_ENTRIES` que el resto de
   lecturas locales; la caché se vacía por completo tras cualquier ejecución operativa completada.
+
+## Cierre del escritorio del inversor (`INVESTOR-DESK-CLOSURE`)
+
+- **Mesa compacta (A1):** composición 70/30 desktop y panel lateral arriba (`order: -1`) bajo `1190px`;
+  filas compactas (`<= 48px` objetivo en vista normal) con ticker y nombre en una línea truncada y
+  superíndice de fecha `†` sin desplazamiento horizontal/vertical ni badge textual «Otra fecha».
+- **Ausencia vs error unificada (A1/A5/A6):** los valores `not_applicable` de celdas y tarjetas se
+  muestran con `«—»` y causa accesible (`title`/`aria-label`), evitando la repetición visual de
+  «No aplica»; `missing`/`insufficient_data`/`not_configured`/`not_supported` usan `«—»` más marca
+  discreta `i`/`!` sin tocar los estados operativos «Error», «Carga pausada», «Cancelado», «Pendiente»
+  ni confundir `0` disponible con ausencia.
+- **Cazatiburones legible y focalizada (A3):** título explícito «Quién declaró actividad sobre este
+  activo, qué declaró y cuándo se conoció», traducción de claves técnicas (`metric_key`, `rule_id`,
+  campos 13F y unidades `Decimal`) en notificaciones y detalle, contexto seleccionado con resalte de
+  observaciones coincidente o limitación honesta en ventana `projection=summary&limit=200` (carga
+  `projection=full` sólo bajo clic explícito), evidencia documental accesible en 1 clic con campos
+  técnicos plegados en `<details class="cazatiburones-tech-details">` y vacío explícito
+  «No hay declaraciones elegibles en este corte».
+- **Hallazgo A4 sobre ausencia anual SEC (diagnóstico solo lectura):** en activos con hechos SEC
+  (`companyfacts`) pero sin diagnóstico anual elegible en la versión activa del algoritmo (p. ej.
+  `AMD`, `GOOGL`, `SCCO` por falta de hechos `Revenues`/`Assets` elegibles al corte en la ventana o
+  reglas activas, manteniendo excluidos registros históricos `v2`/`v3`), la interfaz distingue
+  explícitamente «Sin diagnóstico anual elegible» / «Sin diagnóstico anual elegible al corte» y
+  nunca los presenta como «Sin fundamentales» ni sugiere inexistencia de hechos SEC, sin relajar ni
+  alterar las reglas de `sec_diagnostic_rules.py`.

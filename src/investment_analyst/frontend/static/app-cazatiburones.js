@@ -11,7 +11,23 @@
 // into an effective portfolio, a score or a signal.
 let cazatiburonesRequestSequence = 0;
 let cazatiburonesSelectedAssetId = null;
+let cazatiburonesSelectedNotificationContext = null;
+let cazatiburonesLastObservationsPayload = null;
 const cazatiburonesProgressiveVisibleCounts = new Map();
+
+const CAZATIBURONES_FIELD_LABELS = Object.freeze({
+  value_thousands_usd: "Valor reportado (miles USD)",
+  shares_or_principal_amount: "Acciones o monto principal",
+  shares_or_principal_type: "Tipo de posición",
+  put_call: "Opción Put/Call",
+  investment_discretion: "Discreción de inversión",
+});
+
+const CAZATIBURONES_UNIT_LABELS = Object.freeze({
+  thousands_usd: "miles USD",
+  shares: "acciones",
+  usd: "USD",
+});
 
 function cazatiburonesBoardIsActive() {
   const section = byId("board-cazatiburones");
@@ -36,9 +52,22 @@ function renderCazatiburonesDetailHeader() {
   byId("cazatiburones-detail-empty").classList.add("hidden");
 }
 
+function clearCazatiburonesSelectedContext({ hidePanel = true } = {}) {
+  cazatiburonesSelectedNotificationContext = null;
+  if (hidePanel) {
+    const panel = byId("cazatiburones-selected-context");
+    if (panel) {
+      panel.classList.add("hidden");
+      panel.hidden = true;
+    }
+  }
+}
+
 function resetCazatiburonesDetail() {
   cazatiburonesRequestSequence += 1;
   cazatiburonesSelectedAssetId = null;
+  cazatiburonesLastObservationsPayload = null;
+  clearCazatiburonesSelectedContext();
   cazatiburonesProgressiveVisibleCounts.clear();
   const header = byId("cazatiburones-detail-header");
   header.classList.add("hidden");
@@ -60,7 +89,14 @@ function closeCazatiburonesDetail() {
 
 function selectCazatiburonesUniverseAsset(assetId) {
   if (!marketAssets[assetId]) return false;
+  if (
+    cazatiburonesSelectedNotificationContext
+    && cazatiburonesSelectedNotificationContext.asset_id !== assetId
+  ) {
+    clearCazatiburonesSelectedContext();
+  }
   cazatiburonesSelectedAssetId = assetId;
+  cazatiburonesLastObservationsPayload = null;
   cazatiburonesProgressiveVisibleCounts.clear();
   renderCazatiburonesDetailHeader();
   byId("cazatiburones-not-applicable").classList.add("hidden");
@@ -95,7 +131,10 @@ function normalizeCazatiburonesUniverseSearch(value) {
 function cazatiburonesUniverseCapabilityMarkup(capability, reason) {
   if (capability === "supported") return createElement("span", "cazatiburones-universe-state", "Disponible");
   if (capability === "not_applicable") {
-    return renderAbsenceMark("not-applicable", "No aplica", reason);
+    const mark = renderAbsenceMark("not-applicable", "No aplica", reason);
+    return typeof wrapValueAbsenceMark === "function"
+      ? wrapValueAbsenceMark(mark, "not-applicable", reason)
+      : mark;
   }
   if (capability === "not_configured" || capability === "not_implemented") {
     return renderAbsenceMark("blocked", "Bloqueada", reason || "Capacidad no configurada");
@@ -161,7 +200,7 @@ function navigateCazatiburonesUniverseAsset(assetId) {
   selectCazatiburonesUniverseAsset(assetId);
 }
 
-function selectCazatiburonesNotificationTarget(assetId, family) {
+function selectCazatiburonesNotificationTarget(assetId, family, context = null) {
   const normalizedAssetId = String(assetId ?? "").trim();
   const normalizedFamily = String(family ?? "").trim();
   if (!marketAssets[normalizedAssetId]) {
@@ -170,6 +209,9 @@ function selectCazatiburonesNotificationTarget(assetId, family) {
   if (!["activity", "institutional"].includes(normalizedFamily)) {
     return contextualNavigationUnavailable("la familia de Cazatiburones no está disponible.");
   }
+  cazatiburonesSelectedNotificationContext = context && typeof context === "object"
+    ? { ...context, family: normalizedFamily, asset_id: normalizedAssetId }
+    : { family: normalizedFamily, asset_id: normalizedAssetId };
   cazatiburonesUniverseFilters.search = "";
   cazatiburonesUniverseFilters.family = normalizedFamily;
   cazatiburonesUniversePendingContextAssetId = normalizedAssetId;
@@ -392,6 +434,23 @@ function initializeCazatiburonesUniverseFilters() {
     });
   });
   byId("cazatiburones-detail-close").addEventListener("click", closeCazatiburonesDetail);
+  byId("cazatiburones-jump-evidence")?.addEventListener("click", () => {
+    const disclosure = byId("cazatiburones-evidence-disclosure");
+    if (disclosure) {
+      disclosure.open = true;
+      disclosure.scrollIntoView?.({ block: "start" });
+      disclosure.querySelector?.("summary")?.focus?.();
+    }
+  });
+  byId("cazatiburones-context-clear")?.addEventListener("click", () => {
+    clearCazatiburonesSelectedContext();
+    if (cazatiburonesLastObservationsPayload) {
+      renderCazatiburonesInstitutionalObservations(cazatiburonesLastObservationsPayload, 0, 200);
+    }
+  });
+  byId("cazatiburones-load-full-btn")?.addEventListener("click", () => {
+    void loadCazatiburonesFullObservations();
+  });
 }
 
 async function loadCazatiburonesUniverseIndex() {
@@ -465,6 +524,129 @@ function cazatiburonesComparisonMarkup(status) {
   return `<span>${status === "discontinuous" ? "Discontinua" : "Disponible"}</span>`;
 }
 
+function cazatiburonesEscapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function cazatiburonesMetricLabel(key) {
+  if (typeof CAZATIBURONES_NOTIFICATION_METRIC_LABELS === "object" && CAZATIBURONES_NOTIFICATION_METRIC_LABELS[key]) {
+    return CAZATIBURONES_NOTIFICATION_METRIC_LABELS[key];
+  }
+  return key || "Métrica declarada";
+}
+
+function cazatiburonesObservationMatchesContext(view, ctx) {
+  if (!view || !ctx || ctx.asset_id !== cazatiburonesSelectedAssetId) return false;
+  const obsId = view.observation?.observation_id;
+  if (obsId && Array.isArray(ctx.input_observation_ids) && ctx.input_observation_ids.includes(obsId)) {
+    return "exact_id";
+  }
+  if (ctx.family === "institutional" && ctx.manager_cik && view.report?.manager_cik === ctx.manager_cik) {
+    const ctxPeriod = ctx.report_period ? String(ctx.report_period).slice(0, 10) : "";
+    const rowPeriod = String(
+      view.report?.report_period || view.report?.report_of_date || view.observation?.period_end || "",
+    ).slice(0, 10);
+    if (!ctxPeriod || !rowPeriod || rowPeriod === ctxPeriod) {
+      return "manager_period";
+    }
+  }
+  return false;
+}
+
+function renderCazatiburonesSelectedContext(observations = []) {
+  const panel = byId("cazatiburones-selected-context");
+  const titleEl = byId("cazatiburones-context-titulo");
+  const summaryEl = byId("cazatiburones-context-summary");
+  const bodyEl = byId("cazatiburones-context-body");
+  if (!panel || !bodyEl) return;
+  const ctx = cazatiburonesSelectedNotificationContext;
+  if (!ctx || ctx.asset_id !== cazatiburonesSelectedAssetId) {
+    panel.classList.add("hidden");
+    panel.hidden = true;
+    return;
+  }
+  panel.classList.remove("hidden");
+  panel.hidden = false;
+  const described = typeof describeCazatiburonesNotice === "function"
+    ? describeCazatiburonesNotice(ctx, ctx.family)
+    : {
+      familyLabel: ctx.family === "institutional" ? "Institucional 13F" : "Actividad declarada",
+      title: ctx.rule_id || "Declaración seleccionada",
+      label: ctx.rule_id || "Declaración SEC",
+      formattedValue: ctx.value ?? "Sin dato",
+      actor: ctx.manager_cik ? `Gestor 13F CIK ${ctx.manager_cik}` : "Participante SEC",
+      period: ctx.report_period || "",
+      assetLabel: assetDisplayLabel(ctx.asset_id),
+    };
+  if (titleEl) titleEl.textContent = described.title || "Declaración seleccionada";
+  const knownAtText = ctx.available_at || ctx.created_at
+    ? formatInstant(ctx.available_at || ctx.created_at)
+    : "Sin fecha";
+  if (summaryEl) {
+    summaryEl.textContent = `${described.familyLabel} · conocido ${knownAtText}`;
+  }
+
+  let exactMatches = 0;
+  let heuristicMatches = 0;
+  for (const view of observations) {
+    const matchKind = cazatiburonesObservationMatchesContext(view, ctx);
+    if (matchKind === "exact_id") exactMatches += 1;
+    else if (matchKind === "manager_period") heuristicMatches += 1;
+  }
+
+  let matchNote = "";
+  if (ctx.family === "institutional") {
+    if (exactMatches > 0) {
+      matchNote = `Coincidencia exacta localizada y resaltada (${formatInteger(exactMatches)} fila${exactMatches === 1 ? "" : "s"}).`;
+    } else if (heuristicMatches > 0) {
+      matchNote = `Se resaltan ${formatInteger(heuristicMatches)} observaciones del mismo gestor/período en la ventana actual; las notificaciones 13F resumen cambios entre períodos.`;
+    } else if (observations.length > 0) {
+      matchNote = `La ventana resumen actual (${formatInteger(observations.length)} filas) no aísla exactamente la observación de esta notificación; puedes pulsar "Cargar detalle completo 13F" o revisar la actividad abajo.`;
+    } else {
+      matchNote = "Sin filas 13F cargadas para cruzar directamente en este corte.";
+    }
+  } else {
+    matchNote = "Selección enfocada sobre actividad declarada del activo; revisa los registros de insiders/propiedad beneficiaria y la evidencia documental.";
+  }
+
+  const dl = document.createElement("dl");
+  const appendPair = (term, val) => {
+    dl.append(createElement("dt", "", term), createElement("dd", "", val));
+  };
+  appendPair("Quién declaró", described.actor);
+  appendPair("Qué declaró", described.label);
+  appendPair("Valor o cambio", described.formattedValue || "Ver detalle abajo");
+  if (described.period) appendPair("Período / evento", described.period);
+  appendPair("Cuándo se conoció", knownAtText);
+
+  const noteEl = createElement("p", "collection-status", matchNote);
+  const techDetails = document.createElement("details");
+  techDetails.className = "cazatiburones-tech-details";
+  techDetails.append(createElement("summary", "", "Campos técnicos de la notificación"));
+  const techDl = document.createElement("dl");
+  const appendTech = (term, val) => {
+    techDl.append(createElement("dt", "", term), createElement("dd", "", String(val ?? "—")));
+  };
+  appendTech("notification_id", ctx.notification_id || "—");
+  appendTech("rule_id", ctx.rule_id || "—");
+  appendTech("metric_key", ctx.metric_key || "—");
+  appendTech("cusip", ctx.cusip || "—");
+  appendTech(
+    "input_observation_ids",
+    Array.isArray(ctx.input_observation_ids) && ctx.input_observation_ids.length
+      ? ctx.input_observation_ids.join(", ")
+      : "—",
+  );
+  techDetails.append(techDl);
+
+  bodyEl.replaceChildren(dl, noteEl, techDetails);
+}
+
 function renderCazatiburonesFeatureGroup(containerId, label, features) {
   const container = byId(containerId);
   const collection = Array.isArray(features) ? features : [];
@@ -473,7 +655,11 @@ function renderCazatiburonesFeatureGroup(containerId, label, features) {
     container.append(createElement("strong", "cazatiburones-feature-group-title", label));
     if (collection.length === 0) {
       container.append(
-        renderAbsenceMark("missing", "Sin evidencia", `Sin ${label.toLowerCase()} declarados`),
+        renderAbsenceMark(
+          "missing",
+          "No hay declaraciones elegibles en este corte",
+          `Sin ${label.toLowerCase()} elegibles en este corte`,
+        ),
       );
       return;
     }
@@ -484,20 +670,32 @@ function renderCazatiburonesFeatureGroup(containerId, label, features) {
     cazatiburonesProgressiveVisibleCounts.set(containerId, visibleCount);
     for (const feature of collection.slice(0, visibleCount)) {
       const row = createElement("div", "cazatiburones-row");
-      const metricsMarkup = feature.metrics
-        .map((metric) => `<dt>${metric.key}</dt><dd>${cazatiburonesMetricMarkup(metric)}</dd>`)
+      const actorTitle = feature.participant_name
+        ? `${feature.participant_name} (CIK ${feature.participant_cik})`
+        : `Participante SEC CIK ${feature.participant_cik}`;
+      const metricsMarkup = (Array.isArray(feature.metrics) ? feature.metrics : [])
+        .map((metric) => {
+          const metricLabel = cazatiburonesEscapeHtml(cazatiburonesMetricLabel(metric.key));
+          return `<dt title="${cazatiburonesEscapeHtml(metric.key)}">${metricLabel}</dt><dd>${cazatiburonesMetricMarkup(metric)}</dd>`;
+        })
         .join("");
+      const eventDateText = cazatiburonesFieldOrAbsence(feature.event_date, formatCalendarDate);
+      const declaredNature = cazatiburonesFieldOrAbsence(feature.declared_nature);
+      const securityTitle = cazatiburonesFieldOrAbsence(feature.security_title);
+      const tableText = cazatiburonesFieldOrAbsence(feature.table);
       row.innerHTML =
-        `<p class="eyebrow">${feature.form} · ${feature.participant_cik}</p>` +
+        `<p class="eyebrow">${cazatiburonesEscapeHtml(actorTitle)} · ${cazatiburonesEscapeHtml(feature.form)}</p>` +
         `<dl>` +
-        `<dt>Naturaleza declarada</dt><dd>${cazatiburonesFieldOrAbsence(feature.declared_nature)}</dd>` +
-        `<dt>Título del valor</dt><dd>${cazatiburonesFieldOrAbsence(feature.security_title)}</dd>` +
-        `<dt>Tabla</dt><dd>${cazatiburonesFieldOrAbsence(feature.table)}</dd>` +
-        `<dt>Fecha del evento</dt><dd>${cazatiburonesFieldOrAbsence(feature.event_date, formatCalendarDate)}</dd>` +
-        `<dt>Disponible desde</dt><dd>${formatInstant(feature.available_at)}</dd>` +
+        `<dt>Naturaleza declarada</dt><dd>${declaredNature}</dd>` +
+        `<dt>Valor declarado</dt><dd>${securityTitle}</dd>` +
+        `<dt>Fecha del evento</dt><dd>${eventDateText}</dd>` +
+        `<dt>Conocido desde</dt><dd>${cazatiburonesEscapeHtml(formatInstant(feature.available_at))}</dd>` +
         `<dt>Comparación</dt><dd>${cazatiburonesComparisonMarkup(feature.comparison_status)}</dd>` +
         `${metricsMarkup}` +
-        `</dl>`;
+        `</dl>` +
+        `<details class="cazatiburones-tech-details"><summary>Campos técnicos</summary>` +
+        `<dl><dt>Tabla</dt><dd>${tableText}</dd><dt>CIK</dt><dd>${cazatiburonesEscapeHtml(feature.participant_cik)}</dd></dl>` +
+        `</details>`;
       container.append(row);
     }
     const status = createElement("p", "collection-status", "");
@@ -546,38 +744,78 @@ function renderCazatiburonesDeclaredActivity(payload) {
     (payload.truncated ? " · resultado truncado" : "");
 }
 
-function renderCazatiburonesInstitutionalObservations(payload, offset, limit) {
+function renderCazatiburonesInstitutionalObservations(payload, offset, limit, { isFull = false } = {}) {
   const container = byId("cazatiburones-institutional-observations-rows");
+  const fullBtn = byId("cazatiburones-load-full-btn");
   const observations = Array.isArray(payload.observations) ? payload.observations : [];
+  cazatiburonesLastObservationsPayload = payload;
+  if (fullBtn) {
+    fullBtn.classList.toggle("hidden", observations.length === 0 && !Number(payload.total_matching));
+    fullBtn.disabled = Boolean(isFull);
+    fullBtn.textContent = isFull ? "Detalle completo 13F cargado" : "Cargar detalle completo 13F";
+  }
   const render = () => {
     container.replaceChildren();
     if (observations.length === 0) {
       container.append(
-        renderAbsenceMark("missing", "Sin evidencia", "Sin observaciones institucionales 13F"),
+        renderAbsenceMark(
+          "missing",
+          "No hay declaraciones elegibles en este corte",
+          "Sin observaciones institucionales 13F elegibles en este corte",
+        ),
       );
     } else {
-      const visibleCount = progressiveCollectionVisibleCount(
+      let visibleCount = progressiveCollectionVisibleCount(
         observations.length,
         cazatiburonesProgressiveVisibleCounts.get("institutional-observations"),
       );
+      const firstMatchIdx = observations.findIndex((view) =>
+        Boolean(cazatiburonesObservationMatchesContext(view, cazatiburonesSelectedNotificationContext)),
+      );
+      if (firstMatchIdx >= visibleCount) {
+        visibleCount = Math.min(observations.length, firstMatchIdx + PROGRESSIVE_COLLECTION_PAGE_SIZE);
+      }
       cazatiburonesProgressiveVisibleCounts.set("institutional-observations", visibleCount);
       for (const view of observations.slice(0, visibleCount)) {
-        const row = createElement("div", "cazatiburones-row");
+        const isMatch = Boolean(
+          cazatiburonesObservationMatchesContext(view, cazatiburonesSelectedNotificationContext),
+        );
+        const row = createElement("div", `cazatiburones-row${isMatch ? " is-target-match" : ""}`);
         const compatibilityNotes = Array.isArray(view.compatibility_notes)
           ? view.compatibility_notes
           : [];
+        const managerLabel = view.report?.manager_name
+          ? `${view.report.manager_name} (CIK ${view.report.manager_cik})`
+          : `Gestor 13F CIK ${view.report?.manager_cik || "—"}`;
+        const fieldName = view.observation?.field_name || "";
+        const fieldLabel = CAZATIBURONES_FIELD_LABELS[fieldName] || fieldName || "Valor 13F";
+        const unitKey = view.observation?.unit || "";
+        const unitLabel = CAZATIBURONES_UNIT_LABELS[unitKey] || unitKey;
+        const formattedVal = view.observation?.value !== null && view.observation?.value !== undefined
+          ? `${formatDecimalRatio(view.observation.value, 4, { trimTrailingZeros: true })}${unitLabel ? ` ${unitLabel}` : ""}`
+          : renderAbsenceMark("missing", "Sin evidencia").outerHTML;
+        const periodRaw = view.report?.report_period || view.report?.report_of_date || view.observation?.period_end;
+        const periodText = periodRaw ? formatCalendarDate(periodRaw) : null;
+        const issuerLabel = view.row?.name_of_issuer || view.row?.title_of_class || assetDisplayLabel(cazatiburonesSelectedAssetId);
         row.innerHTML =
-          `<p class="eyebrow">${view.report.manager_cik} · ${view.report.report_id}</p>` +
+          `<p class="eyebrow">${cazatiburonesEscapeHtml(managerLabel)} · ${cazatiburonesEscapeHtml(fieldLabel)}</p>` +
           `<dl>` +
-          `<dt>CUSIP</dt><dd>${view.row.cusip}</dd>` +
-          `<dt>Campo</dt><dd>${view.observation.field_name}</dd>` +
-          `<dt>Valor as-filed</dt><dd><span class="figure" title="Valor exacto: ${view.observation.value} ${view.observation.unit}">${formatDecimalRatio(view.observation.value, 4, { trimTrailingZeros: true })}</span></dd>` +
-          `<dt>Unidad</dt><dd>${view.observation.unit}</dd>` +
-          `<dt>Disponible desde</dt><dd>${formatInstant(view.observation.available_at)}</dd>` +
+          `<dt>Emisor / clase</dt><dd>${cazatiburonesEscapeHtml(issuerLabel)}</dd>` +
+          `<dt>Declarado (as-filed)</dt><dd><span class="figure" title="Valor exacto: ${cazatiburonesEscapeHtml(view.observation?.value)} ${cazatiburonesEscapeHtml(unitKey)}">${formattedVal}</span></dd>` +
+          (periodText ? `<dt>Período del informe</dt><dd>${cazatiburonesEscapeHtml(periodText)}</dd>` : "") +
+          `<dt>Conocido desde</dt><dd>${cazatiburonesEscapeHtml(formatInstant(view.observation?.available_at))}</dd>` +
+          `</dl>` +
+          `<details class="cazatiburones-tech-details"><summary>Campos técnicos</summary>` +
+          `<dl>` +
+          `<dt>CUSIP</dt><dd>${cazatiburonesEscapeHtml(view.row?.cusip || "—")}</dd>` +
+          `<dt>Report ID</dt><dd>${cazatiburonesEscapeHtml(view.report?.report_id || "—")}</dd>` +
+          `<dt>Campo</dt><dd>${cazatiburonesEscapeHtml(fieldName || "—")}</dd>` +
+          `<dt>Unidad</dt><dd>${cazatiburonesEscapeHtml(unitKey || "—")}</dd>` +
           `</dl>` +
           (compatibilityNotes.length > 0
-            ? `<p class="collection-status">Compatibilidad: ${compatibilityNotes.join(", ")}</p>`
-            : "");
+            ? `<p class="collection-status">Compatibilidad: ${cazatiburonesEscapeHtml(compatibilityNotes.join(", "))}</p>`
+            : "") +
+          `</details>`;
         container.append(row);
       }
       const renderedCount = cazatiburonesProgressiveVisibleCounts.get("institutional-observations");
@@ -610,16 +848,18 @@ function renderCazatiburonesInstitutionalObservations(payload, offset, limit) {
     }
   };
   render();
+  renderCazatiburonesSelectedContext(observations);
   const latestAvailable = observations
     .map((view) => view?.observation?.available_at)
     .filter(Boolean)
     .sort()
     .pop();
   const chronoNote = latestAvailable ? ` · último disponible ${formatInstant(latestAvailable)}` : "";
+  const modeNote = isFull ? "detalle completo" : "resumen";
   byId("cazatiburones-institutional-observations-summary").innerHTML =
     `<span class="figure">${formatInteger(observations.length)}</span> de ` +
     `<span class="figure">${formatInteger(payload.total_matching)}</span> filas as-filed ` +
-    `· página offset <span class="figure">${formatInteger(offset)}</span> ` +
+    `(${modeNote}) · offset <span class="figure">${formatInteger(offset)}</span> ` +
     `límite <span class="figure">${formatInteger(limit)}</span>` +
     chronoNote +
     (payload.truncated ? " · truncado" : "");
@@ -632,7 +872,11 @@ function renderCazatiburonesTimelineGroup(container, title, entries, key) {
     );
     if (entries.length === 0) {
       container.append(
-        renderAbsenceMark("missing", "Sin evidencia", "Sin revisiones documentales SEC"),
+        renderAbsenceMark(
+          "missing",
+          "No hay declaraciones elegibles en este corte",
+          "Sin revisiones documentales SEC elegibles en este corte",
+        ),
       );
       return;
     }
@@ -644,16 +888,19 @@ function renderCazatiburonesTimelineGroup(container, title, entries, key) {
     for (const entry of entries.slice(0, visibleCount)) {
       const row = createElement("div", "cazatiburones-row");
       row.innerHTML =
-        `<p class="eyebrow">${entry.form} · ${entry.accession}</p>` +
+        `<p class="eyebrow">${cazatiburonesEscapeHtml(entry.form)} · ${cazatiburonesEscapeHtml(formatCalendarDate(entry.filing_date))}</p>` +
         `<dl>` +
-        `<dt>Fecha de presentación</dt><dd>${formatCalendarDate(entry.filing_date)}</dd>` +
-        `<dt>Fecha del reporte</dt><dd>${cazatiburonesFieldOrAbsence(entry.report_date, formatCalendarDate)}</dd>` +
-        `<dt>Aceptado</dt><dd>${formatInstant(entry.accepted_at)}</dd>` +
-        `<dt>Disponible desde</dt><dd>${formatInstant(entry.available_at)}</dd>` +
+        `<dt>Presentación SEC</dt><dd>${cazatiburonesEscapeHtml(formatCalendarDate(entry.filing_date))}</dd>` +
+        `<dt>Período del informe</dt><dd>${cazatiburonesFieldOrAbsence(entry.report_date, formatCalendarDate)}</dd>` +
+        `<dt>Aceptado</dt><dd>${cazatiburonesEscapeHtml(formatInstant(entry.accepted_at))}</dd>` +
+        `<dt>Conocido desde</dt><dd>${cazatiburonesEscapeHtml(formatInstant(entry.available_at))}</dd>` +
         `<dt>Enmienda</dt><dd>${entry.is_amendment ? "Sí" : "No"}</dd>` +
-        `<dt>SHA-256</dt><dd>${entry.content_sha256}</dd>` +
-        `<dt>Fuente</dt><dd>${entry.source_url}</dd>` +
-        `</dl>`;
+        `</dl>` +
+        `<details class="cazatiburones-tech-details"><summary>Campos técnicos</summary>` +
+        `<dl><dt>Accession</dt><dd>${cazatiburonesEscapeHtml(entry.accession)}</dd>` +
+        `<dt>SHA-256</dt><dd>${cazatiburonesEscapeHtml(entry.content_sha256)}</dd>` +
+        `<dt>Fuente</dt><dd>${cazatiburonesEscapeHtml(entry.source_url)}</dd></dl>` +
+        `</details>`;
       container.append(row);
     }
     const status = createElement("p", "collection-status", "");
@@ -716,6 +963,37 @@ function renderCazatiburonesDocumentTimeline(payload) {
     (payload.truncated ? " · truncado" : "");
 }
 
+async function loadCazatiburonesFullObservations() {
+  const assetId = cazatiburonesSelectedAssetId;
+  const knownAt = byId("report-known-at").value.trim();
+  const fullBtn = byId("cazatiburones-load-full-btn");
+  if (!assetId || !knownAt) return;
+  const offset = 0;
+  const limit = 200;
+  const parameters = new URLSearchParams({
+    asset_id: assetId,
+    known_at: knownAt,
+    offset: String(offset),
+    limit: String(limit),
+    projection: "full",
+  });
+  if (fullBtn) {
+    fullBtn.disabled = true;
+    fullBtn.textContent = "Cargando detalle completo…";
+  }
+  try {
+    const payload = await api(`/api/v1/cazatiburones/institutional-observations?${parameters.toString()}`);
+    if (assetId !== cazatiburonesSelectedAssetId || knownAt !== byId("report-known-at").value.trim()) return;
+    renderCazatiburonesInstitutionalObservations(payload, offset, limit, { isFull: true });
+  } catch (error) {
+    if (fullBtn) {
+      fullBtn.disabled = false;
+      fullBtn.textContent = "Reintentar detalle completo 13F";
+    }
+    byId("cazatiburones-institutional-observations-summary").textContent = error.message;
+  }
+}
+
 async function loadCazatiburonesBoard(assetId = cazatiburonesSelectedAssetId) {
   const sequence = ++cazatiburonesRequestSequence;
   if (!assetId || assetId !== cazatiburonesSelectedAssetId) return;
@@ -749,6 +1027,7 @@ async function loadCazatiburonesBoard(assetId = cazatiburonesSelectedAssetId) {
   notApplicable.replaceChildren();
   content.classList.remove("hidden");
   content.hidden = false;
+  renderCazatiburonesSelectedContext([]);
   byId("cazatiburones-declared-activity-summary").textContent = "Consultando…";
   byId("cazatiburones-institutional-observations-summary").textContent = "Consultando…";
   byId("cazatiburones-document-timeline-summary").textContent = "Consultando…";

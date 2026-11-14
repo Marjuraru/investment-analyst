@@ -527,6 +527,19 @@ byId("sistema-incidencias")?.addEventListener("toggle", (event) => {
   }
 });
 
+byId("mesa-screening-all-btn")?.addEventListener("click", () => {
+  activateBoard("revisar", { focus: true });
+  selectRevisarSubtab("candidates");
+});
+
+byId("mesa-caza-board-btn")?.addEventListener("click", () => {
+  activateBoard("cazatiburones", { focus: true });
+});
+
+byId("mesa-research-system-btn")?.addEventListener("click", () => {
+  void navigateToContext({ board: "sistema", panel: "sistema-investigacion" });
+});
+
 byId("crypto-derivatives-panel").addEventListener("toggle", (event) => {
   if (event.currentTarget.open && cryptoDerivativesPayload === null) void queryCryptoDerivatives();
 });
@@ -634,6 +647,10 @@ const CONTEXTUAL_NAVIGATION_REGISTRY = Object.freeze({
     boardId: "cazatiburones",
     families: Object.freeze(["activity", "institutional"]),
   }),
+  sistema: Object.freeze({
+    boardId: "sistema",
+    panels: Object.freeze(["sistema-incidencias", "sistema-verificacion", "sistema-investigacion"]),
+  }),
 });
 
 function contextualIdentity(value) {
@@ -654,10 +671,24 @@ function resolveContextualDestination(request) {
     return Object.freeze({ boardId: "activo", assetId, subtab });
   }
 
+  if (request.board === "sistema") {
+    const panel = contextualIdentity(request.panel);
+    if (panel && !definition.panels.includes(panel)) return null;
+    return Object.freeze({ boardId: "sistema", panel: panel || null });
+  }
+
   const id = contextualIdentity(request.id);
   const family = contextualIdentity(request.family);
   if (!id || !family || !definition.families.includes(family)) return null;
-  if (request.board === "cazatiburones" && !marketAssets[id]) return null;
+  if (request.board === "cazatiburones") {
+    if (!marketAssets[id]) return null;
+    return Object.freeze({
+      boardId: "cazatiburones",
+      family,
+      id,
+      context: request.context && typeof request.context === "object" ? request.context : null,
+    });
+  }
   return Object.freeze({ boardId: request.board, family, id });
 }
 
@@ -716,7 +747,20 @@ function navigateToCazatiburonesContext(target) {
   if (typeof selectCazatiburonesNotificationTarget !== "function") {
     return contextualNavigationUnavailable("la seleccion local de Cazatiburones todavia no esta disponible.");
   }
-  return selectCazatiburonesNotificationTarget(target.id, target.family);
+  return selectCazatiburonesNotificationTarget(target.id, target.family, target.context || null);
+}
+
+function navigateToSystemContext(target) {
+  activateBoard("sistema", { focus: true });
+  if (target.panel) {
+    const panel = byId(target.panel);
+    if (panel) {
+      panel.open = true;
+      panel.scrollIntoView?.({ block: "start" });
+      panel.querySelector?.("summary")?.focus?.();
+    }
+  }
+  return true;
 }
 
 function navigateToContext(request) {
@@ -727,6 +771,7 @@ function navigateToContext(request) {
   if (target.boardId === "activo") return navigateToAssetContext(target);
   if (target.boardId === "revisar") return navigateToReviewContext(target);
   if (target.boardId === "cazatiburones") return navigateToCazatiburonesContext(target);
+  if (target.boardId === "sistema") return navigateToSystemContext(target);
   return contextualNavigationUnavailable("el tablero no esta habilitado.");
 }
 
