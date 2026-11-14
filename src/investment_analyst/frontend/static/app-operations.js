@@ -1444,7 +1444,12 @@ function renderCandidateNotificationRows() {
 function renderCandidateNotifications(payload) {
   candidateNotificationPayload = payload;
   candidateNotificationVisibleCount = PROGRESSIVE_COLLECTION_PAGE_SIZE;
-  renderCandidateNotificationRows();
+  if (byId("candidate-notifications")) renderCandidateNotificationRows();
+}
+
+function shareCandidateNotificationPayload(payload) {
+  if (!payload || typeof payload !== "object") return;
+  renderCandidateNotifications(payload);
 }
 
 async function acknowledgeCandidateNotification(notificationId, button) {
@@ -1454,15 +1459,23 @@ async function acknowledgeCandidateNotification(notificationId, button) {
       method: "POST",
       body: JSON.stringify({ notification_id: notificationId }),
     });
-    await Promise.all([loadCandidateNotifications(), refreshOverview()]);
+    await Promise.all([
+      loadCandidateNotifications({ force: true }),
+      refreshOverview(),
+      typeof loadMesaAnalyticalNews === "function" ? loadMesaAnalyticalNews() : Promise.resolve(),
+    ]);
   } catch (error) {
     setMessage(`No se pudo confirmar la notificación: ${error.message}`, true);
     button.disabled = false;
   }
 }
 
-async function loadCandidateNotifications() {
+async function loadCandidateNotifications({ force = false } = {}) {
   const inbox = byId("candidate-notifications");
+  if (!force && candidateNotificationPayload !== null) {
+    renderCandidateNotificationRows();
+    return;
+  }
   inbox.setAttribute("aria-busy", "true");
   try {
     renderCandidateNotifications(await api("/api/v1/candidate-notifications"));
@@ -1748,23 +1761,40 @@ function renderRevisarExploreResults() {
   }
   for (const ov of matches) {
     const row = createElement("div", "review-explore-item");
-    const peRaw = ov.valuation?.price_to_earnings?.value;
-    const nmRaw = ov.fundamental?.net_margin?.value;
-    const levRaw = ov.fundamental?.liabilities_to_assets?.value;
-    const peText = formatDecimalMultiple(peRaw, 2);
-    const nmText = formatDecimalPercentFromRatio(nmRaw, { decimals: 2, signed: true });
-    const levText = formatDecimalRatio(levRaw, 2);
+    const peMetric = ov.valuation?.price_to_earnings;
+    const nmMetric = ov.fundamental?.net_margin;
+    const levMetric = ov.fundamental?.liabilities_to_assets;
+    const peRaw = peMetric?.value;
+    const nmRaw = nmMetric?.value;
+    const levRaw = levMetric?.value;
+    const peText = peMetric?.state === "available" ? formatDecimalMultiple(peRaw, 2) : "—";
+    const nmText = nmMetric?.state === "available"
+      ? formatDecimalPercentFromRatio(nmRaw, { decimals: 2, signed: true })
+      : "—";
+    const levText = levMetric?.state === "available" ? formatDecimalRatio(levRaw, 2) : "—";
     const metricsEl = createElement(
       "span",
       "review-explore-metrics",
       `P/E: ${peText} · Margen neto: ${nmText} · Pasivos/Activos: ${levText}`,
     );
+    const describeAbsence = (label, metric) => {
+      if (!metric || metric.state === "available") return null;
+      if (metric.state === "not_applicable") return `${label}: No aplica a este perfil`;
+      const reason = typeof mesaFullAbsenceDescription === "function"
+        ? mesaFullAbsenceDescription(metric)
+        : "Sin datos";
+      return `${label}: ${reason}`;
+    };
     const exactSummary = [
-      peRaw !== null && peRaw !== undefined && String(peRaw).trim() !== "" ? `P/E exacto: ${peRaw}` : null,
+      peRaw !== null && peRaw !== undefined && String(peRaw).trim() !== ""
+        ? `P/E exacto: ${peRaw}`
+        : describeAbsence("P/E", peMetric),
       nmRaw !== null && nmRaw !== undefined && String(nmRaw).trim() !== ""
         ? `Margen neto exacto: ${formatExactDecimalText(nmRaw)}`
-        : null,
-      levRaw !== null && levRaw !== undefined && String(levRaw).trim() !== "" ? `Pasivos/Activos exacto: ${levRaw}` : null,
+        : describeAbsence("Margen neto", nmMetric),
+      levRaw !== null && levRaw !== undefined && String(levRaw).trim() !== ""
+        ? `Pasivos/Activos exacto: ${levRaw}`
+        : describeAbsence("Pasivos/Activos", levMetric),
     ].filter(Boolean);
     if (exactSummary.length) {
       const exactText = exactSummary.join(" · ");

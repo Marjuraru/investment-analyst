@@ -242,7 +242,10 @@ function renderMarketComparison(payload) {
     const card = document.createElement("article");
     card.className = "comparison-card";
     const identity = marketAssets[series.asset_id];
-    const notApplicableMark = renderAbsenceMark("not-applicable", "No aplica", "Activo de referencia").outerHTML;
+    const rawNotApplicableMark = renderAbsenceMark("not-applicable", "No aplica", "Activo de referencia");
+    const notApplicableMark = (typeof wrapValueAbsenceMark === "function"
+      ? wrapValueAbsenceMark(rawNotApplicableMark, "not-applicable", "Activo de referencia")
+      : rawNotApplicableMark).outerHTML;
     // The backend contract declares three statuses -- available, unavailable,
     // not_applicable (comparison_models.py) -- not just a binary
     // applicable/not_applicable split. "unavailable" means the metric was
@@ -271,14 +274,16 @@ function renderMarketComparison(payload) {
           : `<span class="figure" title="Correlación exacta: ${series.metrics.correlation_to_benchmark ?? ""}">${comparisonPercent(series.metrics.correlation_to_benchmark)}</span>`;
     const betaValue = series.metrics.beta_to_benchmark;
     const betaDisplay = betaValue === null || betaValue === undefined
-      ? "No disponible"
+      ? "—"
       : formatDecimalRatio(betaValue, 2);
     const beta =
       series.metrics.beta_status === "not_applicable"
         ? notApplicableMark
         : series.metrics.beta_status === "unavailable"
           ? betaUnavailableMark
-          : `<span class="figure" title="Beta exacto: ${betaValue ?? ""}">${betaDisplay}</span>`;
+          : betaValue === null || betaValue === undefined
+            ? renderAbsenceMark("missing", "Sin evidencia", "Beta no disponible en el corte").outerHTML
+            : `<span class="figure" title="Beta exacto: ${betaValue}">${betaDisplay}</span>`;
     card.innerHTML = `<p class="eyebrow">${identity?.symbol || series.asset_id}</p><h3>${identity?.name || series.asset_id}</h3><dl><dt>Retorno total</dt><dd><span class="figure">${comparisonPercent(series.metrics.total_return)}</span></dd><dt>Drawdown máximo</dt><dd><span class="figure">${comparisonPercent(series.metrics.maximum_drawdown)}</span></dd><dt>Volatilidad diaria</dt><dd><span class="figure">${comparisonPercent(series.metrics.daily_volatility)}</span></dd><dt>Correlación</dt><dd>${correlation}</dd><dt>Beta</dt><dd>${beta}</dd></dl>`;
     const identityLink = createContextualNavigationButton(
       identity?.symbol || series.asset_id,

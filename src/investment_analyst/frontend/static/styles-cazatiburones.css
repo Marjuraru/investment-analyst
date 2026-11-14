@@ -226,3 +226,49 @@
 .cazatiburones-detail-header {
   flex-wrap: wrap;
 }
+
+.cazatiburones-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.cazatiburones-context-panel {
+  border-color: var(--accent);
+  background: var(--surface-subtle);
+}
+
+.cazatiburones-context-body {
+  display: grid;
+  gap: 0.35rem;
+  font-size: var(--base-font-size);
+}
+
+.cazatiburones-row.is-target-match {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.cazatiburones-evidence-disclosure > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.cazatiburones-evidence-hint {
+  color: var(--accent-dark);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.cazatiburones-tech-details {
+  margin-top: 0.45rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--line);
+}
+
+.cazatiburones-tech-details > summary {
+  cursor: pointer;
+  color: var(--muted-strong);
+  font-size: 0.72rem;
+  font-weight: 700;
+}

@@ -1,9 +1,8 @@
 "use strict";
 
-// UI-6: Mesa's "Novedades" layer, reglas analíticas family. Reuses
-// /api/v1/candidate-notifications exactly as the revisar/sistema panels
-// already do; this is a second, independent read into Mesa's own
-// container, never the same DOM id as those boards.
+// Mesa's quick panel ("Novedades y señales"): reuses /api/v1/candidate-notifications
+// (shared with Revisar via shareCandidateNotificationPayload) and separate family reads for
+// Cazatiburones (never summed across families, max 3 displayed in lateral quick panel).
 let mesaAnalyticalNewsRequestSequence = 0;
 
 function mesaContextualNavigationItem(className, accessibleLabel, request, content) {
@@ -19,6 +18,9 @@ function mesaContextualNavigationItem(className, accessibleLabel, request, conte
     copy.append(createElement("span", "mesa-contextual-asset", content.assetLabel));
   }
   const meta = createElement("span", "mesa-contextual-meta");
+  if (content.familyLabel) {
+    meta.append(createElement("span", "mesa-caza-family-chip", content.familyLabel));
+  }
   meta.append(
     createElement("time", "", content.timestamp),
     createElement("span", `alert-inbox-status ${content.statusClass}`, content.statusLabel),
@@ -41,29 +43,35 @@ function mesaNotificationStatusLabel(status) {
     || "Sin estado";
 }
 
+function setMesaRetryButtonVisible(buttonId, visible) {
+  const btn = byId(buttonId);
+  if (btn) btn.classList.toggle("hidden", !visible);
+}
+
 function renderMesaAnalyticalNews(payload) {
   const list = byId("mesa-news-analytical-list");
   const count = byId("mesa-news-analytical-count");
+  setMesaRetryButtonVisible("mesa-news-analytical-retry", false);
   const items = Array.isArray(payload.items) ? payload.items : [];
   const total = Number.isInteger(payload.total) ? payload.total : items.length;
   const pendingCount = Number.isInteger(payload.pending_count) ? payload.pending_count : 0;
   count.textContent = `Bandeja: ${formatInteger(total)} · ${formatInteger(pendingCount)} sin acuse`;
   list.replaceChildren();
   if (items.length === 0) {
-    list.append(createElement("p", "", "Sin candidatos nuevos de reglas analíticas."));
+    list.append(createElement("p", "", "Sin candidatos nuevos por regla determinística."));
     return;
   }
-  for (const view of items.slice(0, 5)) {
+  for (const view of items.slice(0, 3)) {
     const notification = view.item;
-    const title = mesaNotificationTitle(notification, "Candidato analítico");
+    const title = mesaNotificationTitle(notification, "Candidato por regla");
     const assetLabel = assetDisplayLabel(notification.asset_id);
     const item = mesaContextualNavigationItem(
       "mesa-analytical-item",
-      `Abrir ${title} · ${assetLabel}`,
+      `Abrir candidato ${title} · ${assetLabel}`,
       { board: "revisar", family: "candidate", id: notification.candidate_id },
       {
         title,
-        assetLabel,
+        assetLabel: `${assetLabel} · Regla determinística`,
         statusClass: view.status,
         statusLabel: mesaNotificationStatusLabel(view.status),
         timestamp: formatInstant(notification.created_at),
@@ -76,15 +84,22 @@ function renderMesaAnalyticalNews(payload) {
 async function loadMesaAnalyticalNews() {
   const sequence = ++mesaAnalyticalNewsRequestSequence;
   const list = byId("mesa-news-analytical-list");
+  const count = byId("mesa-news-analytical-count");
+  setMesaRetryButtonVisible("mesa-news-analytical-retry", false);
   list.setAttribute("aria-busy", "true");
   try {
     const payload = await api("/api/v1/candidate-notifications");
     if (sequence !== mesaAnalyticalNewsRequestSequence) return;
+    if (typeof shareCandidateNotificationPayload === "function") {
+      shareCandidateNotificationPayload(payload);
+    }
     renderMesaAnalyticalNews(payload);
   } catch (error) {
     if (sequence !== mesaAnalyticalNewsRequestSequence) return;
+    count.textContent = "Sin consulta";
+    setMesaRetryButtonVisible("mesa-news-analytical-retry", true);
     list.replaceChildren(
-      createElement("p", "", `No se pudieron consultar las novedades: ${error.message}`),
+      createElement("p", "", `No se pudieron consultar candidatos de screening: ${error.message}`),
     );
   } finally {
     if (sequence === mesaAnalyticalNewsRequestSequence) list.setAttribute("aria-busy", "false");
@@ -99,68 +114,146 @@ const MESA_CAZATIBURONES_STATUS_LABELS = Object.freeze({
   acknowledged: "Acusada",
 });
 
-function renderMesaCazatiburonesNews(family, payload) {
-  const list = byId(`mesa-news-${family}-list`);
-  const count = byId(`mesa-news-${family}-count`);
-  const items = Array.isArray(payload.items) ? payload.items : [];
+const mesaCazatiburonesQuickState = {
+  institutional: { status: "idle", payload: null, error: null },
+  activity: { status: "idle", payload: null, error: null },
+};
+
+function mesaNotificationRecencyComparator(a, b) {
+  const isoA = String(a.item?.available_at || a.item?.created_at || "");
+  const isoB = String(b.item?.available_at || b.item?.created_at || "");
+  const timeA = isoA ? Date.parse(isoA) : NaN;
+  const timeB = isoB ? Date.parse(isoB) : NaN;
+  if (Number.isFinite(timeA) && Number.isFinite(timeB) && timeA !== timeB) {
+    return timeB - timeA;
+  }
+  if (isoA !== isoB) return isoB.localeCompare(isoA);
+  return String(a.item?.notification_id || "").localeCompare(String(b.item?.notification_id || ""));
+}
+
+function renderMesaCazatiburonesQuickPanel() {
+  const list = byId("mesa-cazatiburones-quick-list");
+  if (!list) return;
   list.replaceChildren();
-  if (!payload.enabled) {
-    count.textContent = "Bandeja no configurada";
-    list.append(renderAbsenceMark("blocked", "Bloqueada", "La outbox no está configurada en el servicio"));
+  const families = ["institutional", "activity"];
+  const combined = [];
+  const notices = [];
+  let loadingCount = 0;
+  let errorCount = 0;
+  let disabledCount = 0;
+
+  for (const family of families) {
+    const state = mesaCazatiburonesQuickState[family];
+    const familyLabel = family === "institutional" ? "Institucional 13F" : "Actividad declarada";
+    if (state.status === "loading" || state.status === "idle") {
+      loadingCount += 1;
+      continue;
+    }
+    if (state.status === "error") {
+      errorCount += 1;
+      notices.push(createElement("p", "mesa-aside-note", `Error en ${familyLabel}: ${state.error || "consulta fallida"}`));
+      continue;
+    }
+    const payload = state.payload || {};
+    if (!payload.enabled) {
+      disabledCount += 1;
+      notices.push(renderAbsenceMark("blocked", `${familyLabel}: bloqueada`, "La outbox no está configurada en el servicio"));
+      continue;
+    }
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    for (const view of items) {
+      if (view && view.item) {
+        combined.push({ family, view, item: view.item });
+      }
+    }
+  }
+
+  for (const notice of notices) list.append(notice);
+
+  if (combined.length > 0) {
+    combined.sort(mesaNotificationRecencyComparator);
+    for (const entry of combined.slice(0, 3)) {
+      const notification = entry.item;
+      const described = typeof describeCazatiburonesNotice === "function"
+        ? describeCazatiburonesNotice(notification, entry.family)
+        : {
+          familyLabel: entry.family === "institutional" ? "Institucional 13F" : "Actividad declarada",
+          title: mesaNotificationTitle(notification, "Declaración institucional"),
+          assetLabel: assetDisplayLabel(notification.asset_id),
+          subtitle: "",
+        };
+      const item = mesaContextualNavigationItem(
+        `mesa-cazatiburones-${entry.family}-item`,
+        `Abrir ${described.title} · ${described.assetLabel}`,
+        { board: "cazatiburones", family: entry.family, id: notification.asset_id, context: notification },
+        {
+          title: described.title,
+          assetLabel: described.subtitle || described.assetLabel,
+          familyLabel: described.familyLabel,
+          statusClass: entry.view.status,
+          statusLabel: mesaNotificationStatusLabel(entry.view.status),
+          timestamp: formatInstant(notification.available_at || notification.created_at),
+        },
+      );
+      list.append(item);
+    }
     return;
   }
-  const total = Number.isInteger(payload.total) ? payload.total : items.length;
-  const pendingCount = Number.isInteger(payload.pending_count) ? payload.pending_count : 0;
-  count.textContent = `Bandeja: ${formatInteger(total)} · ${formatInteger(pendingCount)} sin acuse`;
-  if (total === 0) {
-    list.append(createElement("p", "", "Sin novedades en esta bandeja."));
+
+  if (loadingCount === families.length) {
+    list.append(createElement("p", "", "Cargando novedades de Cazatiburones…"));
     return;
   }
-  if (payload.truncated) {
-    const returned = Number.isInteger(payload.returned) ? payload.returned : items.length;
-    list.append(createElement("p", "", `Se muestran ${formatInteger(returned)} de ${formatInteger(total)} novedades.`));
+  if (errorCount === families.length || disabledCount === families.length) {
+    return;
   }
-  for (const view of items.slice(0, 5)) {
-    const notification = view.item;
-    const title = mesaNotificationTitle(
-      notification,
-      family === "institutional" ? "Actividad institucional" : "Actividad declarada",
-    );
-    const assetLabel = assetDisplayLabel(notification.asset_id);
-    const item = mesaContextualNavigationItem(
-      "mesa-cazatiburones-" + family + "-item",
-      `Abrir ${title} · ${assetLabel}`,
-      { board: "cazatiburones", family, id: notification.asset_id },
-      {
-        title,
-        assetLabel,
-        statusClass: view.status,
-        statusLabel: mesaNotificationStatusLabel(view.status),
-        timestamp: formatInstant(notification.created_at),
-      },
-    );
-    list.append(item);
+  if (loadingCount > 0) {
+    list.append(createElement("p", "", "Consultando segunda familia…"));
+    return;
   }
+  list.append(createElement("p", "", "Sin novedades recientes en Cazatiburones."));
+}
+
+function renderMesaCazatiburonesNews(family, payload) {
+  const count = byId(`mesa-news-${family}-count`);
+  setMesaRetryButtonVisible(`mesa-news-${family}-retry`, false);
+  mesaCazatiburonesQuickState[family] = { status: "loaded", payload, error: null };
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  if (count) {
+    if (!payload.enabled) {
+      count.textContent = "Bandeja no configurada";
+    } else {
+      const total = Number.isInteger(payload.total) ? payload.total : items.length;
+      const pendingCount = Number.isInteger(payload.pending_count) ? payload.pending_count : 0;
+      count.textContent = `${formatInteger(total)} · ${formatInteger(pendingCount)} sin acuse`;
+    }
+  }
+  renderMesaCazatiburonesQuickPanel();
 }
 
 async function loadMesaCazatiburonesNews(family, request) {
   const sequence = family === "institutional"
     ? ++mesaInstitutionalNewsRequestSequence
     : ++mesaActivityNewsRequestSequence;
-  const list = byId(`mesa-news-${family}-list`);
-  list.setAttribute("aria-busy", "true");
+  const list = byId("mesa-cazatiburones-quick-list");
+  const count = byId(`mesa-news-${family}-count`);
+  mesaCazatiburonesQuickState[family] = { status: "loading", payload: null, error: null };
+  setMesaRetryButtonVisible(`mesa-news-${family}-retry`, false);
+  if (count && count.textContent === "—") count.textContent = "Consultando…";
+  if (list) list.setAttribute("aria-busy", "true");
   try {
     const payload = await request();
     if (sequence !== (family === "institutional" ? mesaInstitutionalNewsRequestSequence : mesaActivityNewsRequestSequence)) return;
     renderMesaCazatiburonesNews(family, payload);
   } catch (error) {
     if (sequence !== (family === "institutional" ? mesaInstitutionalNewsRequestSequence : mesaActivityNewsRequestSequence)) return;
-    list.replaceChildren(
-      createElement("p", "", `No se pudieron consultar las novedades: ${error.message}`),
-    );
+    mesaCazatiburonesQuickState[family] = { status: "error", payload: null, error: error.message };
+    if (count) count.textContent = "Sin consulta";
+    setMesaRetryButtonVisible(`mesa-news-${family}-retry`, true);
+    renderMesaCazatiburonesQuickPanel();
   } finally {
     if (sequence === (family === "institutional" ? mesaInstitutionalNewsRequestSequence : mesaActivityNewsRequestSequence)) {
-      list.setAttribute("aria-busy", "false");
+      if (list) list.setAttribute("aria-busy", "false");
     }
   }
 }
@@ -794,27 +887,66 @@ function renderInvestorValueCell(val, options = {}) {
       if (parsed && parsed.sign > 0) toneClass = " is-positive";
       else if (parsed && parsed.sign < 0) toneClass = " is-negative";
     }
-    const primary = createElement("span", `mesa-value-primary${toneClass}`, formatted);
-    primary.title = typeof formatExactDecimalText === "function"
+    const isDiffDate = Boolean(options.isDifferentPriceDate && options.priceDate);
+    const primary = createElement(
+      "span",
+      `mesa-value-primary${toneClass}${isDiffDate ? " is-date-diff" : ""}`,
+      formatted,
+    );
+    const exactTitle = typeof formatExactDecimalText === "function"
       ? `Exacto: ${formatExactDecimalText(val.value, options.unitSuffix?.trim() || "")}`
       : String(val.value);
+    if (isDiffDate) {
+      const tokenEl = createElement("span", "mesa-date-diff-token", "†");
+      tokenEl.setAttribute("aria-hidden", "true");
+      primary.append(tokenEl);
+      primary.title = `${exactTitle} · Fecha de cierre: ${options.priceDate} (distinta a última fecha del tablero)`;
+      primary.setAttribute(
+        "aria-label",
+        `${formatted}, fecha de cierre ${options.priceDate} (distinta a la más reciente del tablero)`,
+      );
+    } else {
+      primary.title = exactTitle;
+    }
     wrap.append(primary);
-    if (options.isDifferentPriceDate && options.priceDate) {
-      const badgeEl = createElement("span", "mesa-date-badge", "Otra fecha");
-      badgeEl.title = `Fecha de cierre: ${options.priceDate}`;
-      badgeEl.setAttribute("aria-label", `Fecha de cierre distinta: ${options.priceDate}`);
-      wrap.append(badgeEl);
+    return wrap;
+  }
+  if (val.state === "not_applicable") {
+    const full = mesaFullAbsenceDescription(val) || "No aplica a este perfil o tipo de activo";
+    if (typeof renderValueNotApplicableDash === "function") {
+      wrap.append(renderValueNotApplicableDash(full));
+    } else {
+      const dash = createElement("span", "mesa-value-dash is-not-applicable", "—");
+      dash.title = full;
+      dash.setAttribute("aria-label", full);
+      wrap.append(dash);
     }
     return wrap;
   }
   const brief = mesaBriefStateLabel(val);
-  const full = mesaFullAbsenceDescription(val);
-  const pill = createElement("span", `mesa-status-pill state-${val.state}`, brief);
-  if (full) {
-    pill.title = full;
-    pill.setAttribute("aria-label", full);
+  const full = mesaFullAbsenceDescription(val) || brief;
+  if (val.state === "error") {
+    const pill = createElement("span", "mesa-status-pill state-error", brief);
+    if (full) {
+      pill.title = full;
+      pill.setAttribute("aria-label", full);
+    }
+    wrap.append(pill);
+    return wrap;
   }
-  wrap.append(pill);
+  const dash = createElement("span", `mesa-value-dash is-${val.state || "missing"}`);
+  if (full) {
+    dash.title = full;
+    dash.setAttribute("aria-label", full);
+  }
+  const infoMark = createElement(
+    "span",
+    "mesa-absence-info",
+    val.state === "not_configured" ? "!" : "i",
+  );
+  infoMark.setAttribute("aria-hidden", "true");
+  dash.append("—", infoMark);
+  wrap.append(dash);
   return wrap;
 }
 
@@ -985,27 +1117,29 @@ function renderMesaInvestorTable() {
     const tr = document.createElement("tr");
     tr.dataset.assetId = assetId;
 
-    // 1. Activo / clase traducida
+    // 1. Activo (ticker + nombre en 1 línea truncada; clase y bolsa en Detalle/tooltip)
     const tdAsset = document.createElement("td");
     const assetCell = createElement("div", "mesa-asset-cell");
+    const classLabel = typeof translateAssetClass === "function"
+      ? translateAssetClass(entry.assetClass)
+      : entry.assetClass;
+    const exchangeLabel = entry.exchange || "Sin bolsa";
     const line1 = createElement("div", "mesa-asset-line1");
     const assetBtn = createContextualNavigationButton(
       entry.symbol,
       { board: "activo", assetId, subtab: "mercado" },
       "mesa-asset-ticker-btn",
     );
-    assetBtn.title = `${entry.symbol} — ${entry.name}`;
-    assetBtn.setAttribute("aria-label", `Abrir ${entry.symbol}, ${entry.name}`);
+    assetBtn.title = `${entry.symbol} — ${entry.name || entry.symbol} · ${classLabel} · ${exchangeLabel}`;
+    assetBtn.setAttribute(
+      "aria-label",
+      `Abrir ${entry.symbol}, ${entry.name || entry.symbol}, ${classLabel}, ${exchangeLabel}`,
+    );
     line1.append(assetBtn);
-    const classLabel = typeof translateAssetClass === "function"
-      ? translateAssetClass(entry.assetClass)
-      : entry.assetClass;
-    const exchangeLabel = entry.exchange || "Sin bolsa";
     const line2 = createElement("div", "mesa-asset-line2");
     const nameSpan = createElement("span", "mesa-asset-name", entry.name || entry.symbol);
-    nameSpan.title = `${entry.name || entry.symbol} (${assetId})`;
-    const subSpan = createElement("span", "mesa-asset-submeta", `· ${classLabel} · ${exchangeLabel}`);
-    line2.append(nameSpan, subSpan);
+    nameSpan.title = `${entry.name || entry.symbol} (${assetId}) · ${classLabel} · ${exchangeLabel}`;
+    line2.append(nameSpan);
     assetCell.append(line1, line2);
     tdAsset.append(assetCell);
 
@@ -1175,6 +1309,19 @@ function renderMesaInvestorTable() {
 function bindMesaInvestorControls() {
   if (mesaInvestorUiState.controlsBound) return;
   mesaInvestorUiState.controlsBound = true;
+  byId("mesa-news-analytical-retry")?.addEventListener("click", () => {
+    void loadMesaAnalyticalNews().catch(() => {});
+  });
+  byId("mesa-news-institutional-retry")?.addEventListener("click", () => {
+    void loadMesaCazatiburonesNews("institutional", () =>
+      api("/api/v1/cazatiburones/notifications?family=institutional&limit=5"),
+    ).catch(() => {});
+  });
+  byId("mesa-news-activity-retry")?.addEventListener("click", () => {
+    void loadMesaCazatiburonesNews("activity", () =>
+      api("/api/v1/cazatiburones/notifications?family=activity&limit=5"),
+    ).catch(() => {});
+  });
   byId("mesa-retry-load-btn")?.addEventListener("click", () => {
     void retryMesaPendingAssets().catch(() => {});
   });

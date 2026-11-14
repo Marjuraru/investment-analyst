@@ -2947,17 +2947,17 @@ def _check_institutional_and_activity_families_use_separate_notification_inboxes
     index_html: str, app_js: str
 ) -> None:
     mesa = _mesa_slice(index_html)
+    quick_start = mesa.index('id="mesa-quick-cazatiburones"')
+    quick_end = mesa.index("</section>", quick_start)
+    quick_markup = mesa[quick_start:quick_end]
+    assert 'class="absence-mark blocked"' not in quick_markup
+    assert 'id="mesa-cazatiburones-quick-list"' in quick_markup
+    assert 'class="alert-inbox"' in quick_markup
+    assert 'aria-live="polite"' in quick_markup
+    assert 'aria-busy="false"' in quick_markup
     for family in ("institutional", "activity"):
-        family_id = f"mesa-news-{family}"
-        family_start = mesa.index(f'id="{family_id}"')
-        family_end = mesa.index("</article>", family_start)
-        family_markup = mesa[family_start:family_end]
-        assert 'class="absence-mark blocked"' not in family_markup
-        assert f'id="mesa-news-{family}-count"' in family_markup
-        assert f'id="mesa-news-{family}-list"' in family_markup
-        assert 'class="alert-inbox"' in family_markup
-        assert 'aria-live="polite"' in family_markup
-        assert 'aria-busy="false"' in family_markup
+        assert f'id="mesa-news-{family}-count"' in quick_markup
+        assert f'id="mesa-news-{family}-retry"' in quick_markup
 
     assert "loadMesaCazatiburonesNewsFamilies" in _board_deferred_load_entry(app_js, "mesa")
     loader_body = _extract_js_function(app_js, "loadMesaCazatiburonesNewsFamilies")
@@ -2970,24 +2970,20 @@ def _check_institutional_and_activity_families_use_separate_notification_inboxes
     assert "mesaInstitutionalNewsRequestSequence" in app_js
     assert "mesaActivityNewsRequestSequence" in app_js
     render_body = _extract_js_function(app_js, "renderMesaCazatiburonesNews")
-    assert "byId(`mesa-news-${family}-list`)" in render_body
+    quick_body = _extract_js_function(app_js, "renderMesaCazatiburonesQuickPanel")
     assert "byId(`mesa-news-${family}-count`)" in render_body
-    assert (
-        'renderAbsenceMark("blocked", "Bloqueada", "La outbox no está configurada en el servicio")'
-        in render_body
-    )
-    assert "Sin novedades en esta bandeja." in render_body
-    assert (
-        "Se muestran ${formatInteger(returned)} de ${formatInteger(total)} novedades."
-        in render_body
-    )
+    assert "renderMesaCazatiburonesQuickPanel();" in render_body
+    assert "La outbox no está configurada en el servicio" in quick_body
+    assert "Sin novedades recientes en Cazatiburones." in quick_body
+    assert "muestra parcial y no noticias de mercado" in quick_markup
     assert "MESA_CAZATIBURONES_STATUS_LABELS" in app_js
-    assert app_js.count("mesaNotificationTitle(notification") >= 2
+    assert "describeCazatiburonesNotice" in app_js
     assert "assetDisplayLabel(notification.asset_id)" in app_js
     assert "notification.rule_id" not in render_body
-    assert "notification.asset_id" in render_body
-    assert "notification.created_at" in render_body
-    assert "view.status" in render_body
+    assert "notification.rule_id" not in quick_body
+    assert "notification.asset_id" in quick_body
+    assert "notification.created_at" in quick_body
+    assert "view.status" in quick_body or "entry.view.status" in quick_body
     # Neither family is ever populated from a per-asset Cazatiburones endpoint
     # or from operational alerts inside the mesa deferred-load graph.
     mesa_loads = _board_deferred_load_entry(app_js, "mesa")
@@ -3018,9 +3014,11 @@ def test_mesa_news_counts_describe_inboxes_without_known_at_claim() -> None:
 
 def _check_mesa_news_is_read_only_without_cross_family_aggregation(app_js: str) -> None:
     render_body = _extract_js_function(app_js, "renderMesaCazatiburonesNews")
+    quick_body = _extract_js_function(app_js, "renderMesaCazatiburonesQuickPanel")
     load_body = _extract_js_function(app_js, "loadMesaCazatiburonesNews")
     for forbidden in ("POST", "acknowledge", "transition"):
         assert forbidden not in render_body
+        assert forbidden not in quick_body
         assert forbidden not in load_body
 
 
@@ -3228,9 +3226,9 @@ def test_asset_preferences_panel_moved_to_sistema_and_absent_from_mesa() -> None
 def _check_design_system_documentation_declares_the_mesa_hierarchy(doc_text: str) -> None:
     normalized = re.sub(r"\s+", " ", doc_text).lower()
     for phrase in (
-        "novedades de las bandejas",
-        "columna principal",
-        "minmax(0, 1fr)",
+        "panel rápido",
+        "retícula 70/30 desktop",
+        "minmax(640px, 7fr) minmax(280px, 3fr)",
         "fuentes bloqueadas",
         "incidencias",
         "universo",
@@ -3258,10 +3256,15 @@ def test_design_system_documentation_declares_the_mesa_hierarchy() -> None:
 def _check_mesa_three_column_composition(index_html: str, styles_css: str) -> None:
     mesa = _mesa_slice(index_html)
     assert mesa.count('class="mesa-layout"') == 1
+    assert 'id="mesa-quick-panel"' in mesa
     layout_match = re.search(r"\n\.mesa-layout\s*\{([^}]*)\}", f"\n{styles_css}", re.DOTALL)
-    assert layout_match and "grid-template-columns: minmax(0, 1fr);" in layout_match.group(1)
-    assert "@media (max-width: 1120px)" in styles_css
-    assert ".mesa-layout {\n    grid-template-columns: 1fr;" in styles_css
+    assert (
+        layout_match
+        and "grid-template-columns: minmax(640px, 7fr) minmax(280px, 3fr);" in layout_match.group(1)
+    )
+    assert "@media (max-width: 1190px)" in styles_css
+    assert ".mesa-aside {\n    order: -1;" in styles_css
+    assert "@media (max-width: 820px)" in styles_css
 
 
 def test_mesa_has_main_and_340px_aside_composition() -> None:
@@ -4129,7 +4132,7 @@ def test_probe_cazatiburones_families_rule_catches_a_static_blocked_mark() -> No
     _check_institutional_and_activity_families_use_separate_notification_inboxes(
         INDEX_HTML, APP_JS
     )  # baseline: clean
-    marker = 'id="mesa-news-institutional-list" class="alert-inbox"'
+    marker = 'id="mesa-cazatiburones-quick-list" class="alert-inbox"'
     assert marker in INDEX_HTML
     corrupted = INDEX_HTML.replace(marker, 'class="absence-mark blocked"', 1)
     with pytest.raises(AssertionError):
@@ -4164,7 +4167,7 @@ def test_probe_cazatiburones_families_rule_catches_cross_family_container() -> N
     _check_institutional_and_activity_families_use_separate_notification_inboxes(
         INDEX_HTML, APP_JS
     )  # baseline: clean
-    corrupted = APP_JS.replace("mesa-news-${family}-list", "mesa-news-activity-list", 1)
+    corrupted = APP_JS.replace("mesa-news-${family}-count", "mesa-news-activity-count", 1)
     assert corrupted != APP_JS
     with pytest.raises(AssertionError):
         _check_institutional_and_activity_families_use_separate_notification_inboxes(
@@ -4176,9 +4179,13 @@ def test_probe_cazatiburones_families_rule_catches_collapsed_disabled_and_empty_
     _check_institutional_and_activity_families_use_separate_notification_inboxes(
         INDEX_HTML, APP_JS
     )  # baseline: clean
+    target = (
+        'renderAbsenceMark("blocked", `${familyLabel}: bloqueada`, '
+        '"La outbox no está configurada en el servicio")'
+    )
     corrupted = APP_JS.replace(
-        'renderAbsenceMark("blocked", "Bloqueada", "La outbox no está configurada en el servicio")',
-        'createElement("p", "", "Sin novedades en esta bandeja.")',
+        target,
+        'createElement("p", "", "Sin novedades recientes en Cazatiburones.")',
         1,
     )
     assert corrupted != APP_JS
@@ -4192,15 +4199,15 @@ def test_probe_cazatiburones_families_rule_catches_hidden_truncation() -> None:
     _check_institutional_and_activity_families_use_separate_notification_inboxes(
         INDEX_HTML, APP_JS
     )  # baseline: clean
-    corrupted = APP_JS.replace(
-        "Se muestran ${formatInteger(returned)} de ${formatInteger(total)} novedades.",
-        "Novedades disponibles.",
+    corrupted = INDEX_HTML.replace(
+        "muestra parcial y no noticias de mercado",
+        "noticias generales de mercado",
         1,
     )
-    assert corrupted != APP_JS
+    assert corrupted != INDEX_HTML
     with pytest.raises(AssertionError):
         _check_institutional_and_activity_families_use_separate_notification_inboxes(
-            INDEX_HTML, corrupted
+            corrupted, APP_JS
         )
 
 
@@ -4218,10 +4225,10 @@ def test_probe_mesa_news_count_rule_catches_known_at_claim() -> None:
 
 def test_probe_mesa_news_read_only_rule_catches_an_acknowledge_action() -> None:
     _check_mesa_news_is_read_only_without_cross_family_aggregation(APP_JS)  # clean
-    original = _extract_js_function(APP_JS, "renderMesaCazatiburonesNews")
+    original = _extract_js_function(APP_JS, "renderMesaCazatiburonesQuickPanel")
     corrupted_body = original.replace(
         "list.append(item);",
-        'item.append(createElement("button", "", "acknowledge"));\n    list.append(item);',
+        'item.append(createElement("button", "", "acknowledge"));\n      list.append(item);',
         1,
     )
     assert corrupted_body != original
@@ -4435,8 +4442,9 @@ def test_probe_mesa_hierarchy_documentation_rule_catches_a_missing_declaration()
 def test_probe_ui9_mesa_layout_rule_catches_a_non_340px_aside() -> None:
     _check_mesa_three_column_composition(INDEX_HTML, STYLES_CSS)
     corrupted = STYLES_CSS.replace(
+        ".mesa-layout {\n  display: grid;\n  "
+        "grid-template-columns: minmax(640px, 7fr) minmax(280px, 3fr);",
         ".mesa-layout {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr);",
-        ".mesa-layout {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) 340px;",
         1,
     )
     assert corrupted != STYLES_CSS
@@ -4704,7 +4712,8 @@ def test_ui13_matrix_marks_preserve_mapping_and_row_density() -> None:
     assert ".mesa-matrix-mark" in STYLES_CSS
     assert "width: 12px" in STYLES_CSS
     assert "height: 12px" in STYLES_CSS
-    assert ".mesa-news-families" in STYLES_CSS
+    assert ".mesa-aside" in STYLES_CSS
+    assert ".mesa-news-family" in STYLES_CSS
     assert "align-items: start" in STYLES_CSS
     assert "height: var(--row-height)" in STYLES_CSS
 
@@ -5275,19 +5284,19 @@ def test_mesa_news_and_incidents_use_human_compact_rows_with_five_item_bound_and
     mesa = _mesa_slice(INDEX_HTML)
     sistema = _sistema_slice(INDEX_HTML)
     mesa_js = _read("app-mesa.js")
-    for family in ("analytical", "institutional", "activity"):
-        assert f'id="mesa-news-{family}-list"' in mesa
+    assert 'id="mesa-news-analytical-list"' in mesa
+    assert 'id="mesa-cazatiburones-quick-list"' in mesa
     assert 'id="mesa-incidents-list"' in sistema
-    for function_name in (
-        "renderMesaAnalyticalNews",
-        "renderMesaCazatiburonesNews",
-        "renderMesaIncidents",
+    for function_name, bound in (
+        ("renderMesaAnalyticalNews", "slice(0, 3)"),
+        ("renderMesaCazatiburonesQuickPanel", "slice(0, 3)"),
+        ("renderMesaIncidents", "slice(0, 5)"),
     ):
         body = _extract_js_function(mesa_js, function_name)
-        assert "slice(0, 5)" in body
+        assert bound in body
         assert "mesaContextualNavigationItem" in body
         assert "formatInstant" in body
-    assert mesa_js.count("assetDisplayLabel(notification.asset_id)") == 2
+    assert "assetDisplayLabel(notification.asset_id)" in mesa_js
     assert "notification.rule_id" not in mesa_js
     assert "id: notification.candidate_id" in mesa_js
     assert "id: notification.asset_id" in mesa_js
@@ -5509,7 +5518,7 @@ def test_no_visible_uuid_asset_id_or_rule_id_in_mesa_human_cards_while_navigatio
     mesa = _read("app-mesa.js")
     for function_name in (
         "renderMesaAnalyticalNews",
-        "renderMesaCazatiburonesNews",
+        "renderMesaCazatiburonesQuickPanel",
         "renderMesaIncidents",
     ):
         body = _extract_js_function(mesa, function_name)

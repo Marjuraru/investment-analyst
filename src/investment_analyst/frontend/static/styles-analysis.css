@@ -2435,3 +2435,28 @@ pre {
   color: var(--muted-strong);
   font-size: 0.72rem;
 }
+
+.value-absence-slot {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+}
+
+.value-dash-visible {
+  font-family: var(--figure-font);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.value-absence-slot > .absence-mark {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

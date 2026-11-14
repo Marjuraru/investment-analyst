@@ -336,7 +336,7 @@ armazón compartidas y se resuelven antes de la primera carga diferida.
 
 | Tablero | Peticiones diferidas | Estados que puede mostrar |
 | --- | --- | --- |
-| `mesa` | `GET /api/v1/overview`, `GET /api/v1/candidate-notifications`, `GET /api/v1/cazatiburones/notifications?family=institutional&limit=5`, `GET /api/v1/cazatiburones/notifications?family=activity&limit=5`, `GET /api/alerts?limit=5`, `GET /api/v1/universe-coverage` | vacío mientras no existe snapshot, cargando, ausente si no hay ejecución elegible, error operativo, snapshot disponible; las tres bandejas declaran total y no acusados, y las dos Cazatiburones distinguen outbox bloqueada, sin novedades, truncación o error; el universo muestra sin corte, cargando, error o matriz disponible |
+| `mesa` | `GET /api/v1/investor-overview`, `GET /api/v1/candidate-notifications`, `GET /api/v1/cazatiburones/notifications?family=institutional&limit=5`, `GET /api/v1/cazatiburones/notifications?family=activity&limit=5` | lotes progresivos en memoria, error parcial recuperable sin auto-reintento; en panel lateral `#mesa-quick-panel`: total/pendientes Screening (máx. 3 en bandeja, compartido con `Revisar`), Cazatiburones con contadores separados por familia y top 3 reciente combinado (o `blocked`, vacío o error independiente por familia), y card estática honesta de Predicciones/investigación sin llamadas extra |
 | `activo` | `GET /api/listed-company-report`, `GET /api/market-chart` (o intradía), `GET /api/fundamental-trend`, `GET /api/fundamental-analysis` | vacío inicial, cargando por superficie, ausente según la gramática `missing`/`not-evaluable`, error vigente o evidencia disponible |
 | `tecnico` | ninguna | vacío de armazón; sus cargas pertenecen a bloques posteriores |
 | `revisar` | `GET /api/candidates?limit=50`, `GET /api/alerts?limit=50` | cargando, vacío sin elementos, error de bandeja o lista disponible |
@@ -351,51 +351,36 @@ de pintar o aplicar su estado de error; una respuesta superada se descarta en
 silencio. La invalidación no crea persistencia entre recargas, un segundo
 reloj, un segundo selector ni un corte por tablero.
 
-### Mesa: ancho completo y tabla primero (`UI-9` / `INVESTOR-UI-READABILITY`)
+### Mesa: composición 70/30, tabla compacta y panel rápido (`UI-9` / `INVESTOR-DESK-CLOSURE`)
 
 El lienzo aprovecha el rail global ensanchado (`--sidebar-width: 184px`) sin duplicarlo dentro
 de `mesa`:
 
-1. **Columna principal a ancho completo.** `#board-mesa` usa una sola columna fluida
-   (`grid-template-columns: minmax(0, 1fr)`) que prioriza la tabla compacta de análisis de
-   inversor (`#mesa-investor-section`) en primer lugar sobre el pliegue, seguida por el bloque
-   desplegable de **Novedades de las bandejas** (`#mesa-news-disclosure`). **Universo**,
-   **Cobertura del corte**, **Fuentes bloqueadas**, **Registro BVL** e **Incidencias** viven
-   consolidados en `#board-sistema`. Antes de que la lectura pierda espacio horizontal, las
-   tablas anchas son el único elemento con desplazamiento horizontal propio.
-2. **Datos sin reordenar su significado.** Los IDs operativos de cobertura, programación,
-   trazabilidad y candidatos permanecen en Cobertura/Fuentes bloqueadas; los de alertas e
-   incidencias permanecen en Incidencias. El corte `known_at` y el reloj siguen compartidos en la
-   cabecera (con reloj secundario plegable `#market-clock-toggle`). Sin score, ranking ni
-   recomendación: la jerarquía sale de densidad, orden y tipografía, nunca de un número héroe.
-3. **Seis tableros, no nueve.** `UI-9` no crea, renombra ni elimina ningún tablero;
-   `BOARD_REGISTRY` conserva sus seis entradas.
+1. **Retícula 70/30 desktop y panel lateral primero en móvil/tablet.** `.mesa-layout` usa
+   `grid-template-columns: minmax(640px, 7fr) minmax(280px, 3fr)` con separación `16px`: prioriza la
+   tabla compacta de análisis de inversor (`#mesa-investor-section`) junto al panel lateral
+   `.mesa-aside#mesa-quick-panel`. Bajo `<= 1190px`, `.mesa-aside` pasa arriba (`order: -1`) para no
+   quedar oculto debajo de 34 filas. En la tabla de Mesa, la columna 1 presenta únicamente ticker y
+   nombre truncado a 1 línea; clase/bolsa y detalles completos permanecen accesibles vía
+   tooltip/`aria-label` y fila `Detalle`.
+2. **Panel rápido sin mezclar semántica.** `#mesa-quick-panel` reemplaza el desplegable inferior
+   `#mesa-news-disclosure` con **Screening** (`#mesa-news-analytical`, máx. 3 items compartidos con
+   `Revisar` sin auto-acuse), **Cazatiburones** (`#mesa-quick-cazatiburones`, máx. 3 recientes
+   combinados ordenados por `available_at` descendente con contadores separados
+   `#mesa-news-institutional-count` y `#mesa-news-activity-count`, nunca sumados) y
+   **Predicciones / investigación** (`#mesa-quick-research`, card estática honesta enlazada a
+   `#sistema-investigacion`).
+3. **Seis tableros, no nueve.** `INVESTOR-DESK-CLOSURE` no crea, renombra ni elimina ningún tablero;
+   `BOARD_REGISTRY` conserva sus seis entradas y **Cobertura / Registro BVL / Incidencias** permanecen
+   en `#board-sistema`.
 
-#### Novedades: tres familias con caminos de lectura separados
+#### Panel rápido: familias independientes y lectura honesta
 
-La capa lleva el título visible **Novedades de las bandejas**: describe el contenido de las
-bandejas locales sin afirmar que esté filtrado por el corte global.
-
-La capa "qué cambió" separa tres bloques con procedencia y rótulo propios -- institucional 13F,
-actividad declarada y reglas analíticas -- sin conteo combinado ni orden entre ellos. Verificado
-sobre el código antes de escribir una sola línea de este bloque:
-
-- **Reglas analíticas** usa `GET /api/v1/candidate-notifications`; **institucional 13F** y
-  **actividad declarada** usan, respectivamente, `GET /api/v1/cazatiburones/notifications?family=institutional&limit=5`
-  y `GET /api/v1/cazatiburones/notifications?family=activity&limit=5`. Cada familia tiene contador,
-  lista y secuencia de petición propios: no se fusionan, ordenan ni suman entre sí, y ninguna lectura
-  es por activo.
-- Las tres familias expresan su bandeja con `total` y `pending_count`, no como novedades «desde el
-  corte anterior». Las dos bandejas Cazatiburones muestran `blocked` sólo si la outbox no está
-  configurada; si está habilitada y `total` es cero dicen «sin novedades», y si `truncated` es
-  verdadero muestran `returned` de `total`. Esas representaciones y un error de petición son
-  distintas. Ninguna de las tres bandejas está acotada por el `known_at` global, y la capa lo
-  declara de forma visible.
-- `GET /api/alerts` no es una cuarta familia de novedades: sirve `OperationalRuleId`
-  (`operation.job_failed`, `job_interrupted`, `job_skipped`, `job_coverage_incomplete`), es decir,
-  incidencias del scheduler. Pertenece a **Incidencias** (`#mesa-incidents-list`), no a
-  "Novedades", y su renderizado en `mesa` es de solo lectura -- sin los botones de transición que
-  sí tiene la bandeja interactiva de `revisar`.
+El bloque lateral **Screening** usa `GET /api/v1/candidate-notifications` y **Cazatiburones** usa
+`GET /api/v1/cazatiburones/notifications?family=institutional&limit=5` y
+`GET /api/v1/cazatiburones/notifications?family=activity&limit=5`. Ambos lectores declaran sus propios
+contadores (`total` y `pending_count` sin acuse) y estados independientes de error/reintento sin mostrar
+`0` ante fallo ni fusionar totales entre familias. `GET /api/alerts` permanece en `#sistema-incidencias`.
 
 `loadMesaAnalyticalNews`, `loadMesaCazatiburonesNewsFamilies` y `loadMesaIncidents` no llevan
 `known_at` como parámetro de consulta -- estas cargas devuelven estado local ya materializado, no una proyección point-in-time del
@@ -477,7 +462,7 @@ El límite se aplica en el cliente, nunca reemplaza el `limit` del endpoint ni m
 filtros, totales, `truncated`, ausencia o exportación. Cambiar payload, corte, activo o filtro
 reinicia la ventana y una navegación contextual revela y selecciona la identidad exacta.
 
-Mesa mantiene cinco novedades/incidencias por familia; Universo de Mesa, Universo y detalle de
+Mesa acota Screening (máx. 3 en bandeja) y Cazatiburones (máx. 3 recientes combinados, conservando contadores por familia separados); Universo de Mesa, Universo y detalle de
 Cazatiburones, Revisar, notificaciones de Sistema, preferencias y la historia de Valoración usan la
 ventana progresiva. Comparación conserva 2–5 activos y sus dos grupos de controles. Los estados
 vacíos o de hasta diez no agregan botones sin función.
@@ -763,6 +748,19 @@ introducir literales de color ni dependencias externas:
 - **`#board-sistema`**: aloja `#sistema-verificacion` (cobertura del corte, matriz del universo,
   registro BVL y fuentes bloqueadas), `#sistema-incidencias` (alertas e incidencias operativas) y
   `#sistema-investigacion` (paneles no operacionales ML/PIT, sin carga automática).
+
+## INVESTOR-DESK-CLOSURE: cierre visual, legibilidad transversal y alcance Chromium
+
+- **Sin tokens nuevos de radio, sombra ni literales de color:** toda la compactación de Mesa y detalle
+  Cazatiburones (`.mesa-aside*`, `.mesa-value-dash*`, `.mesa-date-diff-token`, `.mesa-caza-family-chip`,
+  `.value-absence-slot`, `.cazatiburones-tech-details`) consume únicamente las variables declaradas en
+  `tokens.css` y respeta las cinco clases `.absence-mark.<kind>` canónicas mediante `wrapValueAbsenceMark`.
+- **Alineación numérica invariante:** `.mesa-value-primary.is-date-diff` posiciona `.mesa-date-diff-token`
+  (`†`) en absoluto fuera del flujo numérico (`right: -0.58em`) sobre subrayado punteado inferior, evitando
+  saltos de anchura o baseline respecto a cierres sin desplazamiento de fecha.
+- **Legibilidad en Cazatiburones:** título explícito en humano, traducción de reglas/métricas 13F y
+  actividades declaradas, contexto puntual seleccionable con explicación de ventana resumen vs `full` y
+  campos técnicos colapsados sin perder trazabilidad.
 
 ## Qué no son estas pruebas
 
