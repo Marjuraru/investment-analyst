@@ -110,7 +110,7 @@ def test_invalidation_covers_asset_cut_rule_edit_save_and_late_responses() -> No
     )
     assert asset_guard > asset_start
     assert asset_guard < CORE.index(
-        'byId("report-known-at").value = knownAtByAsset.get(assetId)',
+        'byId("report-known-at").value = currentKnownAt;',
         asset_start,
     )
     form = _function_slice(OPERATIONS, "function renderScreeningRule(")

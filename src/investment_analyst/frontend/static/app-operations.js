@@ -165,7 +165,9 @@ function applyOverview(payload) {
     byId("candidate-notification-summary").textContent = "Outbox local no configurado";
   }
 
-  if (latest?.effective_known_at) byId("report-known-at").value = latest.effective_known_at;
+  if (latest?.effective_known_at && !byId("report-known-at").value.trim()) {
+    byId("report-known-at").value = latest.effective_known_at;
+  }
   renderKnownAtCut(byId("report-known-at").value.trim());
   if (["quarterly", "annual"].includes(latest?.request?.fundamental_frequency)) {
     selectFundamentalFrequency(latest.request.fundamental_frequency);
@@ -443,8 +445,22 @@ async function transitionAlert(alertId, status, button) {
       method: "POST",
       body: JSON.stringify({ alert_id: alertId, status }),
     });
+    if (typeof invalidateNavigationDependencies === "function") {
+      invalidateNavigationDependencies("operation_success", {
+        operation: "transition_alert",
+        alertId,
+        status,
+      });
+    }
     await Promise.all([loadAlertInbox(), refreshOverview()]);
   } catch (error) {
+    if (typeof invalidateNavigationDependencies === "function") {
+      invalidateNavigationDependencies("operation_uncertain", {
+        operation: "transition_alert",
+        alertId,
+        status,
+      });
+    }
     setMessage(`No se pudo actualizar la alerta: ${error.message}`, true);
     button.disabled = false;
   }
@@ -1078,6 +1094,12 @@ async function updateScreeningRule(configuration, form, button, sourceRule = nul
       method: "POST",
       body: JSON.stringify(payload),
     });
+    if (typeof invalidateNavigationDependencies === "function") {
+      invalidateNavigationDependencies("operation_success", {
+        operation: "update_screening_rule",
+        ruleId: configuration.rule.rule_id,
+      });
+    }
     setMessage(
       outcome.changed
         ? "Regla versionada. Se aplicará a la próxima evidencia nueva."
@@ -1086,6 +1108,12 @@ async function updateScreeningRule(configuration, form, button, sourceRule = nul
     );
     await loadScreeningRules();
   } catch (error) {
+    if (typeof invalidateNavigationDependencies === "function") {
+      invalidateNavigationDependencies("operation_uncertain", {
+        operation: "update_screening_rule",
+        ruleId: configuration.rule.rule_id,
+      });
+    }
     setMessage(`No se pudo guardar la regla: ${error.message}`, true);
     button.disabled = false;
   }
@@ -1336,8 +1364,22 @@ async function transitionCandidate(candidateId, status, button) {
       method: "POST",
       body: JSON.stringify({ candidate_id: candidateId, status }),
     });
+    if (typeof invalidateNavigationDependencies === "function") {
+      invalidateNavigationDependencies("operation_success", {
+        operation: "transition_candidate",
+        candidateId,
+        status,
+      });
+    }
     await Promise.all([loadCandidateInbox(), refreshOverview()]);
   } catch (error) {
+    if (typeof invalidateNavigationDependencies === "function") {
+      invalidateNavigationDependencies("operation_uncertain", {
+        operation: "transition_candidate",
+        candidateId,
+        status,
+      });
+    }
     setMessage(`No se pudo actualizar el candidato: ${error.message}`, true);
     button.disabled = false;
   }
@@ -1459,12 +1501,28 @@ async function acknowledgeCandidateNotification(notificationId, button) {
       method: "POST",
       body: JSON.stringify({ notification_id: notificationId }),
     });
+    if (typeof invalidateNavigationDependencies === "function") {
+      invalidateNavigationDependencies("operation_success", {
+        operation: "acknowledge_candidate_notification",
+        notificationId,
+      });
+    }
+    const isMesaActive = typeof boardIdFromLocationHash === "function"
+      && boardIdFromLocationHash() === "mesa";
     await Promise.all([
       loadCandidateNotifications({ force: true }),
       refreshOverview(),
-      typeof loadMesaAnalyticalNews === "function" ? loadMesaAnalyticalNews() : Promise.resolve(),
+      isMesaActive && typeof loadMesaAnalyticalNews === "function"
+        ? loadMesaAnalyticalNews({ force: true, revalidate: true })
+        : Promise.resolve(),
     ]);
   } catch (error) {
+    if (typeof invalidateNavigationDependencies === "function") {
+      invalidateNavigationDependencies("operation_uncertain", {
+        operation: "acknowledge_candidate_notification",
+        notificationId,
+      });
+    }
     setMessage(`No se pudo confirmar la notificación: ${error.message}`, true);
     button.disabled = false;
   }

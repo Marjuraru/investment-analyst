@@ -168,6 +168,15 @@ divergen. El valor se muestra como la misma cadena ISO válida que usan las
 consultas; al iniciar o editar el control, una cadena inválida vuelve a la
 marca `missing`.
 
+Con `INVESTOR-NAVIGATION-STATE`, `#report-known-at` se inicializa una sola vez por sesión
+(`defaultKnownAtCut()`) y no se muta al cambiar de activo ni al recibir `applyOverview` cuando el
+control ya tiene valor. Durante la revalidación in-place de `Mesa` (ventana de `60 s` o botón
+`#mesa-revalidate-btn` «Actualizar Mesa»), los avisos compactos usan `.mesa-revalidation-notice` y
+`.mesa-revalidation-notice.is-error` con tokens existentes (`--surface-subtle`, `--line`,
+`--muted-strong`, `--negative`, `--negative-soft`, `--negative-ink`), y las vistas previas de
+`Activo` bajo `local-view-preview-v2` aplican `.view-preview-verifying` y el estado explícito
+«Vista anterior; verificando» con exportación deshabilitada hasta completar la verificación viva.
+
 ## Reloj de sesión
 
 El reloj de sesión de NYSE reutiliza `NYSE_SESSION_STATES`,

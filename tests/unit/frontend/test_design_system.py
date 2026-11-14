@@ -2509,14 +2509,14 @@ def _check_cazatiburones_board_reloads_when_the_selected_asset_changes(app_js: s
     assert match, "selectComboboxOption(assetId) must exist"
     body = match.group(1)
     assert "selectedMarketAsset = assetId;" in body
-    assert 'renderKnownAtCut(byId("report-known-at").value.trim());' in body
-    assert "invalidateDeferredBoardLoads();" in body
+    assert "renderKnownAtCut(currentKnownAt);" in body
+    assert 'invalidateNavigationDependencies("asset_select", { assetId });' in body
     assert "activateBoard(boardIdFromLocationHash(), { focus: false });" in body
     assert (
         body.index("selectedMarketAsset = assetId;")
-        < body.index("invalidateDeferredBoardLoads();")
+        < body.index('invalidateNavigationDependencies("asset_select", { assetId });')
         < body.index("activateBoard(boardIdFromLocationHash(), { focus: false });")
-    ), "asset changes must invalidate before reloading the visible board"
+    ), "asset changes must invalidate active-asset dependencies before reloading the visible board"
 
 
 def test_cazatiburones_board_reloads_when_the_selected_asset_changes() -> None:
@@ -2531,8 +2531,10 @@ def _check_cazatiburones_board_reloads_when_the_known_at_cut_changes(app_js: str
     )
     assert match, "report-known-at change listener must exist"
     body = match.group(1)
-    assert "invalidateDeferredBoardLoads();" in body
+    assert 'invalidateNavigationDependencies("known_at_change"' in body
     assert "activateBoard(boardIdFromLocationHash(), { focus: false });" in body
+    nav_inv = _extract_js_function(app_js, "invalidateNavigationDependencies")
+    assert "invalidateDeferredBoardLoads();" in nav_inv
 
 
 def test_cazatiburones_board_reloads_when_the_known_at_cut_changes() -> None:
@@ -2590,8 +2592,9 @@ def _board_deferred_load_entry(app_js: str, board_id: str) -> str:
 def _check_initialize_fires_no_board_query(app_js: str) -> None:
     initialize = _extract_js_function(app_js, "initialize")
     for query_name in (
-        "refreshOverview",
+        "loadMesaInvestorOverview",
         "loadMesaAnalyticalNews",
+        "loadMesaCazatiburonesNewsFamilies",
         "loadMesaIncidents",
         "loadMesaUniverseCoverage",
         "queryReport",
@@ -2605,6 +2608,7 @@ def _check_initialize_fires_no_board_query(app_js: str) -> None:
     assert "await loadMarketAssets();" in initialize
     assert "await loadAssetPreferences();" in initialize
     assert "loadDeferredBoardData(boardIdFromLocationHash());" in initialize
+    assert "void refreshOverview({ manual: false });" in initialize
 
 
 def test_initialize_fires_no_board_query() -> None:
@@ -2639,7 +2643,6 @@ def _check_board_to_deferred_loads_table_covers_the_six_registered_boards(app_js
     expected_loads = {
         "mesa": [
             "loadMesaInvestorOverview",
-            "refreshOverview",
             "loadMesaAnalyticalNews",
             "loadMesaCazatiburonesNewsFamilies",
         ],
@@ -2729,18 +2732,26 @@ def _check_asset_or_cut_change_invalidates_loaded_marks_and_refetches_visible_bo
     assert "marketChartRequestSequence += 1" in invalidation
     assert "fundamentalTrendRequestSequence += 1" in invalidation
     assert "fundamentalResearchRequestSequence += 1" in invalidation
+    nav_inv = _extract_js_function(app_js, "invalidateNavigationDependencies")
+    assert 'loadedBoardIds.delete("activo");' in nav_inv
+    assert "invalidateDeferredBoardLoads();" in nav_inv
     selection = re.search(
         r"async function selectComboboxOption\(assetId\) \{(.*?)\n  \}",
         app_js,
         re.DOTALL,
     )
-    assert selection and "invalidateDeferredBoardLoads();" in selection.group(1)
+    assert (
+        selection
+        and 'invalidateNavigationDependencies("asset_select", { assetId });' in selection.group(1)
+    )
     cut_change = re.search(
         r'byId\("report-known-at"\)\.addEventListener\("change", \(\) => \{(.*?)\n\}\);',
         app_js,
         re.DOTALL,
     )
-    assert cut_change and "invalidateDeferredBoardLoads();" in cut_change.group(1)
+    assert cut_change and (
+        'invalidateNavigationDependencies("known_at_change"' in cut_change.group(1)
+    )
     assert "activateBoard(boardIdFromLocationHash(), { focus: false });" in cut_change.group(1)
 
 
@@ -3915,12 +3926,12 @@ def test_probe_cazatiburones_deep_link_rule_catches_a_removed_reload() -> None:
 def test_probe_cazatiburones_asset_change_rule_catches_a_removed_reload() -> None:
     _check_cazatiburones_board_reloads_when_the_selected_asset_changes(APP_JS)  # baseline: clean
     corrupted = APP_JS.replace(
-        "    invalidateDeferredBoardLoads();\n"
+        '    invalidateNavigationDependencies("asset_select", { assetId });\n'
         "    if (activate) {\n"
         "      activateBoard(boardIdFromLocationHash(), { focus: false });\n"
         "    }\n"
         "    return true;",
-        "    invalidateDeferredBoardLoads();",
+        '    invalidateNavigationDependencies("asset_select", { assetId });',
         1,
     )
     assert corrupted != APP_JS, "probe fixture did not remove the asset-change reload"

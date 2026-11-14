@@ -48,6 +48,50 @@ function setMesaRetryButtonVisible(buttonId, visible) {
   if (btn) btn.classList.toggle("hidden", !visible);
 }
 
+const mesaQuickInboxesState = {
+  analytical: {
+    contextKey: null,
+    lastSuccessAt: 0,
+    lastAttemptAt: 0,
+    payload: null,
+    revalidating: false,
+    revalidationError: null,
+    needsRevalidation: false,
+    inFlightPromise: null,
+  },
+  institutional: {
+    contextKey: null,
+    lastSuccessAt: 0,
+    lastAttemptAt: 0,
+    payload: null,
+    revalidating: false,
+    revalidationError: null,
+    needsRevalidation: false,
+    inFlightPromise: null,
+  },
+  activity: {
+    contextKey: null,
+    lastSuccessAt: 0,
+    lastAttemptAt: 0,
+    payload: null,
+    revalidating: false,
+    revalidationError: null,
+    needsRevalidation: false,
+    inFlightPromise: null,
+  },
+};
+
+function isMesaInboxFresh(inboxKey, nowMs = Date.now()) {
+  const state = mesaQuickInboxesState[inboxKey];
+  if (!state || state.payload === null || state.needsRevalidation) return false;
+  if (state.contextKey !== currentMesaContextKey()) return false;
+  if (!Number.isFinite(state.lastSuccessAt) || state.lastSuccessAt <= 0) return false;
+  const windowMs = typeof NAVIGATION_REVALIDATION_WINDOW_MS === "number"
+    ? NAVIGATION_REVALIDATION_WINDOW_MS
+    : 60_000;
+  return nowMs - state.lastSuccessAt < windowMs;
+}
+
 function renderMesaAnalyticalNews(payload) {
   const list = byId("mesa-news-analytical-list");
   const count = byId("mesa-news-analytical-count");
@@ -81,29 +125,99 @@ function renderMesaAnalyticalNews(payload) {
   }
 }
 
-async function loadMesaAnalyticalNews() {
+async function loadMesaAnalyticalNews(options = {}) {
+  const nowMs = options.nowMs ?? Date.now();
+  const ctxKey = currentMesaContextKey();
+  const state = mesaQuickInboxesState.analytical;
+  const windowMs = typeof NAVIGATION_REVALIDATION_WINDOW_MS === "number"
+    ? NAVIGATION_REVALIDATION_WINDOW_MS
+    : 60_000;
+  if (options.ifExpiredOnly) {
+    if (isMesaInboxFresh("analytical", nowMs)) return state.payload;
+    if (
+      !options.manual
+      && !options.force
+      && !state.needsRevalidation
+      && state.lastAttemptAt > state.lastSuccessAt
+      && nowMs - state.lastAttemptAt < windowMs
+    ) {
+      return state.payload;
+    }
+  }
+  if (state.inFlightPromise && state.contextKey === ctxKey) {
+    return state.inFlightPromise;
+  }
   const sequence = ++mesaAnalyticalNewsRequestSequence;
   const list = byId("mesa-news-analytical-list");
   const count = byId("mesa-news-analytical-count");
+  const keepSnapshot = Boolean(
+    state.contextKey === ctxKey
+    && state.payload !== null
+    && (options.preserveExisting || state.lastSuccessAt > 0),
+  );
+  state.contextKey = ctxKey;
+  state.lastAttemptAt = nowMs;
+  state.revalidating = keepSnapshot;
+  state.revalidationError = null;
   setMesaRetryButtonVisible("mesa-news-analytical-retry", false);
-  list.setAttribute("aria-busy", "true");
-  try {
-    const payload = await api("/api/v1/candidate-notifications");
-    if (sequence !== mesaAnalyticalNewsRequestSequence) return;
-    if (typeof shareCandidateNotificationPayload === "function") {
-      shareCandidateNotificationPayload(payload);
-    }
-    renderMesaAnalyticalNews(payload);
-  } catch (error) {
-    if (sequence !== mesaAnalyticalNewsRequestSequence) return;
-    count.textContent = "Sin consulta";
-    setMesaRetryButtonVisible("mesa-news-analytical-retry", true);
-    list.replaceChildren(
-      createElement("p", "", `No se pudieron consultar candidatos de screening: ${error.message}`),
-    );
-  } finally {
-    if (sequence === mesaAnalyticalNewsRequestSequence) list.setAttribute("aria-busy", "false");
+  if (list) list.setAttribute("aria-busy", "true");
+  if (keepSnapshot && count && state.lastSuccessAt > 0) {
+    count.textContent = `Última consulta ${formatMesaLastQueryTime(state.lastSuccessAt)} · Actualizando…`;
   }
+  const run = (async () => {
+    try {
+      const payload = await api("/api/v1/candidate-notifications");
+      if (sequence !== mesaAnalyticalNewsRequestSequence) return null;
+      state.payload = payload;
+      state.lastSuccessAt = options.nowMs ?? Date.now();
+      state.needsRevalidation = false;
+      state.revalidating = false;
+      state.revalidationError = null;
+      if (typeof shareCandidateNotificationPayload === "function") {
+        shareCandidateNotificationPayload(payload);
+      }
+      renderMesaAnalyticalNews(payload);
+      return payload;
+    } catch (error) {
+      if (sequence !== mesaAnalyticalNewsRequestSequence) return null;
+      state.revalidating = false;
+      state.revalidationError = error.message;
+      if (keepSnapshot && state.payload) {
+        renderMesaAnalyticalNews(state.payload);
+        setMesaRetryButtonVisible("mesa-news-analytical-retry", true);
+        if (count) {
+          count.textContent = `Última consulta ${formatMesaLastQueryTime(state.lastSuccessAt)} · Error al actualizar`;
+        }
+        if (list) {
+          list.prepend(
+            createElement(
+              "p",
+              "mesa-revalidation-notice is-error",
+              `No se pudo revalidar: ${error.message}`,
+            ),
+          );
+        }
+      } else {
+        if (count) count.textContent = "Sin consulta";
+        setMesaRetryButtonVisible("mesa-news-analytical-retry", true);
+        if (list) {
+          list.replaceChildren(
+            createElement("p", "", `No se pudieron consultar candidatos de screening: ${error.message}`),
+          );
+        }
+      }
+      return null;
+    } finally {
+      if (state.inFlightPromise === run) {
+        state.inFlightPromise = null;
+      }
+      if (sequence === mesaAnalyticalNewsRequestSequence && list) {
+        list.setAttribute("aria-busy", "false");
+      }
+    }
+  })();
+  state.inFlightPromise = run;
+  return run;
 }
 
 let mesaInstitutionalNewsRequestSequence = 0;
@@ -153,6 +267,15 @@ function renderMesaCazatiburonesQuickPanel() {
       errorCount += 1;
       notices.push(createElement("p", "mesa-aside-note", `Error en ${familyLabel}: ${state.error || "consulta fallida"}`));
       continue;
+    }
+    if (state.revalidationError) {
+      notices.push(
+        createElement(
+          "p",
+          "mesa-revalidation-notice is-error",
+          `Error al actualizar ${familyLabel}: ${state.revalidationError}`,
+        ),
+      );
     }
     const payload = state.payload || {};
     if (!payload.enabled) {
@@ -217,7 +340,7 @@ function renderMesaCazatiburonesQuickPanel() {
 function renderMesaCazatiburonesNews(family, payload) {
   const count = byId(`mesa-news-${family}-count`);
   setMesaRetryButtonVisible(`mesa-news-${family}-retry`, false);
-  mesaCazatiburonesQuickState[family] = { status: "loaded", payload, error: null };
+  mesaCazatiburonesQuickState[family] = { status: "loaded", payload, error: null, revalidationError: null };
   const items = Array.isArray(payload.items) ? payload.items : [];
   if (count) {
     if (!payload.enabled) {
@@ -231,40 +354,115 @@ function renderMesaCazatiburonesNews(family, payload) {
   renderMesaCazatiburonesQuickPanel();
 }
 
-async function loadMesaCazatiburonesNews(family, request) {
+async function loadMesaCazatiburonesNews(family, request, options = {}) {
+  const state = mesaQuickInboxesState[family];
+  const nowMs = options.nowMs ?? Date.now();
+  const ctxKey = currentMesaContextKey();
+  const windowMs = typeof NAVIGATION_REVALIDATION_WINDOW_MS === "number"
+    ? NAVIGATION_REVALIDATION_WINDOW_MS
+    : 60_000;
+  if (options.ifExpiredOnly && state) {
+    if (isMesaInboxFresh(family, nowMs)) return state.payload;
+    if (
+      !options.manual
+      && !options.force
+      && !state.needsRevalidation
+      && state.lastAttemptAt > state.lastSuccessAt
+      && nowMs - state.lastAttemptAt < windowMs
+    ) {
+      return state.payload;
+    }
+  }
+  if (state?.inFlightPromise && state.contextKey === ctxKey) {
+    return state.inFlightPromise;
+  }
   const sequence = family === "institutional"
     ? ++mesaInstitutionalNewsRequestSequence
     : ++mesaActivityNewsRequestSequence;
   const list = byId("mesa-cazatiburones-quick-list");
   const count = byId(`mesa-news-${family}-count`);
-  mesaCazatiburonesQuickState[family] = { status: "loading", payload: null, error: null };
-  setMesaRetryButtonVisible(`mesa-news-${family}-retry`, false);
-  if (count && count.textContent === "—") count.textContent = "Consultando…";
-  if (list) list.setAttribute("aria-busy", "true");
-  try {
-    const payload = await request();
-    if (sequence !== (family === "institutional" ? mesaInstitutionalNewsRequestSequence : mesaActivityNewsRequestSequence)) return;
-    renderMesaCazatiburonesNews(family, payload);
-  } catch (error) {
-    if (sequence !== (family === "institutional" ? mesaInstitutionalNewsRequestSequence : mesaActivityNewsRequestSequence)) return;
-    mesaCazatiburonesQuickState[family] = { status: "error", payload: null, error: error.message };
-    if (count) count.textContent = "Sin consulta";
-    setMesaRetryButtonVisible(`mesa-news-${family}-retry`, true);
-    renderMesaCazatiburonesQuickPanel();
-  } finally {
-    if (sequence === (family === "institutional" ? mesaInstitutionalNewsRequestSequence : mesaActivityNewsRequestSequence)) {
-      if (list) list.setAttribute("aria-busy", "false");
-    }
+  const keepSnapshot = Boolean(
+    state
+    && state.contextKey === ctxKey
+    && state.payload !== null
+    && (options.preserveExisting || state.lastSuccessAt > 0),
+  );
+  if (state) {
+    state.contextKey = ctxKey;
+    state.lastAttemptAt = nowMs;
+    state.revalidating = keepSnapshot;
+    state.revalidationError = null;
   }
+  if (!keepSnapshot) {
+    mesaCazatiburonesQuickState[family] = { status: "loading", payload: null, error: null, revalidationError: null };
+  }
+  setMesaRetryButtonVisible(`mesa-news-${family}-retry`, false);
+  if (keepSnapshot && count && state.lastSuccessAt > 0) {
+    count.textContent = `Última consulta ${formatMesaLastQueryTime(state.lastSuccessAt)} · Actualizando…`;
+  } else if (count && count.textContent === "—") {
+    count.textContent = "Consultando…";
+  }
+  if (list) list.setAttribute("aria-busy", "true");
+  const run = (async () => {
+    try {
+      const payload = await request();
+      if (sequence !== (family === "institutional" ? mesaInstitutionalNewsRequestSequence : mesaActivityNewsRequestSequence)) return null;
+      if (state) {
+        state.payload = payload;
+        state.lastSuccessAt = options.nowMs ?? Date.now();
+        state.needsRevalidation = false;
+        state.revalidating = false;
+        state.revalidationError = null;
+      }
+      renderMesaCazatiburonesNews(family, payload);
+      return payload;
+    } catch (error) {
+      if (sequence !== (family === "institutional" ? mesaInstitutionalNewsRequestSequence : mesaActivityNewsRequestSequence)) return null;
+      if (state) {
+        state.revalidating = false;
+        state.revalidationError = error.message;
+      }
+      if (keepSnapshot && state?.payload) {
+        mesaCazatiburonesQuickState[family] = {
+          status: "loaded",
+          payload: state.payload,
+          error: null,
+          revalidationError: error.message,
+        };
+        if (count) {
+          count.textContent = `Última consulta ${formatMesaLastQueryTime(state.lastSuccessAt)} · Error al actualizar`;
+        }
+        setMesaRetryButtonVisible(`mesa-news-${family}-retry`, true);
+        renderMesaCazatiburonesQuickPanel();
+      } else {
+        mesaCazatiburonesQuickState[family] = { status: "error", payload: null, error: error.message, revalidationError: null };
+        if (count) count.textContent = "Sin consulta";
+        setMesaRetryButtonVisible(`mesa-news-${family}-retry`, true);
+        renderMesaCazatiburonesQuickPanel();
+      }
+      return null;
+    } finally {
+      if (state && state.inFlightPromise === run) {
+        state.inFlightPromise = null;
+      }
+      if (sequence === (family === "institutional" ? mesaInstitutionalNewsRequestSequence : mesaActivityNewsRequestSequence)) {
+        if (list) list.setAttribute("aria-busy", "false");
+      }
+    }
+  })();
+  if (state) state.inFlightPromise = run;
+  return run;
 }
 
-function loadMesaCazatiburonesNewsFamilies() {
-  void loadMesaCazatiburonesNews("institutional", () =>
-    api("/api/v1/cazatiburones/notifications?family=institutional&limit=5"),
-  );
-  void loadMesaCazatiburonesNews("activity", () =>
-    api("/api/v1/cazatiburones/notifications?family=activity&limit=5"),
-  );
+function loadMesaCazatiburonesNewsFamilies(options = {}) {
+  return Promise.allSettled([
+    loadMesaCazatiburonesNews("institutional", () =>
+      api("/api/v1/cazatiburones/notifications?family=institutional&limit=5"),
+    options),
+    loadMesaCazatiburonesNews("activity", () =>
+      api("/api/v1/cazatiburones/notifications?family=activity&limit=5"),
+    options),
+  ]);
 }
 
 // UI-6: Mesa's "Qué está roto" layer. A read-only, five-row projection of
@@ -663,6 +861,22 @@ async function loadMesaUniverseCoverage() {
 
 const MESA_INVESTOR_BATCH_SIZE = 10;
 const MESA_INVESTOR_MAX_UNIVERSE = 100;
+
+function currentMesaContextKey(knownAt = byId("report-known-at")?.value?.trim() || "") {
+  const wsId = typeof currentWorkspaceId === "string" ? currentWorkspaceId : "";
+  const gen = typeof readRuntimeGeneration === "string" ? readRuntimeGeneration : "";
+  return `${String(knownAt || "").trim()}|${wsId || ""}|${gen ?? ""}`;
+}
+
+function formatMesaLastQueryTime(epochMs) {
+  if (!Number.isFinite(epochMs) || epochMs <= 0) return "reciente";
+  try {
+    return new Date(epochMs).toISOString().slice(11, 19) + " UTC";
+  } catch {
+    return "reciente";
+  }
+}
+
 const mesaInvestorUiState = {
   search: "",
   assetClass: "all",
@@ -681,6 +895,13 @@ const mesaInvestorUiState = {
   batchError: null,
   pausedReason: null,
   hasQueriedCut: "",
+  contextKey: "",
+  lastSuccessAt: 0,
+  lastAttemptAt: 0,
+  needsRevalidation: false,
+  revalidatingInPlace: false,
+  revalidationError: null,
+  revalidationPromise: null,
   lastRequestedScope: "visible",
   loadingAssetIds: new Set(),
   failedAssetIds: new Map(),
@@ -698,7 +919,64 @@ function abortMesaInvestorRequests() {
   }
   mesaInvestorUiState.loadingAll = false;
   mesaInvestorUiState.cancelRequested = false;
+  mesaInvestorUiState.revalidatingInPlace = false;
+  mesaInvestorUiState.revalidationPromise = null;
   mesaInvestorUiState.loadingAssetIds.clear();
+}
+
+function isMesaTableFresh(now = Date.now(), knownAt = byId("report-known-at")?.value.trim() || "") {
+  if (!knownAt) return false;
+  if (mesaInvestorUiState.needsRevalidation || investorOverviewState.needsRevalidation) return false;
+  if (mesaInvestorUiState.lastSuccessAt <= 0) return false;
+  if (mesaInvestorUiState.contextKey !== currentMesaContextKey(knownAt)) return false;
+  if (!sameIsoTimestamp(mesaInvestorUiState.hasQueriedCut, knownAt)) return false;
+  if (mesaInvestorUiState.batchStatus !== "ready") return false;
+  if (mesaInvestorUiState.failedAssetIds.size > 0 || mesaInvestorUiState.pausedAssetIds.size > 0) {
+    return false;
+  }
+  return now - mesaInvestorUiState.lastSuccessAt < NAVIGATION_REVALIDATION_WINDOW_MS;
+}
+
+function markMesaForRevalidation() {
+  mesaInvestorUiState.needsRevalidation = true;
+  investorOverviewState.needsRevalidation = true;
+  for (const inbox of Object.values(mesaQuickInboxesState)) {
+    inbox.needsRevalidation = true;
+  }
+  if (typeof boardIdFromLocationHash === "function" && boardIdFromLocationHash() === "mesa") {
+    void maybeRevalidateVisibleMesaBoard({ reason: "invalidation" }).catch(() => {});
+  }
+}
+
+function resetMesaNavigationContext({ clearOverviewCache = true } = {}) {
+  abortMesaInvestorRequests();
+  mesaInvestorUiState.contextKey = "";
+  mesaInvestorUiState.hasQueriedCut = "";
+  mesaInvestorUiState.lastSuccessAt = 0;
+  mesaInvestorUiState.lastAttemptAt = 0;
+  mesaInvestorUiState.needsRevalidation = false;
+  mesaInvestorUiState.revalidatingInPlace = false;
+  mesaInvestorUiState.revalidationError = null;
+  mesaInvestorUiState.revalidationPromise = null;
+  mesaInvestorUiState.batchStatus = "idle";
+  mesaInvestorUiState.batchError = null;
+  mesaInvestorUiState.pausedReason = null;
+  mesaInvestorUiState.failedAssetIds.clear();
+  mesaInvestorUiState.pausedAssetIds.clear();
+  mesaInvestorUiState.cancelledAssetIds.clear();
+  for (const inbox of Object.values(mesaQuickInboxesState)) {
+    inbox.payload = null;
+    inbox.lastSuccessAt = 0;
+    inbox.lastAttemptAt = 0;
+    inbox.needsRevalidation = false;
+    inbox.revalidating = false;
+    inbox.revalidationError = null;
+    inbox.inFlightPromise = null;
+    inbox.contextKey = null;
+  }
+  if (clearOverviewCache && typeof resetInvestorOverviewCache === "function") {
+    resetInvestorOverviewCache();
+  }
 }
 
 const MESA_VERDICT_LABELS = Object.freeze({
@@ -969,7 +1247,196 @@ function formatMesaExactDetailValue(val, kind, currency = "USD") {
   return mesaFullAbsenceDescription(val) || mesaBriefStateLabel(val);
 }
 
-function renderMesaInvestorTable() {
+function renderMesaScoreCellNode(ov, { rowState, rowError } = {}) {
+  if (ov?.fundamental?.score?.state === "available" && ov.fundamental.score.value !== null) {
+    const scoreVal = ov.fundamental.score.value;
+    const verdictKey = ov.fundamental.verdict || "";
+    const verdict = MESA_VERDICT_LABELS[verdictKey] || verdictKey;
+    const wrap = createElement("div", "mesa-score-cell");
+    const scorePrimary = createElement("strong", "mesa-value-primary", formatDecimalScore(scoreVal, 1));
+    scorePrimary.title = `Score exacto: ${formatExactDecimalText(scoreVal)}/100`;
+    wrap.append(scorePrimary, createElement("span", "mesa-value-sub", "/100"));
+    if (verdict) {
+      const verdictTone = verdictKey === "favorable"
+        ? " is-good"
+        : verdictKey === "unfavorable"
+          ? " is-error"
+          : "";
+      wrap.append(createElement("span", `mesa-status-pill${verdictTone}`, verdict));
+    }
+    return wrap;
+  }
+  return renderInvestorValueCell(ov?.fundamental?.score, {
+    rowState,
+    rowError,
+  });
+}
+
+function buildMesaDetailCellNodes(entry, ov, { assetId, classLabel, exchangeLabel, rowCurrency, rowPriceDate, knownAt, rowState, rowError } = {}) {
+  const grid = createElement("div", "mesa-detail-grid");
+  if (ov) {
+    const verdictText = ov.fundamental?.verdict
+      ? ` (${MESA_VERDICT_LABELS[ov.fundamental.verdict] || ov.fundamental.verdict})`
+      : "";
+    grid.append(
+      createElement("span", "", `${entry.name} (${assetId}) · ${classLabel} · ${exchangeLabel}`),
+      createElement("span", "", `Cierre: ${formatMesaExactDetailValue(ov.market?.close, "price", rowCurrency)}${rowPriceDate ? ` · fecha precio ${rowPriceDate}` : ""}`),
+      createElement("span", "", `Var. 1d: ${formatMesaExactDetailValue(ov.market?.change_1d, "percent")}`),
+      createElement("span", "", `Fund. anual: ${formatMesaExactDetailValue(ov.fundamental?.score, "score")}${verdictText}`),
+      createElement("span", "", `P/E anual: ${formatMesaExactDetailValue(ov.valuation?.price_to_earnings, "multiple")}${ov.valuation?.annual_period_end ? ` · ejercicio ${String(ov.valuation.annual_period_end).slice(0, 10)}` : ""}`),
+      createElement("span", "", `P/B: ${formatMesaExactDetailValue(ov.valuation?.price_to_book, "multiple")}`),
+      createElement("span", "", `EV/EBITDA: ${formatMesaExactDetailValue(ov.valuation?.enterprise_value_to_ebitda, "multiple")}`),
+      createElement("span", "", `Margen neto: ${formatMesaExactDetailValue(ov.fundamental?.net_margin, "percent")}`),
+      createElement("span", "", `Pasivos/Activos: ${formatMesaExactDetailValue(ov.fundamental?.liabilities_to_assets, "ratio")}`),
+      createElement("span", "", `Corte UTC: ${knownAt || investorOverviewState.knownAt || "—"}`),
+    );
+    if (Array.isArray(ov.limitations) && ov.limitations.length) {
+      grid.append(createElement("small", "mesa-detail-limitations", `Limitaciones: ${ov.limitations.join(" · ")}`));
+    }
+  } else {
+    grid.append(
+      createElement("span", "", `${entry.name} (${assetId}) · ${classLabel} · ${exchangeLabel}`),
+      createElement("span", "", `Estado: ${rowState === "error" ? `Error (${rowError || "consulta fallida"})` : rowState === "paused" ? `Carga pausada (${rowError || "lote anterior falló"})` : rowState === "cancelled" ? "Cancelado" : "Pendiente"}`),
+    );
+  }
+  const links = createElement("div", "mesa-detail-links");
+  links.append(
+    createContextualNavigationButton(
+      "Abrir activo",
+      { board: "activo", assetId, subtab: "mercado" },
+      "button primary compact",
+    ),
+    createContextualNavigationButton(
+      "Ver fuentes y método",
+      { board: "activo", assetId, subtab: entry.hasCorporateValuation ? "valoracion" : "mercado" },
+      "button secondary compact",
+    ),
+  );
+  if (!ov && (rowState === "error" || rowState === "paused" || rowState === "cancelled")) {
+    const retryOne = createElement("button", "button secondary compact", "Reintentar pendientes");
+    retryOne.type = "button";
+    retryOne.addEventListener("click", () => {
+      void retryMesaPendingAssets().catch(() => {});
+    });
+    links.append(retryOne);
+  }
+  return { grid, links };
+}
+
+function canPatchMesaRowsInPlace(body, visible) {
+  if (!body || !Array.isArray(visible) || visible.length === 0) return false;
+  const rows = Array.from(body.children || []);
+  if (rows.length === 0) return false;
+  let cursor = 0;
+  for (const entry of visible) {
+    const assetId = typeof entry.assetId === "string" ? entry.assetId : "";
+    const row = rows[cursor];
+    if (!row || row.dataset?.assetId !== assetId || (row.children || []).length < 6) {
+      return false;
+    }
+    cursor += 1;
+    const isExpanded = mesaInvestorUiState.expandedAssetIds.has(assetId);
+    if (isExpanded) {
+      const detailRow = rows[cursor];
+      if (!detailRow || !String(detailRow.className || "").includes("mesa-investor-detail-row")) {
+        return false;
+      }
+      cursor += 1;
+    }
+  }
+  return cursor === rows.length;
+}
+
+function patchMesaRowsInPlace(body, visible, { knownAt, latestPriceDate } = {}) {
+  const rows = Array.from(body.children || []);
+  let cursor = 0;
+  for (const entry of visible) {
+    const assetId = typeof entry.assetId === "string" ? entry.assetId : "";
+    const ov = assetId ? getCachedInvestorOverviewAsset(assetId, knownAt) : null;
+    const rowError = assetId
+      ? (mesaInvestorUiState.failedAssetIds.get(assetId) || mesaInvestorUiState.pausedReason || "")
+      : "Identificador de activo inválido.";
+    const rowState = !assetId || mesaInvestorUiState.failedAssetIds.has(assetId)
+      ? "error"
+      : mesaInvestorUiState.loadingAssetIds.has(assetId)
+        ? "loading"
+        : mesaInvestorUiState.pausedAssetIds.has(assetId)
+          ? "paused"
+          : mesaInvestorUiState.cancelledAssetIds.has(assetId)
+            ? "cancelled"
+            : "pending";
+    const rowPriceDate = mesaOverviewRowPriceDate(ov);
+    const isDifferentPriceDate = Boolean(
+      rowPriceDate && latestPriceDate && rowPriceDate !== latestPriceDate,
+    );
+    const rowCurrency = ov?.market?.currency || entry.quoteCurrency || "USD";
+    const classLabel = typeof translateAssetClass === "function"
+      ? translateAssetClass(entry.assetClass)
+      : entry.assetClass;
+    const exchangeLabel = entry.exchange || "Sin bolsa";
+
+    const tr = rows[cursor];
+    cursor += 1;
+    const cells = tr.children || [];
+    if (cells[1]) {
+      cells[1].replaceChildren(
+        renderInvestorValueCell(ov?.market?.close, {
+          formatValue: (raw) => formatDecimalPrice(raw, rowCurrency),
+          unitSuffix: ` ${rowCurrency}`,
+          isDifferentPriceDate,
+          priceDate: rowPriceDate,
+          rowState,
+          rowError,
+        }),
+      );
+    }
+    if (cells[2]) {
+      cells[2].replaceChildren(
+        renderInvestorValueCell(ov?.market?.change_1d, {
+          formatValue: (raw) => formatDecimalPercentFromRatio(raw, { decimals: 2, signed: true }),
+          signedTone: true,
+          rowState,
+          rowError,
+        }),
+      );
+    }
+    if (cells[3]) {
+      cells[3].replaceChildren(renderMesaScoreCellNode(ov, { rowState, rowError }));
+    }
+    if (cells[4]) {
+      cells[4].replaceChildren(
+        renderInvestorValueCell(ov?.valuation?.price_to_earnings, {
+          formatValue: (raw) => formatDecimalMultiple(raw, 2),
+          rowState,
+          rowError,
+        }),
+      );
+    }
+
+    const isExpanded = mesaInvestorUiState.expandedAssetIds.has(assetId);
+    if (isExpanded) {
+      const detailTr = rows[cursor];
+      cursor += 1;
+      const detailTd = detailTr?.children?.[0];
+      if (detailTd) {
+        const { grid, links } = buildMesaDetailCellNodes(entry, ov, {
+          assetId,
+          classLabel,
+          exchangeLabel,
+          rowCurrency,
+          rowPriceDate,
+          knownAt,
+          rowState,
+          rowError,
+        });
+        detailTd.replaceChildren(grid, links);
+      }
+    }
+  }
+}
+
+function renderMesaInvestorTable(options = {}) {
+  const { updateInPlace = false } = options;
   const body = byId("mesa-investor-table-body");
   if (!body) return;
   const knownAt = byId("report-known-at")?.value.trim() || "";
@@ -993,6 +1460,7 @@ function renderMesaInvestorTable() {
   }
 
   const isBusy = mesaInvestorUiState.loadingAll || mesaInvestorUiState.loadingAssetIds.size > 0;
+  const isRevalidatingInPlace = Boolean(mesaInvestorUiState.revalidatingInPlace);
   const hasPausedOrFailed = Boolean(
     mesaInvestorUiState.failedAssetIds.size > 0
     || mesaInvestorUiState.pausedAssetIds.size > 0
@@ -1001,8 +1469,13 @@ function renderMesaInvestorTable() {
 
   const statusEl = byId("mesa-investor-status");
   if (statusEl) {
+    const lastTime = formatMesaLastQueryTime(mesaInvestorUiState.lastSuccessAt);
     if (isBusy) {
       statusEl.textContent = `Consultando lote… Cargados ${loadedCount}/${filtered.length} · Mostrando ${visible.length}`;
+    } else if (isRevalidatingInPlace) {
+      statusEl.textContent = `Mostrando ${visible.length} de ${filtered.length} · Cargados ${loadedCount} · Última consulta ${lastTime} · Actualizando…`;
+    } else if (mesaInvestorUiState.revalidationError && loadedCount > 0) {
+      statusEl.textContent = `Mostrando ${visible.length} de ${filtered.length} · Cargados ${loadedCount} · Última consulta ${lastTime} · No se pudo revalidar (${mesaInvestorUiState.revalidationError})`;
     } else if (hasPausedOrFailed) {
       statusEl.textContent = `Consulta incompleta · ${loadedCount} cargados, ${unqueriedCount} sin consultar`;
     } else if (mesaInvestorUiState.batchStatus === "cancelled") {
@@ -1018,7 +1491,7 @@ function renderMesaInvestorTable() {
   const bannerRetryBtn = byId("mesa-banner-retry-btn");
   const bannerSystemBtn = byId("mesa-banner-system-btn");
   if (bannerEl) {
-    const showBanner = !isBusy && hasPausedOrFailed;
+    const showBanner = !isBusy && !isRevalidatingInPlace && hasPausedOrFailed;
     bannerEl.classList.toggle("hidden", !showBanner);
     bannerEl.classList.toggle("is-error", mesaInvestorUiState.batchStatus === "error");
     if (showBanner) {
@@ -1064,23 +1537,35 @@ function renderMesaInvestorTable() {
     showMoreBtn.classList.toggle("hidden", visible.length >= filtered.length);
   }
   const loadAllBtn = byId("mesa-load-all-btn");
+  const revalidateBtn = byId("mesa-revalidate-btn");
   const cancelBtn = byId("mesa-cancel-load-btn");
   const retryBtn = ensureMesaRetryButton();
   if (loadAllBtn) {
-    loadAllBtn.disabled = isBusy || loadedCount >= Math.min(filtered.length, MESA_INVESTOR_MAX_UNIVERSE);
+    loadAllBtn.disabled = isBusy || isRevalidatingInPlace || loadedCount >= Math.min(filtered.length, MESA_INVESTOR_MAX_UNIVERSE);
+  }
+  if (revalidateBtn) {
+    revalidateBtn.disabled = isBusy || isRevalidatingInPlace;
   }
   if (cancelBtn) {
     cancelBtn.classList.toggle("hidden", !isBusy);
   }
   if (retryBtn) {
     const hasRecoverable = Boolean(
-      !hasPausedOrFailed
-      && (mesaInvestorUiState.batchError
-        || mesaInvestorUiState.failedAssetIds.size > 0
-        || mesaInvestorUiState.pausedAssetIds.size > 0
-        || mesaInvestorUiState.cancelledAssetIds.size > 0),
+      mesaInvestorUiState.revalidationError
+      || (
+        !hasPausedOrFailed
+        && (mesaInvestorUiState.batchError
+          || mesaInvestorUiState.failedAssetIds.size > 0
+          || mesaInvestorUiState.pausedAssetIds.size > 0
+          || mesaInvestorUiState.cancelledAssetIds.size > 0)
+      ),
     );
-    retryBtn.classList.toggle("hidden", isBusy || !hasRecoverable);
+    retryBtn.classList.toggle("hidden", isBusy || isRevalidatingInPlace || !hasRecoverable);
+  }
+
+  if (updateInPlace && canPatchMesaRowsInPlace(body, visible)) {
+    patchMesaRowsInPlace(body, visible, { knownAt, latestPriceDate });
+    return;
   }
 
   body.replaceChildren();
@@ -1173,31 +1658,7 @@ function renderMesaInvestorTable() {
     // 4. Diagnóstico fundamental
     const tdScore = document.createElement("td");
     tdScore.className = "is-numeric";
-    if (ov?.fundamental?.score?.state === "available" && ov.fundamental.score.value !== null) {
-      const scoreVal = ov.fundamental.score.value;
-      const verdictKey = ov.fundamental.verdict || "";
-      const verdict = MESA_VERDICT_LABELS[verdictKey] || verdictKey;
-      const wrap = createElement("div", "mesa-score-cell");
-      const scorePrimary = createElement("strong", "mesa-value-primary", formatDecimalScore(scoreVal, 1));
-      scorePrimary.title = `Score exacto: ${formatExactDecimalText(scoreVal)}/100`;
-      wrap.append(scorePrimary, createElement("span", "mesa-value-sub", "/100"));
-      if (verdict) {
-        const verdictTone = verdictKey === "favorable"
-          ? " is-good"
-          : verdictKey === "unfavorable"
-            ? " is-error"
-            : "";
-        wrap.append(createElement("span", `mesa-status-pill${verdictTone}`, verdict));
-      }
-      tdScore.append(wrap);
-    } else {
-      tdScore.append(
-        renderInvestorValueCell(ov?.fundamental?.score, {
-          rowState,
-          rowError,
-        }),
-      );
-    }
+    tdScore.append(renderMesaScoreCellNode(ov, { rowState, rowError }));
 
     // 5. P/E anual
     const tdPe = document.createElement("td");
@@ -1243,53 +1704,16 @@ function renderMesaInvestorTable() {
       detailTr.className = "mesa-investor-detail-row";
       const detailTd = document.createElement("td");
       detailTd.colSpan = 6;
-      const grid = createElement("div", "mesa-detail-grid");
-      if (ov) {
-        const verdictText = ov.fundamental?.verdict
-          ? ` (${MESA_VERDICT_LABELS[ov.fundamental.verdict] || ov.fundamental.verdict})`
-          : "";
-        grid.append(
-          createElement("span", "", `${entry.name} (${assetId}) · ${classLabel} · ${exchangeLabel}`),
-          createElement("span", "", `Cierre: ${formatMesaExactDetailValue(ov.market?.close, "price", rowCurrency)}${rowPriceDate ? ` · fecha precio ${rowPriceDate}` : ""}`),
-          createElement("span", "", `Var. 1d: ${formatMesaExactDetailValue(ov.market?.change_1d, "percent")}`),
-          createElement("span", "", `Fund. anual: ${formatMesaExactDetailValue(ov.fundamental?.score, "score")}${verdictText}`),
-          createElement("span", "", `P/E anual: ${formatMesaExactDetailValue(ov.valuation?.price_to_earnings, "multiple")}${ov.valuation?.annual_period_end ? ` · ejercicio ${String(ov.valuation.annual_period_end).slice(0, 10)}` : ""}`),
-          createElement("span", "", `P/B: ${formatMesaExactDetailValue(ov.valuation?.price_to_book, "multiple")}`),
-          createElement("span", "", `EV/EBITDA: ${formatMesaExactDetailValue(ov.valuation?.enterprise_value_to_ebitda, "multiple")}`),
-          createElement("span", "", `Margen neto: ${formatMesaExactDetailValue(ov.fundamental?.net_margin, "percent")}`),
-          createElement("span", "", `Pasivos/Activos: ${formatMesaExactDetailValue(ov.fundamental?.liabilities_to_assets, "ratio")}`),
-          createElement("span", "", `Corte UTC: ${knownAt || investorOverviewState.knownAt || "—"}`),
-        );
-        if (Array.isArray(ov.limitations) && ov.limitations.length) {
-          grid.append(createElement("small", "mesa-detail-limitations", `Limitaciones: ${ov.limitations.join(" · ")}`));
-        }
-      } else {
-        grid.append(
-          createElement("span", "", `${entry.name} (${assetId}) · ${classLabel} · ${exchangeLabel}`),
-          createElement("span", "", `Estado: ${rowState === "error" ? `Error (${rowError || "consulta fallida"})` : rowState === "paused" ? `Carga pausada (${rowError || "lote anterior falló"})` : rowState === "cancelled" ? "Cancelado" : "Pendiente"}`),
-        );
-      }
-      const links = createElement("div", "mesa-detail-links");
-      links.append(
-        createContextualNavigationButton(
-          "Abrir activo",
-          { board: "activo", assetId, subtab: "mercado" },
-          "button primary compact",
-        ),
-        createContextualNavigationButton(
-          "Ver fuentes y método",
-          { board: "activo", assetId, subtab: entry.hasCorporateValuation ? "valoracion" : "mercado" },
-          "button secondary compact",
-        ),
-      );
-      if (!ov && (rowState === "error" || rowState === "paused" || rowState === "cancelled")) {
-        const retryOne = createElement("button", "button secondary compact", "Reintentar pendientes");
-        retryOne.type = "button";
-        retryOne.addEventListener("click", () => {
-          void retryMesaPendingAssets().catch(() => {});
-        });
-        links.append(retryOne);
-      }
+      const { grid, links } = buildMesaDetailCellNodes(entry, ov, {
+        assetId,
+        classLabel,
+        exchangeLabel,
+        rowCurrency,
+        rowPriceDate,
+        knownAt,
+        rowState,
+        rowError,
+      });
       detailTr.addEventListener?.("keydown", (event) => {
         if (event.key === "Escape") {
           event.preventDefault();
@@ -1310,22 +1734,37 @@ function bindMesaInvestorControls() {
   if (mesaInvestorUiState.controlsBound) return;
   mesaInvestorUiState.controlsBound = true;
   byId("mesa-news-analytical-retry")?.addEventListener("click", () => {
-    void loadMesaAnalyticalNews().catch(() => {});
+    void loadMesaAnalyticalNews({ force: true, revalidate: Boolean(mesaQuickInboxesState.analytical.payload) }).catch(() => {});
   });
   byId("mesa-news-institutional-retry")?.addEventListener("click", () => {
-    void loadMesaCazatiburonesNews("institutional", () =>
-      api("/api/v1/cazatiburones/notifications?family=institutional&limit=5"),
+    void loadMesaCazatiburonesNews(
+      "institutional",
+      () => api("/api/v1/cazatiburones/notifications?family=institutional&limit=5"),
+      { force: true, revalidate: Boolean(mesaQuickInboxesState.institutional.payload) },
     ).catch(() => {});
   });
   byId("mesa-news-activity-retry")?.addEventListener("click", () => {
-    void loadMesaCazatiburonesNews("activity", () =>
-      api("/api/v1/cazatiburones/notifications?family=activity&limit=5"),
+    void loadMesaCazatiburonesNews(
+      "activity",
+      () => api("/api/v1/cazatiburones/notifications?family=activity&limit=5"),
+      { force: true, revalidate: Boolean(mesaQuickInboxesState.activity.payload) },
     ).catch(() => {});
   });
+  byId("mesa-revalidate-btn")?.addEventListener("click", () => {
+    void revalidateMesaBoard({ manual: true }).catch(() => {});
+  });
   byId("mesa-retry-load-btn")?.addEventListener("click", () => {
+    if (mesaInvestorUiState.revalidationError) {
+      void revalidateMesaInvestorTableInPlace({ manual: true }).catch(() => {});
+      return;
+    }
     void retryMesaPendingAssets().catch(() => {});
   });
   byId("mesa-banner-retry-btn")?.addEventListener("click", () => {
+    if (mesaInvestorUiState.revalidationError) {
+      void revalidateMesaInvestorTableInPlace({ manual: true }).catch(() => {});
+      return;
+    }
     void retryMesaPendingAssets().catch(() => {});
   });
   byId("mesa-banner-system-btn")?.addEventListener("click", () => {
@@ -1392,17 +1831,27 @@ function bindMesaInvestorControls() {
 }
 
 async function runMesaBatchSequence(targetIds, knownAt, { seq, controller } = {}) {
+  const ctxKey = currentMesaContextKey(knownAt);
   mesaInvestorUiState.hasQueriedCut = knownAt;
+  mesaInvestorUiState.lastAttemptAt = Date.now();
   if (!Array.isArray(targetIds) || targetIds.length === 0) {
     mesaInvestorUiState.batchStatus = "ready";
     mesaInvestorUiState.batchError = null;
     mesaInvestorUiState.pausedReason = null;
+    mesaInvestorUiState.revalidationError = null;
+    mesaInvestorUiState.needsRevalidation = false;
+    investorOverviewState.needsRevalidation = false;
+    mesaInvestorUiState.contextKey = ctxKey;
+    if (mesaInvestorUiState.lastSuccessAt <= 0) {
+      mesaInvestorUiState.lastSuccessAt = Date.now();
+    }
     renderMesaInvestorTable();
     return;
   }
   mesaInvestorUiState.batchStatus = "loading";
   mesaInvestorUiState.batchError = null;
   mesaInvestorUiState.pausedReason = null;
+  mesaInvestorUiState.revalidationError = null;
   for (const id of targetIds) {
     mesaInvestorUiState.failedAssetIds.delete(id);
     mesaInvestorUiState.cancelledAssetIds.delete(id);
@@ -1475,6 +1924,11 @@ async function runMesaBatchSequence(targetIds, knownAt, { seq, controller } = {}
       mesaInvestorUiState.batchStatus = "ready";
       mesaInvestorUiState.batchError = null;
       mesaInvestorUiState.pausedReason = null;
+      mesaInvestorUiState.revalidationError = null;
+      mesaInvestorUiState.needsRevalidation = false;
+      investorOverviewState.needsRevalidation = false;
+      mesaInvestorUiState.contextKey = ctxKey;
+      mesaInvestorUiState.lastSuccessAt = Date.now();
     }
   } finally {
     if (seq === mesaInvestorUiState.requestSequence) {
@@ -1487,6 +1941,158 @@ async function runMesaBatchSequence(targetIds, knownAt, { seq, controller } = {}
       renderMesaInvestorTable();
     }
   }
+}
+
+async function revalidateMesaInvestorTableInPlace({ manual = false } = {}) {
+  const knownAt = byId("report-known-at")?.value.trim() || "";
+  if (!knownAt) return;
+  if (mesaInvestorUiState.revalidationPromise) {
+    return mesaInvestorUiState.revalidationPromise;
+  }
+  const ctxKey = currentMesaContextKey(knownAt);
+  const hasSameContextSnapshot = Boolean(
+    mesaInvestorUiState.lastSuccessAt > 0
+    && mesaInvestorUiState.contextKey === ctxKey
+    && sameIsoTimestamp(mesaInvestorUiState.hasQueriedCut, knownAt),
+  );
+  if (!hasSameContextSnapshot) {
+    await loadMesaInvestorOverview();
+    return;
+  }
+  if (!manual && isMesaTableFresh(Date.now(), knownAt)) {
+    renderMesaInvestorTable({ updateInPlace: true });
+    return;
+  }
+  const visibleEntries = mesaSortedEntries(mesaFilteredCatalogEntries())
+    .slice(0, mesaInvestorUiState.visibleLimit);
+  const targetIds = visibleEntries
+    .map((e) => (typeof e.assetId === "string" ? e.assetId : ""))
+    .filter(Boolean);
+  if (targetIds.length === 0) {
+    mesaInvestorUiState.lastSuccessAt = Date.now();
+    mesaInvestorUiState.needsRevalidation = false;
+    mesaInvestorUiState.revalidationError = null;
+    investorOverviewState.needsRevalidation = false;
+    renderMesaInvestorTable({ updateInPlace: true });
+    return;
+  }
+
+  const seq = mesaInvestorUiState.requestSequence;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  mesaInvestorUiState.abortController = controller;
+  mesaInvestorUiState.revalidatingInPlace = true;
+  mesaInvestorUiState.revalidationError = null;
+  mesaInvestorUiState.lastAttemptAt = Date.now();
+  renderMesaInvestorTable({ updateInPlace: true });
+
+  const task = (async () => {
+    try {
+      for (let i = 0; i < targetIds.length; i += MESA_INVESTOR_BATCH_SIZE) {
+        if (seq !== mesaInvestorUiState.requestSequence || controller?.signal?.aborted) {
+          return;
+        }
+        const chunk = targetIds.slice(i, i + MESA_INVESTOR_BATCH_SIZE);
+        await fetchInvestorOverviewBatch(chunk, knownAt, {
+          signal: controller?.signal,
+          forceRevalidate: true,
+        });
+        if (seq !== mesaInvestorUiState.requestSequence) return;
+        renderMesaInvestorTable({ updateInPlace: true });
+      }
+      if (seq === mesaInvestorUiState.requestSequence) {
+        mesaInvestorUiState.lastSuccessAt = Date.now();
+        mesaInvestorUiState.contextKey = ctxKey;
+        mesaInvestorUiState.hasQueriedCut = knownAt;
+        mesaInvestorUiState.needsRevalidation = false;
+        mesaInvestorUiState.revalidationError = null;
+        investorOverviewState.needsRevalidation = false;
+      }
+    } catch (error) {
+      if (error?.name === "AbortError" || seq !== mesaInvestorUiState.requestSequence) {
+        return;
+      }
+      mesaInvestorUiState.revalidationError = sanitizeMesaErrorMessage(error);
+      mesaInvestorUiState.needsRevalidation = true;
+    } finally {
+      if (seq === mesaInvestorUiState.requestSequence) {
+        mesaInvestorUiState.revalidatingInPlace = false;
+        mesaInvestorUiState.revalidationPromise = null;
+        if (mesaInvestorUiState.abortController === controller) {
+          mesaInvestorUiState.abortController = null;
+        }
+        renderMesaInvestorTable({ updateInPlace: true });
+      }
+    }
+  })();
+
+  mesaInvestorUiState.revalidationPromise = task;
+  await task;
+}
+
+async function maybeRevalidateVisibleMesaBoard({ reason = "navigation" } = {}) {
+  bindMesaInvestorControls();
+  const knownAt = byId("report-known-at")?.value.trim() || "";
+  const ctxKey = currentMesaContextKey(knownAt);
+  if (mesaInvestorUiState.contextKey && mesaInvestorUiState.contextKey !== ctxKey) {
+    resetMesaNavigationContext({ clearOverviewCache: false });
+    await loadMesaInvestorOverview();
+    await loadMesaAnalyticalNews({ force: true, revalidate: false });
+    await loadMesaCazatiburonesNewsFamilies({ force: true, revalidate: false });
+    return;
+  }
+  if (!isMesaTableFresh(Date.now(), knownAt)) {
+    if (mesaInvestorUiState.lastSuccessAt > 0 && mesaInvestorUiState.contextKey === ctxKey) {
+      await revalidateMesaInvestorTableInPlace({ manual: false });
+    } else if (
+      !mesaInvestorUiState.loadingAll
+      && mesaInvestorUiState.loadingAssetIds.size === 0
+      && mesaInvestorUiState.failedAssetIds.size === 0
+      && mesaInvestorUiState.pausedAssetIds.size === 0
+      && mesaInvestorUiState.batchStatus !== "error"
+    ) {
+      await loadMesaInvestorOverview();
+    } else {
+      renderMesaInvestorTable({ updateInPlace: true });
+    }
+  } else {
+    renderMesaInvestorTable({ updateInPlace: true });
+  }
+  if (!isMesaInboxFresh("analytical")) {
+    await loadMesaAnalyticalNews({ revalidate: true, ifExpiredOnly: true, preserveExisting: true });
+  }
+  const needsInst = !isMesaInboxFresh("institutional");
+  const needsAct = !isMesaInboxFresh("activity");
+  if (needsInst || needsAct) {
+    await Promise.allSettled([
+      needsInst
+        ? loadMesaCazatiburonesNews(
+            "institutional",
+            () => api("/api/v1/cazatiburones/notifications?family=institutional&limit=5"),
+            { revalidate: true, ifExpiredOnly: true, preserveExisting: true },
+          )
+        : Promise.resolve(),
+      needsAct
+        ? loadMesaCazatiburonesNews(
+            "activity",
+            () => api("/api/v1/cazatiburones/notifications?family=activity&limit=5"),
+            { revalidate: true, ifExpiredOnly: true, preserveExisting: true },
+          )
+        : Promise.resolve(),
+    ]);
+  }
+}
+
+async function revalidateMesaBoard({ manual = false } = {}) {
+  bindMesaInvestorControls();
+  const knownAt = byId("report-known-at")?.value.trim() || "";
+  const ctxKey = currentMesaContextKey(knownAt);
+  if (mesaInvestorUiState.lastSuccessAt > 0 && mesaInvestorUiState.contextKey === ctxKey) {
+    await revalidateMesaInvestorTableInPlace({ manual });
+  } else {
+    await loadMesaInvestorOverview();
+  }
+  await loadMesaAnalyticalNews({ force: manual, revalidate: true });
+  await loadMesaCazatiburonesNewsFamilies({ force: manual, revalidate: true });
 }
 
 async function loadMesaInvestorVisibleBatch() {
@@ -1577,6 +2183,10 @@ async function retryMesaPendingAssets() {
 async function loadMesaInvestorOverview() {
   bindMesaInvestorControls();
   const knownAt = byId("report-known-at")?.value.trim() || "";
+  const ctxKey = currentMesaContextKey(knownAt);
+  if (mesaInvestorUiState.contextKey && mesaInvestorUiState.contextKey !== ctxKey) {
+    resetMesaNavigationContext({ clearOverviewCache: false });
+  }
   if (
     knownAt
     && sameIsoTimestamp(mesaInvestorUiState.hasQueriedCut, knownAt)
@@ -1585,6 +2195,14 @@ async function loadMesaInvestorOverview() {
       || mesaInvestorUiState.batchStatus === "error")
   ) {
     renderMesaInvestorTable();
+    return;
+  }
+  if (isMesaTableFresh(Date.now(), knownAt)) {
+    renderMesaInvestorTable({ updateInPlace: true });
+    return;
+  }
+  if (mesaInvestorUiState.lastSuccessAt > 0 && mesaInvestorUiState.contextKey === ctxKey) {
+    await revalidateMesaInvestorTableInPlace({ manual: false });
     return;
   }
   renderMesaInvestorTable();

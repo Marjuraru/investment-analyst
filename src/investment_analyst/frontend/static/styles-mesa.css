@@ -886,3 +886,13 @@
     min-width: 44px;
   }
 }
+
+.mesa-revalidation-notice {
+  color: var(--muted-strong);
+  font-size: var(--base-font-size);
+  font-weight: 640;
+}
+
+.mesa-revalidation-notice.is-error {
+  color: var(--negative-ink);
+}

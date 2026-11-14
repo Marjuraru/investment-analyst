@@ -13,13 +13,18 @@ const THEME_STORAGE_KEY = "investment-analyst-theme-v1";
 const CHART_SETTINGS_STORAGE_KEY = "investment-analyst-chart-settings-v1";
 const VIEW_CONTEXT_STORAGE_KEY = "investment-analyst-view-context-v1";
 const VIEW_CONTEXT_PREVIEW_PREFIX = "investment-analyst-view-preview-v1:";
+const VIEW_CONTEXT_PREVIEW_SCHEMA_VERSION = "local-view-preview-v2";
 const VIEW_CONTEXT_MAX_ENTRIES = 8;
 const VIEW_CONTEXT_MAX_BYTES = 2 * 1024 * 1024;
-const VIEW_CONTEXT_PREVIEW_MAX_BYTES = 256 * 1024;
+const VIEW_CONTEXT_PREVIEW_MAX_ENTRIES = 5;
+const VIEW_CONTEXT_PREVIEW_MAX_BYTES = 1536 * 1024;
+const VIEW_CONTEXT_PREVIEW_TOTAL_MAX_BYTES = 2 * 1024 * 1024;
+const NAVIGATION_REVALIDATION_WINDOW_MS = 60_000;
 
 const apiInFlightRequests = new Map();
 let currentWorkspaceId = null;
 let readRuntimeGeneration = null;
+let viewPreviewSequence = 0;
 
 // Every rendered color, including JS-driven SVG strokes, resolves from the
 // tokens declared once in tokens.css: no color literal lives in this file.
@@ -594,7 +599,6 @@ let selectedMarketAsset = null;
 let renderedKnownAtCut = null;
 let selectMarketAssetForNavigation = null;
 const marketStartByAsset = new Map();
-const knownAtByAsset = new Map();
 let selectedFundamentalFrequency = "quarterly";
 let screeningRuleSnapshot = null;
 let fundamentalTrendPayload = null;
@@ -675,13 +679,211 @@ const INVESTOR_OVERVIEW_ABSENCE_REASONS = Object.freeze({
 const investorOverviewState = {
   contextKey: null,
   knownAt: null,
+  workspaceId: null,
+  generation: null,
   catalogVersion: null,
   catalogSha256: null,
   windows: null,
   approxBytes: 0,
+  needsRevalidation: false,
+  assetFetchedAt: new Map(),
   assetByteSizes: new Map(),
   byAssetId: new Map(),
 };
+
+const NAVIGATION_INVALIDATION_MATRIX = Object.freeze({
+  asset_select: Object.freeze({
+    boards: Object.freeze(["activo", "tecnico"]),
+    preserveBoards: Object.freeze(["mesa", "revisar", "cazatiburones", "sistema"]),
+    clearsViewPreviews: false,
+    clearsInvestorOverview: false,
+  }),
+  known_at_change: Object.freeze({
+    boards: Object.freeze(["mesa", "activo", "tecnico", "revisar", "cazatiburones", "sistema"]),
+    preserveBoards: Object.freeze([]),
+    clearsViewPreviews: false,
+    clearsInvestorOverview: true,
+  }),
+  workspace_change: Object.freeze({
+    boards: Object.freeze(["mesa", "activo", "tecnico", "revisar", "cazatiburones", "sistema"]),
+    preserveBoards: Object.freeze([]),
+    clearsViewPreviews: true,
+    clearsInvestorOverview: true,
+  }),
+  generation_change: Object.freeze({
+    boards: Object.freeze(["mesa", "activo", "tecnico", "revisar", "cazatiburones", "sistema"]),
+    preserveBoards: Object.freeze([]),
+    clearsViewPreviews: true,
+    clearsInvestorOverview: true,
+  }),
+  market_range_or_settings_change: Object.freeze({
+    boards: Object.freeze([]),
+    subtabs: Object.freeze(["mercado"]),
+    clearsViewPreviews: false,
+    clearsInvestorOverview: false,
+  }),
+  fundamental_frequency_change: Object.freeze({
+    boards: Object.freeze([]),
+    subtabs: Object.freeze(["fundamentales", "analisis"]),
+    clearsViewPreviews: false,
+    clearsInvestorOverview: false,
+  }),
+  valuation_date_or_filing_change: Object.freeze({
+    boards: Object.freeze([]),
+    subtabs: Object.freeze(["valoracion"]),
+    clearsViewPreviews: false,
+    clearsInvestorOverview: false,
+  }),
+  operation_success: Object.freeze({
+    boards: Object.freeze(["activo", "revisar", "cazatiburones"]),
+    revalidatesMesaImmediately: true,
+    clearsViewPreviews: true,
+    clearsInvestorOverview: false,
+  }),
+  operation_uncertain: Object.freeze({
+    boards: Object.freeze(["activo", "revisar", "cazatiburones"]),
+    revalidatesMesaImmediately: true,
+    clearsViewPreviews: true,
+    clearsInvestorOverview: false,
+  }),
+  preferences_change: Object.freeze({
+    boards: Object.freeze([]),
+    revalidatesMesaImmediately: true,
+    clearsViewPreviews: false,
+    clearsInvestorOverview: false,
+  }),
+});
+
+function invalidateNavigationDependencies(eventType, detail = {}) {
+  const rule = NAVIGATION_INVALIDATION_MATRIX[eventType];
+  if (!rule) return;
+
+  if (eventType === "asset_select") {
+    loadedBoardIds.delete("activo");
+    loadedBoardIds.delete("tecnico");
+    activeAssetSubtabKeys.clear();
+    activoBoardRequestSequence += 1;
+    marketChartRequestSequence += 1;
+    fundamentalTrendRequestSequence += 1;
+    fundamentalResearchRequestSequence += 1;
+    valuationRequestSequence += 1;
+    listedCompanyReportRequest += 1;
+    if (typeof cryptoDerivativesRequest === "number") cryptoDerivativesRequest += 1;
+    if (typeof resetDailyMarketPatterns === "function") resetDailyMarketPatterns();
+    if (typeof invalidateScreeningOutcomes === "function") invalidateScreeningOutcomes();
+    if (typeof resetAnnualHorizons === "function") {
+      resetAnnualHorizons({ clearAnchor: true, clearMetrics: true });
+    }
+    return;
+  }
+
+  if (
+    eventType === "known_at_change"
+    || eventType === "workspace_change"
+    || eventType === "generation_change"
+  ) {
+    if (rule.clearsViewPreviews && typeof clearViewPreviews === "function") {
+      clearViewPreviews();
+    }
+    if (typeof abortMesaInvestorRequests === "function") {
+      abortMesaInvestorRequests();
+    }
+    if (typeof resetMesaNavigationContext === "function") {
+      resetMesaNavigationContext();
+    }
+    resetInvestorOverviewCache();
+    if (typeof clearActiveAssetContextSync === "function") {
+      clearActiveAssetContextSync(
+        typeof marketAssets === "object" && marketAssets && selectedMarketAsset
+          ? marketAssets[selectedMarketAsset]
+          : null,
+      );
+    }
+    if (typeof invalidateValuationFilingSelection === "function") {
+      invalidateValuationFilingSelection();
+    }
+    if (typeof resetMarketComparisonResults === "function") {
+      resetMarketComparisonResults();
+    }
+    if (typeof resetCazatiburonesNavigationContext === "function") {
+      resetCazatiburonesNavigationContext();
+    }
+    if (typeof invalidateDeferredBoardLoads === "function") {
+      invalidateDeferredBoardLoads();
+    }
+    return;
+  }
+
+  if (eventType === "market_range_or_settings_change") {
+    activeAssetSubtabKeys.delete("mercado");
+    marketChartRequestSequence += 1;
+    return;
+  }
+
+  if (eventType === "fundamental_frequency_change") {
+    activeAssetSubtabKeys.delete("fundamentales");
+    activeAssetSubtabKeys.delete("analisis");
+    fundamentalTrendRequestSequence += 1;
+    fundamentalResearchRequestSequence += 1;
+    listedCompanyReportRequest += 1;
+    if (typeof resetAnnualHorizons === "function") {
+      resetAnnualHorizons({ clearAnchor: true });
+    }
+    return;
+  }
+
+  if (eventType === "valuation_date_or_filing_change") {
+    activeAssetSubtabKeys.delete("valoracion");
+    valuationRequestSequence += 1;
+    if (typeof invalidateValuationFilingSelection === "function") {
+      invalidateValuationFilingSelection();
+    }
+    return;
+  }
+
+  if (eventType === "preferences_change") {
+    if (typeof markMesaForRevalidation === "function") {
+      markMesaForRevalidation({ table: true, inboxes: false });
+    }
+    if (typeof renderMesaInvestorTable === "function" && loadedBoardIds.has("mesa")) {
+      renderMesaInvestorTable({ updateInPlace: false });
+    }
+    return;
+  }
+
+  if (eventType === "operation_success" || eventType === "operation_uncertain") {
+    const operation = String(detail?.operation || "").trim();
+    if (rule.clearsViewPreviews && typeof clearViewPreviews === "function") {
+      clearViewPreviews();
+    }
+    if (operation === "candidate_ack" || operation === "candidate_transition" || operation === "screening_rule") {
+      loadedBoardIds.delete("revisar");
+      if (typeof markMesaForRevalidation === "function") {
+        markMesaForRevalidation({ table: false, inboxes: true, analyticalOnly: true });
+      }
+      return;
+    }
+    if (operation === "alert_transition") {
+      loadedBoardIds.delete("revisar");
+      return;
+    }
+    if (operation === "cazatiburones_ack") {
+      loadedBoardIds.delete("cazatiburones");
+      if (typeof markMesaForRevalidation === "function") {
+        markMesaForRevalidation({ table: false, inboxes: true, cazatiburonesOnly: true });
+      }
+      return;
+    }
+    markInvestorOverviewForRevalidation();
+    if (typeof markMesaForRevalidation === "function") {
+      markMesaForRevalidation({ table: true, inboxes: true });
+    }
+    activeAssetSubtabKeys.clear();
+    loadedBoardIds.delete("activo");
+    loadedBoardIds.delete("revisar");
+    loadedBoardIds.delete("cazatiburones");
+  }
+}
 
 function createAbortError(message = "Consulta cancelada.") {
   const err = new Error(message);
@@ -1060,11 +1262,11 @@ async function loadMarketAssets() {
     input.value = presentation.symbol + " — " + presentation.name;
     closeListbox();
     marketStartByAsset.set(selectedMarketAsset, byId("market-start").value);
-    knownAtByAsset.set(selectedMarketAsset, byId("report-known-at").value.trim());
     selectedMarketAsset = assetId;
     if (typeof invalidateScreeningOutcomes === "function") invalidateScreeningOutcomes();
-    byId("report-known-at").value = knownAtByAsset.get(assetId) || defaultKnownAtCut();
-    renderKnownAtCut(byId("report-known-at").value.trim());
+    const currentKnownAt = byId("report-known-at").value.trim() || defaultKnownAtCut();
+    byId("report-known-at").value = currentKnownAt;
+    renderKnownAtCut(currentKnownAt);
     clearActiveAssetContextSync(presentation);
     // An asset switch starts at the market surface, as the former sidebar
     // navigation did; capability changes still use the same deterministic
@@ -1079,7 +1281,7 @@ async function loadMarketAssets() {
     // The former asset-specific fan-out (`presentation.hasFundamentals`,
     // `queryReport()`, and its companion queries) is intentionally centralized
     // in the visible-board dispatcher below.
-    invalidateDeferredBoardLoads();
+    invalidateNavigationDependencies("asset_select", { assetId });
     if (activate) {
       activateBoard(boardIdFromLocationHash(), { focus: false });
     }
@@ -1311,12 +1513,19 @@ async function saveAssetPreferences() {
       }),
     });
     renderAssetPreferences(payload);
+    if (typeof invalidateNavigationDependencies === "function") {
+      invalidateNavigationDependencies("preferences_change", { source: "save_asset_preferences" });
+    }
     byId("asset-preferences-status").textContent = payload.scheduler_enabled
       ? `Preferencias guardadas · ${formatInteger(payload.scheduled_job_count)} trabajos activos`
       : "Preferencias guardadas · scheduler desactivado; 0 trabajos efectivos";
     await refreshOverview({ manual: false });
   } catch (error) {
-    if (error.code === "asset_preferences_conflict") await loadAssetPreferences();
+    if (error.code === "asset_preferences_conflict") {
+      await loadAssetPreferences();
+    } else if (typeof invalidateNavigationDependencies === "function") {
+      invalidateNavigationDependencies("operation_uncertain", { operation: "asset_preferences" });
+    }
     byId("asset-preferences-status").textContent = error.message;
   } finally {
     setButtonBusy(button, false, "Guardando…", "Guardar preferencias");
@@ -2336,32 +2545,158 @@ function clearPreviousCutNotice() {
 
 function updateReadRuntimeContext(payload) {
   if (!payload || typeof payload !== "object") return;
-  if (typeof payload.workspace_id === "string") currentWorkspaceId = payload.workspace_id;
+  const previousWorkspaceId = currentWorkspaceId;
+  const previousGeneration = readRuntimeGeneration;
+  if (typeof payload.workspace_id === "string" && payload.workspace_id.trim()) {
+    currentWorkspaceId = payload.workspace_id.trim();
+  }
   const runtime = payload.read_runtime;
-  if (runtime && typeof runtime.generation === "string") {
-    readRuntimeGeneration = runtime.generation;
+  if (runtime && typeof runtime.generation === "string" && runtime.generation.trim()) {
+    readRuntimeGeneration = runtime.generation.trim();
+  }
+  const workspaceChanged =
+    previousWorkspaceId !== null
+    && currentWorkspaceId !== null
+    && previousWorkspaceId !== currentWorkspaceId;
+  const generationChanged =
+    previousGeneration !== null
+    && readRuntimeGeneration !== null
+    && previousGeneration !== readRuntimeGeneration;
+  if (workspaceChanged || generationChanged) {
+    if (typeof clearViewPreviews === "function") clearViewPreviews();
+    if (typeof invalidateNavigationDependencies === "function") {
+      invalidateNavigationDependencies(
+        workspaceChanged ? "workspace_change" : "generation_change",
+        {
+          workspaceId: currentWorkspaceId,
+          generation: readRuntimeGeneration,
+        },
+      );
+    }
+  }
+}
+
+function buildViewPreviewKey(endpointOrDescriptor, extraParams = {}) {
+  const isDescriptor = endpointOrDescriptor && typeof endpointOrDescriptor === "object";
+  const endpoint = isDescriptor ? endpointOrDescriptor.endpoint : endpointOrDescriptor;
+  const params = isDescriptor
+    ? {
+        ...(endpointOrDescriptor.params || {}),
+        assetId: endpointOrDescriptor.assetId,
+        knownAt: endpointOrDescriptor.knownAt,
+        workspaceId: endpointOrDescriptor.workspaceId,
+        generation: endpointOrDescriptor.generation,
+      }
+    : (extraParams || {});
+  const schemaVersion = typeof VIEW_CONTEXT_PREVIEW_SCHEMA_VERSION === "string"
+    ? VIEW_CONTEXT_PREVIEW_SCHEMA_VERSION
+    : "local-view-preview-v2";
+  const cleanEndpoint = String(endpoint || "").trim();
+  const assetId = String(params.assetId ?? selectedMarketAsset ?? "").trim();
+  const knownAt = String(params.knownAt ?? (byId("report-known-at")?.value?.trim() || "")).trim();
+  const workspace = String(params.workspaceId ?? currentWorkspaceId ?? "workspace-uninitialized").trim();
+  const generation = String(params.generation ?? readRuntimeGeneration ?? "generation-uninitialized").trim();
+  const normalizedPairs = Object.keys(params || {})
+    .filter((k) => !["assetId", "knownAt", "workspaceId", "generation"].includes(k))
+    .sort()
+    .map((k) => `${k}=${String(params[k] ?? "").trim()}`);
+  return [
+    schemaVersion,
+    `ws=${workspace}`,
+    `gen=${generation}`,
+    `endpoint=${cleanEndpoint}`,
+    `asset=${assetId}`,
+    `known_at=${knownAt}`,
+    ...normalizedPairs,
+  ].join("|");
+}
+
+function clearViewPreviews() {
+  try {
+    const names = [];
+    for (let index = 0; index < sessionStorage.length; index += 1) {
+      const name = sessionStorage.key(index);
+      if (name && name.startsWith(VIEW_CONTEXT_PREVIEW_PREFIX)) names.push(name);
+    }
+    for (const name of names) {
+      sessionStorage.removeItem(name);
+    }
+  } catch (error) {
+    // Session preview cleanup is best-effort.
   }
 }
 
 function rememberViewPreview(key, payload) {
   try {
+    const schemaVersion = typeof VIEW_CONTEXT_PREVIEW_SCHEMA_VERSION === "string"
+      ? VIEW_CONTEXT_PREVIEW_SCHEMA_VERSION
+      : "local-view-preview-v2";
+    const maxSingleBytes = typeof VIEW_CONTEXT_PREVIEW_MAX_BYTES === "number"
+      ? VIEW_CONTEXT_PREVIEW_MAX_BYTES
+      : 1536 * 1024;
+    const maxTotalBytes = typeof VIEW_CONTEXT_PREVIEW_TOTAL_MAX_BYTES === "number"
+      ? VIEW_CONTEXT_PREVIEW_TOTAL_MAX_BYTES
+      : 2 * 1024 * 1024;
+    const maxEntries = typeof VIEW_CONTEXT_PREVIEW_MAX_ENTRIES === "number"
+      ? VIEW_CONTEXT_PREVIEW_MAX_ENTRIES
+      : 5;
+    const seq = typeof viewPreviewSequence === "number" ? (viewPreviewSequence += 1) : Date.now();
     const encoded = JSON.stringify({
-      schemaVersion: "local-view-preview-v1",
+      schemaVersion,
       key,
+      workspaceId: currentWorkspaceId,
+      generation: readRuntimeGeneration,
+      seq,
       capturedAt: new Date().toISOString(),
       payload,
     });
-    if (new TextEncoder().encode(encoded).length > VIEW_CONTEXT_PREVIEW_MAX_BYTES) return false;
-    sessionStorage.setItem(VIEW_CONTEXT_PREVIEW_PREFIX + key, encoded);
-    const keys = [];
+    const entryBytes = new TextEncoder().encode(encoded).length;
+    if (entryBytes > maxSingleBytes || entryBytes > maxTotalBytes) return false;
+    const fullStorageKey = VIEW_CONTEXT_PREVIEW_PREFIX + key;
+    sessionStorage.removeItem(fullStorageKey);
+    const existingEntries = [];
+    const staleNames = [];
+    let currentTotalBytes = 0;
     for (let index = 0; index < sessionStorage.length; index += 1) {
       const name = sessionStorage.key(index);
-      if (name && name.startsWith(VIEW_CONTEXT_PREVIEW_PREFIX)) keys.push(name);
+      if (!name || !name.startsWith(VIEW_CONTEXT_PREVIEW_PREFIX)) continue;
+      const raw = sessionStorage.getItem(name) || "";
+      let parsed = null;
+      try {
+        parsed = raw ? JSON.parse(raw) : null;
+      } catch {
+        parsed = null;
+      }
+      if (!parsed || parsed.schemaVersion !== schemaVersion) {
+        staleNames.push(name);
+        continue;
+      }
+      const bytes = new TextEncoder().encode(raw).length;
+      currentTotalBytes += bytes;
+      existingEntries.push({
+        name,
+        bytes,
+        seq: typeof parsed.seq === "number" ? parsed.seq : 0,
+      });
     }
-    while (keys.length > VIEW_CONTEXT_MAX_ENTRIES) {
-      const oldest = keys.shift();
-      if (oldest) sessionStorage.removeItem(oldest);
+    for (const staleName of staleNames) {
+      sessionStorage.removeItem(staleName);
     }
+    existingEntries.sort((a, b) => a.seq - b.seq);
+    while (
+      existingEntries.length > 0
+      && (
+        existingEntries.length >= maxEntries
+        || currentTotalBytes + entryBytes > maxTotalBytes
+      )
+    ) {
+      const oldest = existingEntries.shift();
+      if (oldest) {
+        sessionStorage.removeItem(oldest.name);
+        currentTotalBytes = Math.max(0, currentTotalBytes - oldest.bytes);
+      }
+    }
+    sessionStorage.setItem(fullStorageKey, encoded);
     return true;
   } catch (error) {
     return false;
@@ -2370,10 +2705,34 @@ function rememberViewPreview(key, payload) {
 
 function loadViewPreview(key) {
   try {
-    const raw = sessionStorage.getItem(VIEW_CONTEXT_PREVIEW_PREFIX + key);
+    const schemaVersion = typeof VIEW_CONTEXT_PREVIEW_SCHEMA_VERSION === "string"
+      ? VIEW_CONTEXT_PREVIEW_SCHEMA_VERSION
+      : "local-view-preview-v2";
+    const fullStorageKey = VIEW_CONTEXT_PREVIEW_PREFIX + key;
+    const raw = sessionStorage.getItem(fullStorageKey);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    return parsed && parsed.schemaVersion === "local-view-preview-v1" ? parsed.payload : null;
+    if (!parsed || parsed.schemaVersion !== schemaVersion || parsed.key !== key) {
+      sessionStorage.removeItem(fullStorageKey);
+      return null;
+    }
+    if (
+      parsed.workspaceId
+      && currentWorkspaceId
+      && parsed.workspaceId !== currentWorkspaceId
+    ) {
+      sessionStorage.removeItem(fullStorageKey);
+      return null;
+    }
+    if (
+      parsed.generation
+      && readRuntimeGeneration
+      && parsed.generation !== readRuntimeGeneration
+    ) {
+      sessionStorage.removeItem(fullStorageKey);
+      return null;
+    }
+    return parsed.payload ?? null;
   } catch (error) {
     return null;
   }
@@ -2951,12 +3310,21 @@ function clearActiveAssetContextSync(nextPresentation = null) {
 function resetInvestorOverviewCache() {
   investorOverviewState.contextKey = null;
   investorOverviewState.knownAt = null;
+  investorOverviewState.workspaceId = null;
+  investorOverviewState.generation = null;
   investorOverviewState.catalogVersion = null;
   investorOverviewState.catalogSha256 = null;
   investorOverviewState.windows = null;
   investorOverviewState.approxBytes = 0;
+  investorOverviewState.needsRevalidation = false;
+  investorOverviewState.assetFetchedAt?.clear?.();
   investorOverviewState.assetByteSizes.clear();
   investorOverviewState.byAssetId.clear();
+}
+
+function markInvestorOverviewForRevalidation() {
+  investorOverviewState.needsRevalidation = true;
+  investorOverviewState.assetFetchedAt?.clear?.();
 }
 
 function sameIsoTimestamp(left, right) {
@@ -2974,8 +3342,40 @@ function sameIsoTimestamp(left, right) {
   return subMs(a) === subMs(b);
 }
 
-function getCachedInvestorOverviewAsset(assetId, knownAt) {
+function isInvestorOverviewAssetFresh(assetId, knownAt, nowMs = Date.now()) {
   if (!investorOverviewState.contextKey || !sameIsoTimestamp(investorOverviewState.knownAt, knownAt)) {
+    return false;
+  }
+  if (investorOverviewState.needsRevalidation) return false;
+  const wsId = typeof currentWorkspaceId === "string" ? currentWorkspaceId : null;
+  const gen = typeof readRuntimeGeneration === "string" ? readRuntimeGeneration : null;
+  if (
+    (investorOverviewState.workspaceId || null) !== (wsId || null)
+    || (investorOverviewState.generation ?? null) !== (gen ?? null)
+  ) {
+    return false;
+  }
+  const fetchedAt = investorOverviewState.assetFetchedAt?.get?.(assetId);
+  if (!Number.isFinite(fetchedAt)) return false;
+  const windowMs = typeof NAVIGATION_REVALIDATION_WINDOW_MS === "number"
+    ? NAVIGATION_REVALIDATION_WINDOW_MS
+    : 60_000;
+  return nowMs - fetchedAt < windowMs;
+}
+
+function getCachedInvestorOverviewAsset(assetId, knownAt, options = {}) {
+  if (!investorOverviewState.contextKey || !sameIsoTimestamp(investorOverviewState.knownAt, knownAt)) {
+    return null;
+  }
+  const wsId = typeof currentWorkspaceId === "string" ? currentWorkspaceId : null;
+  const gen = typeof readRuntimeGeneration === "string" ? readRuntimeGeneration : null;
+  if (
+    (investorOverviewState.workspaceId || null) !== (wsId || null)
+    || (investorOverviewState.generation ?? null) !== (gen ?? null)
+  ) {
+    return null;
+  }
+  if (options.requireFresh && !isInvestorOverviewAssetFresh(assetId, knownAt, options.nowMs ?? Date.now())) {
     return null;
   }
   return investorOverviewState.byAssetId.get(assetId) || null;
@@ -2993,12 +3393,13 @@ function approximateJsonBytes(value) {
 
 function evictInvestorOverviewAsset(assetId) {
   const oldSize = investorOverviewState.assetByteSizes.get(assetId) || 0;
+  investorOverviewState.assetFetchedAt?.delete?.(assetId);
   investorOverviewState.assetByteSizes.delete(assetId);
   investorOverviewState.byAssetId.delete(assetId);
   investorOverviewState.approxBytes = Math.max(0, investorOverviewState.approxBytes - oldSize);
 }
 
-function storeInvestorOverviewAsset(asset) {
+function storeInvestorOverviewAsset(asset, fetchedAtMs = Date.now()) {
   const id = asset.asset_id;
   if (investorOverviewState.byAssetId.has(id)) {
     evictInvestorOverviewAsset(id);
@@ -3020,6 +3421,7 @@ function storeInvestorOverviewAsset(asset) {
   }
   investorOverviewState.byAssetId.set(id, asset);
   investorOverviewState.assetByteSizes.set(id, entryBytes);
+  investorOverviewState.assetFetchedAt?.set?.(id, fetchedAtMs);
   investorOverviewState.approxBytes += entryBytes;
 }
 
@@ -3040,10 +3442,22 @@ async function fetchInvestorOverviewBatch(assetIds, knownAt, options = {}) {
   }
   const uniqueIds = Array.from(new Set(normalizedIds)).sort();
   if (uniqueIds.length === 0) return null;
-  if (!sameIsoTimestamp(investorOverviewState.knownAt, requestKnownAt)) {
+  const runtimeWsId = typeof currentWorkspaceId === "string" ? currentWorkspaceId : null;
+  const runtimeGen = typeof readRuntimeGeneration === "string" ? readRuntimeGeneration : null;
+  if (
+    !sameIsoTimestamp(investorOverviewState.knownAt, requestKnownAt)
+    || (investorOverviewState.workspaceId || null) !== (runtimeWsId || null)
+    || (investorOverviewState.generation ?? null) !== (runtimeGen ?? null)
+  ) {
     resetInvestorOverviewCache();
   }
-  const missing = uniqueIds.filter((id) => !investorOverviewState.byAssetId.has(id));
+  const forceRevalidate = Boolean(options.forceRevalidate || investorOverviewState.needsRevalidation);
+  const nowMs = options.nowMs ?? Date.now();
+  const missing = uniqueIds.filter(
+    (id) => forceRevalidate
+      || !investorOverviewState.byAssetId.has(id)
+      || !isInvestorOverviewAssetFresh(id, requestKnownAt, nowMs),
+  );
   if (missing.length === 0) {
     return {
       schema_version: "investor-overview-v1",
@@ -3099,14 +3513,20 @@ async function fetchInvestorOverviewBatch(assetIds, knownAt, options = {}) {
       resetInvestorOverviewCache();
     }
     investorOverviewState.knownAt = payload.known_at;
+    const nextWsId = typeof currentWorkspaceId === "string" ? currentWorkspaceId : null;
+    const nextGen = typeof readRuntimeGeneration === "string" ? readRuntimeGeneration : null;
+    investorOverviewState.workspaceId = nextWsId || null;
+    investorOverviewState.generation = nextGen ?? null;
     investorOverviewState.catalogVersion = payload.catalog_version;
     investorOverviewState.catalogSha256 = payload.catalog_sha256;
     investorOverviewState.windows = payload.windows;
-    investorOverviewState.contextKey = `${payload.known_at}|${payload.catalog_sha256}`;
+    investorOverviewState.contextKey = `${payload.known_at}|${payload.catalog_sha256}|${investorOverviewState.workspaceId || ""}|${investorOverviewState.generation ?? ""}`;
+    const storedAtMs = options.nowMs ?? Date.now();
     for (const asset of assets) {
-      storeInvestorOverviewAsset(asset);
+      storeInvestorOverviewAsset(asset, storedAtMs);
     }
   }
+  investorOverviewState.needsRevalidation = false;
   return {
     schema_version: "investor-overview-v1",
     known_at: investorOverviewState.knownAt,

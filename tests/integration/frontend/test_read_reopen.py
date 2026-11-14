@@ -21,6 +21,8 @@ _FUNCTIONS = (
     "showPreviousCutNotice",
     "clearPreviousCutNotice",
     "updateReadRuntimeContext",
+    "buildViewPreviewKey",
+    "clearViewPreviews",
     "rememberViewPreview",
     "loadViewPreview",
     "api",
@@ -46,9 +48,13 @@ def _node_script() -> str:
     preamble = r"""
 const VIEW_CONTEXT_STORAGE_KEY = 'investment-analyst-view-context-v1';
 const VIEW_CONTEXT_PREVIEW_PREFIX = 'investment-analyst-view-preview-v1:';
+const VIEW_CONTEXT_PREVIEW_SCHEMA_VERSION = 'local-view-preview-v2';
 const VIEW_CONTEXT_MAX_ENTRIES = 8;
 const VIEW_CONTEXT_MAX_BYTES = 2 * 1024 * 1024;
-const VIEW_CONTEXT_PREVIEW_MAX_BYTES = 256 * 1024;
+const VIEW_CONTEXT_PREVIEW_MAX_ENTRIES = 5;
+const VIEW_CONTEXT_PREVIEW_MAX_BYTES = 1536 * 1024;
+const VIEW_CONTEXT_PREVIEW_TOTAL_MAX_BYTES = 2 * 1024 * 1024;
+let viewPreviewSequence = 0;
 const ERROR_MESSAGES = {};
 const apiInFlightRequests = new Map();
 let currentWorkspaceId = null;
@@ -99,11 +105,30 @@ async function run() {
     throw new Error('bound');
   }
   passed += 1;
-  if (rememberViewPreview('small', { value: 1 }) !== true) {
+  const previewKey = buildViewPreviewKey('market-chart', {
+    assetId: 'equity:us:amd',
+    knownAt: '2026-10-22T12:00:00Z',
+    period: '6M',
+    interval: '1d',
+  });
+  if (rememberViewPreview(previewKey, { value: 1 }) !== true) {
     throw new Error('preview-store');
   }
-  if (loadViewPreview('small').value !== 1) throw new Error('preview-load');
-  const large = { value: 'x'.repeat(300 * 1024) };
+  if (loadViewPreview(previewKey).value !== 1) throw new Error('preview-load');
+  for (let i = 0; i < 6; i += 1) {
+    const k = buildViewPreviewKey('market-chart', {
+      assetId: `equity:us:asset-${i}`,
+      knownAt: '2026-10-22T12:00:00Z',
+    });
+    rememberViewPreview(k, { value: i });
+  }
+  const previewCount = Array.from(memory.keys()).filter((k) =>
+    k.startsWith(VIEW_CONTEXT_PREVIEW_PREFIX)
+  ).length;
+  if (previewCount !== VIEW_CONTEXT_PREVIEW_MAX_ENTRIES) {
+    throw new Error('preview-entry-cap');
+  }
+  const large = { value: 'x'.repeat(1600 * 1024) };
   if (rememberViewPreview('large', large) !== false) {
     throw new Error('preview-limit');
   }

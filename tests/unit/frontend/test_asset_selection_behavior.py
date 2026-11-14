@@ -37,8 +37,8 @@ def test_deferred_board_failure_releases_the_loaded_marker_for_retry() -> None:
 def test_default_known_at_cut_is_a_stable_utc_day() -> None:
     assert "function defaultKnownAtCut()" in APP_CORE
     assert "cut.setUTCHours(0, 0, 0, 0);" in APP_CORE
-    assert "knownAtByAsset.get(assetId) || defaultKnownAtCut()" in APP_CORE
-    assert "knownAtByAsset.get(assetId) || new Date().toISOString()" not in APP_CORE
+    assert "knownAtByAsset" not in APP_CORE
+    assert 'byId("report-known-at").value.trim() || defaultKnownAtCut()' in APP_CORE
     assert 'byId("report-known-at").value = defaultKnownAtCut();' in APP_SHELL
 
 
@@ -131,4 +131,5 @@ def test_first_contractual_catalog_asset_wins_without_an_explicit_choice() -> No
 def test_explicit_known_at_now_button_does_not_affect_automatic_asset_switching() -> None:
     assert 'byId("known-at-now-btn")?.addEventListener("click"' in APP_SHELL
     assert "input.value = new Date().toISOString();" in APP_SHELL
-    assert "knownAtByAsset.get(assetId) || defaultKnownAtCut()" in APP_CORE
+    assert "knownAtByAsset" not in APP_CORE
+    assert 'byId("report-known-at").value.trim() || defaultKnownAtCut()' in APP_CORE
