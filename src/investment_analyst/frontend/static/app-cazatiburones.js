@@ -453,6 +453,13 @@ function initializeCazatiburonesUniverseFilters() {
   });
 }
 
+function resetCazatiburonesNavigationContext() {
+  cazatiburonesUniverseRequestSequence += 1;
+  cazatiburonesUniverseSnapshot = null;
+  resetCazatiburonesUniverseWindow();
+  resetCazatiburonesDetail();
+}
+
 async function loadCazatiburonesUniverseIndex() {
   const sequence = ++cazatiburonesUniverseRequestSequence;
   const knownAt = byId("report-known-at").value.trim();
@@ -461,6 +468,9 @@ async function loadCazatiburonesUniverseIndex() {
   renderCazatiburonesUniverseLoading();
   if (!knownAt) {
     if (sequence !== cazatiburonesUniverseRequestSequence) return;
+    if (typeof loadedBoardIds === "object" && loadedBoardIds && typeof loadedBoardIds.delete === "function") {
+      loadedBoardIds.delete("cazatiburones");
+    }
     renderCazatiburonesUniverseError("El corte global no está disponible para consultar el índice.");
     return;
   }
@@ -486,7 +496,11 @@ async function loadCazatiburonesUniverseIndex() {
       || knownAt !== byId("report-known-at").value.trim()
     ) return;
     cazatiburonesUniverseSnapshot = null;
+    if (typeof loadedBoardIds === "object" && loadedBoardIds && typeof loadedBoardIds.delete === "function") {
+      loadedBoardIds.delete("cazatiburones");
+    }
     renderCazatiburonesUniverseError(error.message || "No fue posible consultar el índice universe-wide.");
+    throw error;
   }
 }
 

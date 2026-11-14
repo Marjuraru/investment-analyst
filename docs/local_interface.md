@@ -61,6 +61,58 @@ queda disponible para las lecturas documentales existentes sin mezclarla con fun
   incidencias y alertas operativas viven en `#sistema-verificacion` y `#sistema-incidencias`; los
   paneles experimentales ML/PIT permanecen en `#sistema-investigacion` sin carga automática.
 
+## Navegación estable y revalidación acotada (`INVESTOR-NAVIGATION-STATE`)
+
+- **Corte `known_at` verdaderamente global frente a selección de activo**: `#report-known-at` se
+  inicializa una sola vez por sesión (`defaultKnownAtCut()`, medianoche UTC vigente) y permanece
+  inalterado al cambiar el activo seleccionado en `#asset-combobox` o mediante navegación contextual
+  sin `knownAt` explícito. No existe diccionario `knownAtByAsset`, y `applyOverview` jamás
+  sobrescribe un `#report-known-at` ya poblado. Sólo una edición explícita de `#report-known-at`,
+  el botón `#known-at-now-btn` («Ahora»), el envío de `run-form` o un salto contextual con `knownAt`
+  explícito modifican el corte global.
+- **Matriz determinista de invalidación (`NAVIGATION_INVALIDATION_MATRIX`)**:
+  - `asset_select`: invalida únicamente `activo` (`activeAssetSubtabKeys`, secuencias de petición y
+    superficie activa) y `tecnico` (patrones diarios y resultados de comparación cuando cambia la
+    selección), preservando `mesa`, `cazatiburones` (snapshot universe-wide), `revisar`, `sistema`
+    y el corte `#report-known-at`.
+  - `known_at_change`, `workspace_change` y `generation_change`: invalidan todas las dependencias
+    point-in-time (`mesa`, `activo`, `tecnico`, `revisar`, `cazatiburones`, `sistema` y
+    `investorOverviewState`), y en cambios de `workspace_id` o `generation` purgan además las vistas
+    previas de `sessionStorage`.
+  - `market_range_or_settings_change`, `fundamental_frequency_change` y
+    `valuation_date_or_filing_change`: invalidan exclusivamente las subpestañas afectadas de
+    `activo` (`mercado`, `fundamentales`/`analisis` o `valoracion`).
+  - `preferences_change`: marca `Mesa` para revalidación in-place y reordena/refiltra localmente sin
+    borrar filas ni marcas de tablero.
+  - `operation_success` y `operation_uncertain`: tras cualquier POST operativo (Con éxito o fallo
+    con estado incierto), purgan las vistas previas y marcan `Mesa` y sus 3 bandejas rápidas para
+    revalidación in-place, invalidando de forma acotada las superficies afectadas (`revisar`,
+    `cazatiburones` o `activo`).
+- **Retención de `60 s` y revalidación in-place en `Mesa` (`NAVIGATION_REVALIDATION_WINDOW_MS`)**:
+  - Dentro de la ventana de `60 s` bajo el mismo contexto (`known_at`, `workspace_id`, `generation`),
+    volver a `Mesa` reutiliza la tabla (`<tr>` existentes en DOM) y las 3 bandejas rápidas
+    (candidatos analíticos, institucional 13F y actividad declarada) con `0` peticiones adicionales.
+  - Pasados `60 s`, tras una invalidación de la matriz o al pulsar `#mesa-revalidate-btn`
+    («Actualizar Mesa») / `#refresh-overview` («Verificar»), `Mesa` y sus 3 bandejas rápidas
+    revalidan in-place conservando los nodos `<tr>` existentes (`patchMesaRowsInPlace`), búsqueda,
+    filtros, ordenación y filas de detalle expandidas, mostrando el aviso compacto
+    «Última consulta … · Actualizando…».
+  - Si la revalidación sobre el mismo contexto falla, se conserva el último snapshot válido en
+    pantalla junto con un aviso compacto de error (`.mesa-revalidation-notice.is-error`) y acción de
+    reintento; si no existía snapshot previo o cambió el contexto (`known_at`, `workspace_id`,
+    `generation`), se muestra el estado explícito de error sin reutilizar datos de otro contexto.
+- **Desacoplamiento de `refreshOverview` y preview `local-view-preview-v2`**:
+  - `refreshOverview()` se ejecuta una sola vez en `initialize()`, comparte una única promesa en
+    vuelo (`overviewInFlightPromise`), queda fuera de `BOARD_DEFERRED_LOADS.mesa` y nunca dispara
+    `/api/v1/overview` al cambiar de tablero.
+  - Las vistas de `Activo` (`market-chart`, `fundamental-research`, `report`) almacenan hasta `5`
+    previews en `sessionStorage` bajo el esquema `local-view-preview-v2` (tope `1536 KiB` por entrada
+    y `2 MiB` total), indexadas por `schema_version`, `workspace_id`, `generation`, `endpoint`,
+    `asset_id`, `known_at` y parámetros de vista. Al reabrir una clave coincidente, pintan la vista
+    previa con estado explícito «Vista anterior; verificando» (`.view-preview-verifying`) y botones
+    de exportación deshabilitados mientras ejecutan siempre la consulta viva; si la consulta viva
+    falla o se aborta, limpian la vista previa para no dejar datos no verificados.
+
 ## Eficiencia y reapertura (`DATA-CHASSIS-47`)
 
 La vista local conserva un contexto versionado por UUID, generación/release, tablero, activo,
@@ -277,9 +329,11 @@ necesarias para resolver el armazón. Después de que `activateBoard()` resuelve
 el hash y fija `[hidden]`, una matriz única dispara las peticiones del tablero
 visible:
 
-- `mesa` (`UI-6`) carga el snapshot operativo, las novedades de reglas analíticas, las
-  incidencias operativas y, una sola vez por activación, la matriz de cobertura del universo;
-- `activo` carga el reporte, el gráfico de mercado y las dos lecturas fundamentales;
+- `mesa` (`UI-6` / `INVESTOR-NAVIGATION-STATE`) carga la tabla del inversor por lotes y las tres
+  bandejas rápidas (candidatos analíticos, institucional 13F y actividad declarada); el snapshot
+  operativo (`refreshOverview`) corre una sola vez en `initialize()` con promesa en vuelo compartida
+  y queda desacoplado de la navegación entre tableros;
+- `activo` carga bajo demanda únicamente la subpestaña visible (`loadActivoCurrentSubtab`);
 - `tecnico` no hace peticiones automáticas en este bloque; su panel de estados y patrones sólo
   consulta al enviar un formulario explícito. `sistema` tampoco añade ninguna nueva, más allá de las
   que ya disparaba bajo demanda su panel de watchlist, ahora alojado en este tablero;
@@ -287,9 +341,11 @@ visible:
 - `cazatiburones` carga una vez el índice `universe-activity`; sus tres lecturas SEC/13F sólo se
   solicitan tras elegir una fila local y conservan su propio estado.
 
-Cada tablero se marca como cargado en memoria una sola vez por sesión de
-página. Cambiar el activo seleccionado o el único corte `known_at` global
-borra esas marcas y vuelve a cargar sólo el tablero que permanece visible; no
+Cada tablero se marca como cargado en memoria por sesión de página. Cambiar el
+activo seleccionado invalida únicamente `activo` y `tecnico` (preservando `mesa`,
+`cazatiburones`, `revisar`, `sistema` y el corte `#report-known-at`), mientras
+que cambiar el único corte `known_at` global invalida todos los tableros
+dependientes del corte y vuelve a cargar sólo el tablero que permanece visible; no
 se crea un segundo reloj, selector o corte por tablero. La carga de `activo`
 captura la secuencia, el activo y el corte al iniciar. Antes de pintar o
 mostrar un error, cada respuesta comprueba que los tres siguen vigentes; una

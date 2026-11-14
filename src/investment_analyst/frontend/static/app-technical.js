@@ -302,6 +302,22 @@ function renderMarketComparison(payload) {
   results.classList.remove("hidden");
 }
 
+function resetMarketComparisonResults() {
+  marketComparisonRequestSequence += 1;
+  const results = byId("comparison-results");
+  if (results) {
+    results.classList.add("hidden");
+    results.setAttribute("aria-busy", "false");
+  }
+  byId("comparison-chart")?.replaceChildren();
+  byId("comparison-cards")?.replaceChildren();
+  if (byId("comparison-json")) byId("comparison-json").textContent = "";
+  if (byId("comparison-status")) {
+    byId("comparison-status").textContent = "Selecciona una referencia y al menos un segundo activo.";
+  }
+  if (byId("comparison-submit")) byId("comparison-submit").disabled = false;
+}
+
 async function queryMarketComparison() {
   const assets = comparisonSelectedAssets();
   const benchmark = byId("comparison-benchmark").value;
@@ -391,7 +407,9 @@ function appendDailyPatternsRow(container, label, value) {
 }
 
 function resetDailyMarketPatterns() {
-  const key = `${selectedMarketAsset || ""}|${byId("report-known-at").value.trim()}`;
+  const wsId = typeof currentWorkspaceId === "string" ? currentWorkspaceId : "";
+  const gen = typeof readRuntimeGeneration === "string" ? readRuntimeGeneration : "";
+  const key = `${selectedMarketAsset || ""}|${byId("report-known-at").value.trim()}|${wsId}|${gen}`;
   if (key === dailyPatternsContextKey) return;
   dailyPatternsContextKey = key;
   dailyPatternsRequestSequence += 1;
@@ -402,6 +420,7 @@ function resetDailyMarketPatterns() {
   const results = byId("daily-patterns-results");
   results.classList.add("hidden");
   results.setAttribute("aria-busy", "false");
+  if (byId("daily-patterns-summary")) byId("daily-patterns-summary").textContent = "";
   byId("daily-patterns-current").replaceChildren();
   byId("daily-patterns-segments").replaceChildren();
   byId("daily-patterns-events").replaceChildren();

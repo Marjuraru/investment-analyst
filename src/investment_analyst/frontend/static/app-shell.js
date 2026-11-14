@@ -246,6 +246,7 @@ function renderMarketClocks(now = new Date()) {
 let marketClockTimer = null;
 let overviewTimer = null;
 let overviewRequestActive = false;
+let overviewInFlightPromise = null;
 let overviewFailureCount = 0;
 
 function startMarketClocks() {
@@ -278,28 +279,45 @@ function scheduleOverviewRefresh() {
 }
 
 async function refreshOverview({ manual = false } = {}) {
-  if (overviewRequestActive) return;
+  if (overviewRequestActive && overviewInFlightPromise) {
+    return overviewInFlightPromise;
+  }
   overviewRequestActive = true;
   const button = byId("refresh-overview");
-  if (manual) setButtonBusy(button, true, "Verificando…", "Verificar");
-  try {
-    const overview = await api("/api/v1/overview");
-    applyOverview(overview);
-    updateReadRuntimeContext(overview);
-    overviewFailureCount = 0;
-  } catch (error) {
-    overviewFailureCount += 1;
-    if (manual) setMessage(error.message, true);
-    badge(byId("health-badge"), "Sin conexión", "bad");
-  } finally {
-    overviewRequestActive = false;
-    if (manual) setButtonBusy(button, false, "Verificando…", "Verificar");
-    scheduleOverviewRefresh();
-  }
+  if (manual && button) setButtonBusy(button, true, "Verificando…", "Verificar");
+  overviewInFlightPromise = (async () => {
+    try {
+      const overview = await api("/api/v1/overview");
+      applyOverview(overview);
+      updateReadRuntimeContext(overview);
+      overviewFailureCount = 0;
+      if (
+        !document.hidden
+        && boardDataReady
+        && boardIdFromLocationHash() === "mesa"
+        && typeof maybeRevalidateVisibleMesaBoard === "function"
+      ) {
+        void maybeRevalidateVisibleMesaBoard({ reason: "polling" });
+      }
+      return overview;
+    } catch (error) {
+      overviewFailureCount += 1;
+      if (manual) setMessage(error.message, true);
+      badge(byId("health-badge"), "Sin conexión", "bad");
+      return null;
+    } finally {
+      overviewRequestActive = false;
+      overviewInFlightPromise = null;
+      if (manual && button) setButtonBusy(button, false, "Verificando…", "Verificar");
+      scheduleOverviewRefresh();
+    }
+  })();
+  return overviewInFlightPromise;
 }
 
 byId("report-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  renderKnownAtCut(byId("report-known-at").value.trim());
   selectFundamentalFrequency(byId("report-frequency").value);
   await queryReport();
   await Promise.all([
@@ -309,10 +327,12 @@ byId("report-form").addEventListener("submit", async (event) => {
   ]);
 });
 
-byId("refresh-overview").addEventListener(
-  "click",
-  () => refreshOverview({ manual: true }),
-);
+byId("refresh-overview").addEventListener("click", () => {
+  void refreshOverview({ manual: true });
+  if (boardIdFromLocationHash() === "mesa" && typeof revalidateMesaBoard === "function") {
+    void revalidateMesaBoard({ manual: true });
+  }
+});
 byId("asset-preferences-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   await saveAssetPreferences();
@@ -399,6 +419,9 @@ byId("chart-interval").addEventListener("change", async (event) => {
   applySelectedMarketAsset();
   applyChartSettings();
   persistChartSettings();
+  if (typeof invalidateNavigationDependencies === "function") {
+    invalidateNavigationDependencies("market_range_or_settings_change", { source: "chart_interval" });
+  }
   await queryMarketChart();
 });
 
@@ -436,6 +459,9 @@ byId("chart-settings-form").addEventListener("submit", async (event) => {
   applyChartSettings();
   persistChartSettings();
   byId("chart-settings").open = false;
+  if (requiresDataRefresh && typeof invalidateNavigationDependencies === "function") {
+    invalidateNavigationDependencies("market_range_or_settings_change", { source: "chart_settings" });
+  }
   if (requiresDataRefresh || marketChartPayload === null) await queryMarketChart();
   else renderMarketChart(marketChartPayload, { preserveViewport: true });
 });
@@ -453,6 +479,9 @@ byId("chart-settings-reset").addEventListener("click", async () => {
   applyChartSettings();
   persistChartSettings();
   byId("chart-settings").open = false;
+  if (requiresDataRefresh && typeof invalidateNavigationDependencies === "function") {
+    invalidateNavigationDependencies("market_range_or_settings_change", { source: "chart_settings_reset" });
+  }
   if (requiresDataRefresh || marketChartPayload === null) await queryMarketChart();
   else renderMarketChart(marketChartPayload, { preserveViewport: true });
 });
@@ -460,6 +489,11 @@ byId("chart-settings-reset").addEventListener("click", async () => {
 for (const button of document.querySelectorAll(".frequency-button")) {
   button.addEventListener("click", async () => {
     selectFundamentalFrequency(button.dataset.frequency);
+    if (typeof invalidateNavigationDependencies === "function") {
+      invalidateNavigationDependencies("fundamental_frequency_change", {
+        frequency: button.dataset.frequency,
+      });
+    }
     await Promise.all([
       queryFundamentalTrend(),
       queryFundamentalResearch(),
@@ -479,6 +513,9 @@ byId("valuation-filing-picker").addEventListener("toggle", (event) => {
 });
 
 byId("valuation-filing-option").addEventListener("change", () => {
+  if (typeof invalidateNavigationDependencies === "function") {
+    invalidateNavigationDependencies("valuation_date_or_filing_change", { source: "filing_option" });
+  }
   onValuationFilingSelectionChange();
 });
 
@@ -487,10 +524,16 @@ byId("query-valuation-filing").addEventListener("click", () => {
 });
 
 byId("valuation-filing-reset").addEventListener("click", () => {
+  if (typeof invalidateNavigationDependencies === "function") {
+    invalidateNavigationDependencies("valuation_date_or_filing_change", { source: "filing_reset" });
+  }
   resetValuationToLatest();
 });
 
 byId("valuation-date").addEventListener("change", () => {
+  if (typeof invalidateNavigationDependencies === "function") {
+    invalidateNavigationDependencies("valuation_date_or_filing_change", { source: "valuation_date" });
+  }
   invalidateValuationFilingSelection();
 });
 
@@ -545,23 +588,16 @@ byId("crypto-derivatives-panel").addEventListener("toggle", (event) => {
 });
 
 byId("report-known-at").addEventListener("change", () => {
-  renderKnownAtCut(byId("report-known-at").value.trim());
-  if (typeof abortMesaInvestorRequests === "function") {
-    abortMesaInvestorRequests();
-    if (typeof mesaInvestorUiState === "object" && mesaInvestorUiState) {
-      mesaInvestorUiState.failedAssetIds?.clear();
-      mesaInvestorUiState.pausedAssetIds?.clear();
-      mesaInvestorUiState.cancelledAssetIds?.clear();
-      mesaInvestorUiState.batchError = null;
-      mesaInvestorUiState.pausedReason = null;
-      mesaInvestorUiState.hasQueriedCut = "";
-      mesaInvestorUiState.batchStatus = "idle";
-    }
+  const knownAt = byId("report-known-at").value.trim();
+  renderKnownAtCut(knownAt);
+  if (typeof invalidateNavigationDependencies === "function") {
+    invalidateNavigationDependencies("known_at_change", { knownAt });
+  } else {
+    resetInvestorOverviewCache();
+    clearActiveAssetContextSync(marketAssetPresentation());
+    invalidateValuationFilingSelection();
+    invalidateDeferredBoardLoads();
   }
-  resetInvestorOverviewCache();
-  clearActiveAssetContextSync(marketAssetPresentation());
-  invalidateValuationFilingSelection();
-  invalidateDeferredBoardLoads();
   if (marketAssetPresentation().supportsCryptoDerivatives && byId("crypto-derivatives-panel").open) {
     cryptoDerivativesPayload = null;
     void queryCryptoDerivatives();
@@ -663,18 +699,19 @@ function resolveContextualDestination(request) {
   const definition = CONTEXTUAL_NAVIGATION_REGISTRY[request.board];
   const board = BOARD_REGISTRY.find((candidate) => candidate.id === request.board);
   if (!definition || !board || !board.built) return null;
+  const explicitKnownAt = contextualIdentity(request.knownAt ?? request.known_at);
 
   if (request.board === "activo") {
     const assetId = contextualIdentity(request.assetId);
     const subtab = contextualIdentity(request.subtab) || "mercado";
     if (!assetId || !definition.subtabs.includes(subtab) || !marketAssets[assetId]) return null;
-    return Object.freeze({ boardId: "activo", assetId, subtab });
+    return Object.freeze({ boardId: "activo", assetId, subtab, knownAt: explicitKnownAt });
   }
 
   if (request.board === "sistema") {
     const panel = contextualIdentity(request.panel);
     if (panel && !definition.panels.includes(panel)) return null;
-    return Object.freeze({ boardId: "sistema", panel: panel || null });
+    return Object.freeze({ boardId: "sistema", panel: panel || null, knownAt: explicitKnownAt });
   }
 
   const id = contextualIdentity(request.id);
@@ -687,14 +724,36 @@ function resolveContextualDestination(request) {
       family,
       id,
       context: request.context && typeof request.context === "object" ? request.context : null,
+      knownAt: explicitKnownAt,
     });
   }
-  return Object.freeze({ boardId: request.board, family, id });
+  return Object.freeze({ boardId: request.board, family, id, knownAt: explicitKnownAt });
 }
 
 function contextualNavigationUnavailable(reason) {
   setMessage("Destino no disponible: " + reason, true);
   return false;
+}
+
+function applyExplicitContextualKnownAt(explicitKnownAt) {
+  const normalizedCut = contextualIdentity(explicitKnownAt);
+  if (!normalizedCut) return false;
+  const input = byId("report-known-at");
+  if (!input) return false;
+  const previousCut = input.value.trim();
+  if (sameIsoTimestamp(previousCut, normalizedCut)) return false;
+  input.value = normalizedCut;
+  renderKnownAtCut(normalizedCut);
+  if (typeof invalidateNavigationDependencies === "function") {
+    invalidateNavigationDependencies("known_at_change", {
+      knownAt: normalizedCut,
+      source: "contextual_navigation",
+    });
+  } else {
+    invalidateDeferredBoardLoads();
+  }
+  setMessage(`Corte actualizado desde evidencia contextual: ${formatKnownAtLabel(normalizedCut)}.`);
+  return true;
 }
 
 function createContextualNavigationButton(label, request, className = "contextual-navigation-button") {
@@ -768,6 +827,9 @@ function navigateToContext(request) {
   if (!target) {
     return contextualNavigationUnavailable("la identidad o el destino no es valido.");
   }
+  if (target.knownAt) {
+    applyExplicitContextualKnownAt(target.knownAt);
+  }
   if (target.boardId === "activo") return navigateToAssetContext(target);
   if (target.boardId === "revisar") return navigateToReviewContext(target);
   if (target.boardId === "cazatiburones") return navigateToCazatiburonesContext(target);
@@ -781,7 +843,6 @@ function navigateToContext(request) {
 const BOARD_DEFERRED_LOADS = Object.freeze({
   mesa: Object.freeze([
     loadMesaInvestorOverview,
-    refreshOverview,
     loadMesaAnalyticalNews,
     loadMesaCazatiburonesNewsFamilies,
   ]),
@@ -804,17 +865,25 @@ async function loadActivoCompactHeader(deferredRequest = null) {
     && knownAt === byId("report-known-at").value.trim()
     && (!deferredRequest || isCurrentActivoBoardRequest(deferredRequest));
   if (!isStillCurrent()) return;
-  const cached = getCachedInvestorOverviewAsset(assetId, knownAt);
-  if (cached) {
+  const freshCached = getCachedInvestorOverviewAsset(assetId, knownAt, { requireFresh: true });
+  if (freshCached) {
     if (typeof renderActivoCompactHeader === "function") {
-      renderActivoCompactHeader(cached, investorOverviewState.knownAt || knownAt);
+      renderActivoCompactHeader(freshCached, investorOverviewState.knownAt || knownAt);
     }
     return;
+  }
+  const staleSameContext = getCachedInvestorOverviewAsset(assetId, knownAt, { requireFresh: false });
+  if (staleSameContext && typeof renderActivoCompactHeader === "function") {
+    renderActivoCompactHeader(staleSameContext, investorOverviewState.knownAt || knownAt);
   }
   const signal = activeAssetAbortController ? activeAssetAbortController.signal : undefined;
   const retryHeader = () => loadActivoCompactHeader();
   try {
-    const fetchHeader = () => fetchInvestorOverviewBatch([assetId], knownAt, { signal });
+    const fetchHeader = () =>
+      fetchInvestorOverviewBatch([assetId], knownAt, {
+        signal,
+        forceRevalidate: Boolean(staleSameContext),
+      });
     const overview = typeof runWithActivoConcurrencyLimit === "function"
       ? await runWithActivoConcurrencyLimit(fetchHeader, { signal })
       : await fetchHeader();
@@ -921,8 +990,11 @@ function isCurrentActivoBoardRequest(deferredRequest) {
   );
 }
 
+const boardActivationSequences = new Map();
+
 function invalidateDeferredBoardLoads() {
   loadedBoardIds.clear();
+  boardActivationSequences.clear();
   activoBoardRequestSequence += 1;
   marketChartRequestSequence += 1;
   fundamentalTrendRequestSequence += 1;
@@ -938,24 +1010,41 @@ function invalidateDeferredBoardLoads() {
 }
 
 function loadDeferredBoardData(boardId) {
-  if (!boardDataReady || loadedBoardIds.has(boardId)) return;
+  if (!boardDataReady) return;
+  if (loadedBoardIds.has(boardId)) {
+    if (boardId === "mesa" && typeof maybeRevalidateVisibleMesaBoard === "function") {
+      void maybeRevalidateVisibleMesaBoard({ reason: "navigation" });
+    }
+    return;
+  }
   const loaders = BOARD_DEFERRED_LOADS[boardId];
   if (!loaders) return;
   loadedBoardIds.add(boardId);
+  const activationSeq = (boardActivationSequences.get(boardId) || 0) + 1;
+  boardActivationSequences.set(boardId, activationSeq);
   if (boardId === "mesa" && loaders.length > 1) {
+    let primaryFailed = false;
     Promise.resolve()
       .then(() => loaders[0]())
       .catch(() => {
-        loadedBoardIds.delete(boardId);
+        primaryFailed = true;
       })
-      .finally(() => {
-        Promise.allSettled(
-          loaders.slice(1).map((load) => Promise.resolve().then(() => load())),
-        ).then((results) => {
-          if (results.some((result) => result.status === "rejected")) {
-            loadedBoardIds.delete(boardId);
+      .finally(async () => {
+        for (const load of loaders.slice(1)) {
+          try {
+            await load();
+          } catch {
+            // Side inbox failures are independent and retain their own retry controls.
           }
-        });
+        }
+        if (boardActivationSequences.get(boardId) !== activationSeq) return;
+        const tableFailed = typeof mesaInvestorUiState === "object"
+          && mesaInvestorUiState
+          && mesaInvestorUiState.lastSuccessAt === 0
+          && (mesaInvestorUiState.batchStatus === "error" || mesaInvestorUiState.batchStatus === "cancelled");
+        if (primaryFailed || tableFailed) {
+          loadedBoardIds.delete(boardId);
+        }
       });
     return;
   }
@@ -968,7 +1057,10 @@ function loadDeferredBoardData(boardId) {
     Promise.allSettled(
       loaders.map((load) => Promise.resolve().then(() => load(deferredRequest))),
     ).then((results) => {
-      if (results.some((result) => result.status === "rejected")) {
+      if (
+        deferredRequest.sequence === activoBoardRequestSequence
+        && results.some((result) => result.status === "rejected")
+      ) {
         loadedBoardIds.delete(boardId);
       }
     });
@@ -976,7 +1068,10 @@ function loadDeferredBoardData(boardId) {
   }
   Promise.allSettled(loaders.map((load) => Promise.resolve().then(() => load()))).then(
     (results) => {
-      if (results.some((result) => result.status === "rejected")) {
+      if (
+        boardActivationSequences.get(boardId) === activationSeq
+        && results.some((result) => result.status === "rejected")
+      ) {
         loadedBoardIds.delete(boardId);
       }
     },
@@ -1146,5 +1241,6 @@ async function initialize() {
   // dispatches only its universe index; detail reads require a local row selection.
   loadDeferredBoardData(boardIdFromLocationHash());
   populateMarketComparisonAssets();
+  void refreshOverview({ manual: false });
   startMarketClocks();
 }

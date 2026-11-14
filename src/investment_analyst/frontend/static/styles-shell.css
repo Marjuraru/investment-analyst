@@ -867,3 +867,8 @@ main {
   border-color: var(--accent);
   color: var(--ink-strong);
 }
+
+.view-preview-verifying {
+  color: var(--warning-ink);
+  font-weight: 660;
+}

@@ -1439,6 +1439,30 @@ async function queryMarketChart(deferredRequest = null) {
     parameters.set("bollinger_window", String(chartSettings.bollingerWindow));
     parameters.set("bollinger_multiplier", chartSettings.bollingerMultiplier);
   }
+  const previewKey = typeof buildViewPreviewKey === "function"
+    ? buildViewPreviewKey({
+        endpoint: intraday ? "/api/market-intraday" : "/api/market-chart",
+        assetId,
+        knownAt,
+        params: {
+          interval: chartSettings.interval,
+          period: intraday ? "24h" : requestedPeriod,
+          short_sma_window: intraday ? "" : String(chartSettings.shortWindow),
+          long_sma_window: intraday ? "" : String(chartSettings.longWindow),
+          third_sma_window: intraday ? "" : String(chartSettings.thirdWindow),
+          bollinger_window: intraday ? "" : String(chartSettings.bollingerWindow),
+          bollinger_multiplier: intraday ? "" : String(chartSettings.bollingerMultiplier),
+        },
+      })
+    : `market-chart:${assetId}:${knownAt}`;
+  const preview = typeof loadViewPreview === "function" ? loadViewPreview(previewKey) : null;
+  if (preview) {
+    renderMarketChart(intraday ? normalizeBtcIntradayChart(preview) : preview);
+    setExportAvailable("export-market-csv", false);
+    byId("chart-status").textContent = "Vista anterior; verificando con el histórico local…";
+  } else {
+    byId("chart-status").textContent = "Consultando el histórico local…";
+  }
   const signal = activeAssetAbortController ? activeAssetAbortController.signal : undefined;
   const retryChart = () => {
     activeAssetSubtabKeys.delete("mercado");
@@ -1457,7 +1481,7 @@ async function queryMarketChart(deferredRequest = null) {
       { signal },
     );
     if (!isCurrentRequest()) return;
-    rememberViewPreview(`market-chart:${assetId}:${knownAt}`, payload);
+    rememberViewPreview(previewKey, payload);
     clearPreviousCutNotice();
     renderMarketChart(intraday ? normalizeBtcIntradayChart(payload) : payload);
     if (typeof setActiveAssetContextState === "function") {
@@ -1473,6 +1497,15 @@ async function queryMarketChart(deferredRequest = null) {
   } catch (error) {
     if (error && error.name === "AbortError") {
       if (isCurrentRequest()) {
+        if (preview) {
+          marketChartPayload = null;
+          marketChartViewport = null;
+          updateMarketChartZoomState();
+          setExportAvailable("export-market-csv", false);
+          if (typeof resetMarketSnapshot === "function") resetMarketSnapshot();
+          byId("market-chart").replaceChildren();
+          byId("chart-table-body").replaceChildren();
+        }
         const empty = byId("chart-empty");
         if (empty) {
           empty.textContent = "Consulta de gráfico cancelada. Puedes reintentar manualmente.";
@@ -2655,6 +2688,23 @@ async function queryFundamentalResearch(deferredRequest = null) {
     known_at: knownAt,
     frequency,
   });
+  const previewKey = typeof buildViewPreviewKey === "function"
+    ? buildViewPreviewKey({
+        endpoint: "/api/fundamental-analysis",
+        assetId,
+        knownAt,
+        params: { frequency },
+      })
+    : `fundamental-analysis:${assetId}:${knownAt}:${frequency}`;
+  const preview = typeof loadViewPreview === "function" ? loadViewPreview(previewKey) : null;
+  if (preview) {
+    renderFundamentalResearch(preview);
+    setExportAvailable("export-fundamental-research-csv", false);
+    const contextEl = byId("fundamental-research-context");
+    if (contextEl) {
+      contextEl.textContent = `${contextEl.textContent} · Vista anterior; verificando`;
+    }
+  }
   const signal = activeAssetAbortController ? activeAssetAbortController.signal : undefined;
   const retryResearch = () => {
     activeAssetSubtabKeys.delete("fundamentales");
@@ -2670,12 +2720,19 @@ async function queryFundamentalResearch(deferredRequest = null) {
     }
     const payload = await api(`/api/fundamental-analysis?${parameters.toString()}`, { signal });
     if (!isCurrentRequest()) return;
-    rememberViewPreview(`fundamental-analysis:${assetId}:${knownAt}:${frequency}`, payload);
+    rememberViewPreview(previewKey, payload);
     clearPreviousCutNotice();
     renderFundamentalResearch(payload);
   } catch (error) {
     if (error && error.name === "AbortError") {
       if (isCurrentRequest()) {
+        if (preview) {
+          fundamentalResearchPayload = null;
+          setExportAvailable("export-fundamental-research-csv", false);
+          resetFundamentalResearch();
+          resetCompanyProfile();
+          resetAnnualHorizons({ clearAnchor: true, clearMetrics: true });
+        }
         const empty = byId("fundamental-research-empty");
         if (empty) {
           empty.textContent = "Consulta de análisis fundamental cancelada.";
@@ -3571,7 +3628,9 @@ byId("run-form").addEventListener("submit", async (event) => {
         effectiveKnownAt = fundamentalSummary.effective_known_at;
       }
       byId("report-known-at").value = effectiveKnownAt;
-      knownAtByAsset.set(selectedMarketAsset, effectiveKnownAt);
+      if (typeof renderKnownAtCut === "function") {
+        renderKnownAtCut(effectiveKnownAt);
+      }
       const mode = translated(
         summary.refresh_plan.mode,
         STATUS_LABELS,
@@ -3592,10 +3651,28 @@ byId("run-form").addEventListener("submit", async (event) => {
         + `${formatInteger(summary.metric_results_created)} métricas nuevas.${intradayText} `
         + `${fundamentalText} Trazabilidad verificada.`,
       );
-      resetListedCompanyReport();
-      invalidateDeferredBoardLoads();
-      activateBoard(boardIdFromLocationHash(), { focus: false });
+      if (typeof invalidateNavigationDependencies === "function") {
+        invalidateNavigationDependencies("known_at_change", {
+          knownAt: effectiveKnownAt,
+          source: "run_form",
+        });
+        invalidateNavigationDependencies("operation_success", {
+          operation: "run_form",
+          assetId: selectedMarketAsset,
+          knownAt: effectiveKnownAt,
+        });
+      } else {
+        resetListedCompanyReport();
+        invalidateDeferredBoardLoads();
+        activateBoard(boardIdFromLocationHash(), { focus: false });
+      }
   } catch (error) {
+    if (typeof invalidateNavigationDependencies === "function") {
+      invalidateNavigationDependencies("operation_uncertain", {
+        operation: "run_form",
+        assetId: selectedMarketAsset,
+      });
+    }
     setMessage(error.message, true);
   } finally {
     setButtonBusy(button, false, "Ejecutando…", idleLabel);
@@ -3625,13 +3702,34 @@ async function queryReport() {
   setExportAvailable("export-report-json", false);
   setButtonBusy(button, true, "Consultando…", "Consultar análisis");
   reportArea.setAttribute("aria-busy", "true");
+  const fundamentalFrequency = byId("report-frequency").value;
+  const marketAsOf = byId("market-as-of").value || "";
+  const fundamentalAsOf = byId("fundamental-as-of").value || "";
   const parameters = new URLSearchParams({
     known_at: knownAt,
-    fundamental_frequency: byId("report-frequency").value,
+    fundamental_frequency: fundamentalFrequency,
   });
-  if (byId("market-as-of").value) parameters.set("market_as_of", byId("market-as-of").value);
-  if (byId("fundamental-as-of").value) {
-    parameters.set("fundamental_as_of", byId("fundamental-as-of").value);
+  if (marketAsOf) parameters.set("market_as_of", marketAsOf);
+  if (fundamentalAsOf) {
+    parameters.set("fundamental_as_of", fundamentalAsOf);
+  }
+  const previewKey = typeof buildViewPreviewKey === "function"
+    ? buildViewPreviewKey({
+        endpoint: "/api/listed-company-report",
+        assetId,
+        knownAt,
+        params: {
+          fundamental_frequency: fundamentalFrequency,
+          market_as_of: marketAsOf,
+          fundamental_as_of: fundamentalAsOf,
+        },
+      })
+    : `report:${assetId}:${knownAt}`;
+  const preview = typeof loadViewPreview === "function" ? loadViewPreview(previewKey) : null;
+  if (preview) {
+    renderReport(preview);
+    setExportAvailable("export-report-json", false);
+    badge(byId("report-status"), "Vista anterior; verificando", "neutral");
   }
   const signal = activeAssetAbortController?.signal;
   let slotToken = null;
@@ -3653,19 +3751,43 @@ async function queryReport() {
       || (deferredRequest && !isCurrentActivoBoardRequest(deferredRequest))
       || report?.asset?.asset_id !== assetId
     ) return;
-    rememberViewPreview(`report:${assetId}:${knownAt}`, report);
+    rememberViewPreview(previewKey, report);
     clearPreviousCutNotice();
     renderReport(report);
     setMessage(operationalIssues.join(" · "), operationalIssues.length > 0);
   } catch (error) {
     if (error?.name === "AbortError") {
       if (isCurrentRequest()) {
+        if (preview) {
+          reportPayload = null;
+          renderFundamentalRatios(null);
+          setExportAvailable("export-report-json", false);
+          reportArea.classList.add("hidden");
+          byId("report-status").replaceChildren();
+          byId("market-report").replaceChildren();
+          byId("fundamental-report").replaceChildren();
+          byId("report-traceability").textContent = "";
+          byId("report-limitations").replaceChildren();
+          byId("report-json").textContent = "";
+        }
         setMessage("Consulta de análisis cancelada.", false);
         if (deferredRequest) throw error;
       }
       return;
     }
     if (!isCurrentRequest()) return;
+    if (preview) {
+      reportPayload = null;
+      renderFundamentalRatios(null);
+      setExportAvailable("export-report-json", false);
+      reportArea.classList.add("hidden");
+      byId("report-status").replaceChildren();
+      byId("market-report").replaceChildren();
+      byId("fundamental-report").replaceChildren();
+      byId("report-traceability").textContent = "";
+      byId("report-limitations").replaceChildren();
+      byId("report-json").textContent = "";
+    }
     setMessage(error.message, true);
     if (deferredRequest) throw error;
   } finally {

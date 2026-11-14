@@ -2228,7 +2228,7 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert "function newYorkRegularSessionState" in javascript
     assert "const OVERVIEW_REFRESH_MS = 30_000" in javascript
     assert "const OVERVIEW_MAX_BACKOFF_MS = 5 * 60_000" in javascript
-    assert "if (overviewRequestActive) return" in javascript
+    assert "if (overviewRequestActive && overviewInFlightPromise)" in javascript
     assert "if (document.hidden) return" in javascript
     assert "() => refreshOverview({ manual: false })" in javascript
     assert 'document.addEventListener("visibilitychange", () => {' in javascript
@@ -2375,7 +2375,7 @@ def test_asset_selection_invalidates_and_binds_listed_company_reports_by_asset()
         )
     ]
     assert "clearActiveAssetContextSync(presentation);" in selection
-    assert "invalidateDeferredBoardLoads();" in selection
+    assert 'invalidateNavigationDependencies("asset_select", { assetId });' in selection
     assert "activateBoard(" in selection
 
     query = javascript[
