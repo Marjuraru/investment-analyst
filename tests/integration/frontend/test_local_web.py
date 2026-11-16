@@ -2126,6 +2126,8 @@ def test_local_assets_use_spanish_accessible_contextual_presentation() -> None:
     assert 'api("/api/v1/asset-preferences")' in javascript
     assert 'method: "PUT"' in javascript
     assert "programados efectivos" in javascript
+    assert "trabajos activos" in javascript
+    assert "recuperación puntual" in javascript
     assert "Scheduler desactivado; la selección programada se conserva." in javascript
     assert "scheduler desactivado; 0 trabajos efectivos" in javascript
     assert "localStorage.setItem" in javascript

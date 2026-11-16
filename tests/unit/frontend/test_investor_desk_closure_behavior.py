@@ -392,6 +392,7 @@ const ctx = vm.createContext({{
     querySelectorAll: () => [],
     querySelector: () => null,
     createElement: (tag) => new dom.FakeNode(tag),
+    createTextNode: (text) => String(text),
   }},
   fetch: async (url) => {{
     const u = String(url);
@@ -631,6 +632,7 @@ const ctx = vm.createContext({{
     querySelectorAll: () => [],
     querySelector: () => null,
     createElement: (tag) => new dom.FakeNode(tag),
+    createTextNode: (text) => String(text),
   }},
 }});
 
@@ -801,6 +803,7 @@ const ctx = vm.createContext({{
     querySelectorAll: () => [],
     querySelector: () => null,
     createElement: (tag) => new dom.FakeNode(tag),
+    createTextNode: (text) => String(text),
   }},
 }});
 
@@ -846,3 +849,205 @@ console.log(JSON.stringify({{
     assert "no aplica" in res["naMarkAria"].lower()
     assert "Sin diagnóstico anual elegible" in res["unavailableText"]
     assert "Sin diagnóstico anual elegible" in res["noDiagLabel"]
+
+
+def test_a3_mesa_compact_header_and_analysis_honest_diagnostics() -> None:
+    script = f"""
+{_DOM_PREAMBLE}
+const dom = createFakeDom();
+const ctx = vm.createContext({{
+  console, URLSearchParams, Map, Set, Date, Math, Number, String, Array, Object, Promise, JSON,
+  AbortController, Symbol, TextEncoder,
+  window: {{ addEventListener() {{}} }},
+  getComputedStyle: () => ({{ getPropertyValue: () => "#000" }}),
+  document: {{
+    documentElement: {{}},
+    body: {{ classList: {{ add() {{}}, remove() {{}}, contains: () => false }} }},
+    getElementById: dom.getEl,
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    createElement: (tag) => new dom.FakeNode(tag),
+    createTextNode: (text) => String(text),
+  }},
+}});
+
+vm.runInContext({json.dumps(APP_CORE)}, ctx);
+vm.runInContext({json.dumps(APP_MESA)}, ctx);
+vm.runInContext({json.dumps(APP_ANALYSIS)}, ctx);
+
+ctx.byId = dom.getEl;
+ctx.nodeText = dom.nodeText;
+ctx.createElement = (tag, className = "", text = "") => {{
+  const el = new dom.FakeNode(tag);
+  el.className = className;
+  el.textContent = text;
+  return el;
+}};
+
+const out = vm.runInContext(`
+const posScoreNode = renderMesaScoreCellNode({{
+  fundamental: {{
+    verdict: "positive",
+    score: {{ state: "available", value: "84.20", reference_at: "2025-12-31T00:00:00Z" }},
+  }},
+}});
+const negScoreNode = renderMesaScoreCellNode({{
+  fundamental: {{
+    verdict: "negative",
+    score: {{ state: "available", value: "31.50", reference_at: "2025-12-31T00:00:00Z" }},
+  }},
+}});
+const insScoreNode = renderMesaScoreCellNode({{
+  fundamental: {{
+    verdict: "insufficient_data",
+    score: {{
+      state: "insufficient_data",
+      value: null,
+      reason_codes: ["diagnostic_insufficient_data"],
+      reference_at: "2025-12-31T00:00:00Z",
+    }},
+  }},
+}});
+
+const peCell = renderInvestorValueCell(
+  {{ state: "available", value: "28.40", reference_at: "2025-12-31T00:00:00Z" }},
+  mesaPeCellOptions({{
+    valuation: {{
+      annual_period_end: "2025-12-31",
+      price_to_earnings: {{ state: "available", value: "28.40" }},
+    }},
+  }}),
+);
+
+const headerEl = byId("asset-compact-header");
+renderActivoCompactHeader({{
+  known_at: "2026-11-12T00:00:00Z",
+  market: {{
+    currency: "USD",
+    close: {{
+      state: "available",
+      value: "145.10",
+      reference_at: "2026-11-11T00:00:00Z",
+    }},
+  }},
+  fundamental: {{
+    verdict: "insufficient_data",
+    score: {{
+      state: "insufficient_data",
+      value: null,
+      reason_codes: ["diagnostic_insufficient_data"],
+      reference_at: "2025-12-31T00:00:00Z",
+    }},
+  }},
+  valuation: {{
+    annual_period_end: "2025-12-31",
+    price_to_earnings: {{ state: "available", value: "28.40" }},
+  }},
+}}, "2026-11-12T00:00:00Z");
+
+const diagAnnualInsuf = createElement("div");
+renderDiagnostic(diagAnnualInsuf, "Fundamentales", "fundamental", {{
+  status: "available",
+  availability_age_days: 7,
+  diagnostic: {{
+    verdict: "insufficient_data",
+    final_score: "0",
+    confidence: "0",
+    quality: "partial",
+    as_of: "2025-12-31T00:00:00Z",
+  }},
+  metrics: [],
+}}, {{ query: {{ fundamental_frequency: "annual" }} }});
+
+const diagQuarterlyUnavail = createElement("div");
+renderUnavailable(
+  diagQuarterlyUnavail,
+  "Fundamentales",
+  {{ status: "not_found" }},
+  {{ query: {{ fundamental_frequency: "quarterly" }} }},
+);
+
+const valTarget = byId("valuation-metrics");
+byId("valuation-coverage");
+byId("valuation-context");
+byId("valuation-status");
+byId("valuation-price-context");
+byId("valuation-period-context");
+byId("valuation-filing-context");
+byId("valuation-unit-context");
+byId("valuation-evidence");
+byId("valuation-card");
+byId("export-valuation-json");
+byId("valuation-basis-banner");
+byId("valuation-title");
+marketAssets = {{ "equity:us:amd": {{ symbol: "AMD", name: "AMD", hasFundamentals: true }} }};
+selectedMarketAsset = "equity:us:amd";
+renderValuation({{
+  known_at: "2026-11-12T00:00:00Z",
+  status: "partial",
+  valuation_as_of: "2026-11-10",
+  price_age_days: 2,
+  price_source_id: "alpaca",
+  annual_period_start: "2025-01-01",
+  annual_period_end: "2025-12-31",
+  fiscal_period: "FY",
+  report_currency: "USD",
+  price_currency: "USD",
+  request: {{ basis: "latest_annual" }},
+  coverage: {{ evaluated: 1, not_evaluable: 1, total: 2 }},
+  definitions: [
+    {{ metric_key: "pe", display_name_es: "P/E", unit: "x", formula: "P / EPS" }},
+    {{ metric_key: "pb", display_name_es: "P/B", unit: "x", formula: "P / BV" }},
+  ],
+  metrics: [
+    {{
+      metric_key: "pe",
+      status: "evaluated",
+      value: "28.40",
+      input_observation_ids: ["1"],
+      available_at: "2026-02-01T00:00:00Z",
+    }},
+    {{
+      metric_key: "pb",
+      status: "not_evaluable",
+      value: null,
+      reason_code: "missing_equity_input",
+      input_observation_ids: [],
+    }},
+  ],
+}});
+
+JSON.stringify({{
+  posText: nodeText(posScoreNode),
+  posHasGood: Boolean(posScoreNode.querySelector(".is-good")),
+  negText: nodeText(negScoreNode),
+  negHasErr: Boolean(negScoreNode.querySelector(".is-error")),
+  insText: nodeText(insScoreNode),
+  peText: nodeText(peCell),
+  compactHeaderText: nodeText(headerEl),
+  diagAnnualInsufText: nodeText(diagAnnualInsuf),
+  diagQuarterlyUnavailText: nodeText(diagQuarterlyUnavail),
+  valuationText: nodeText(valTarget),
+}});
+`, ctx);
+console.log(out);
+"""
+    res = _run_node(script)
+    assert "Favorable" in res["posText"]
+    assert "positive" not in res["posText"]
+    assert "per. 2025-12-31" in res["posText"]
+    assert res["posHasGood"] is True
+    assert "Desfavorable" in res["negText"]
+    assert "negative" not in res["negText"]
+    assert res["negHasErr"] is True
+    assert "Insuficiente · 2025-12-31" in res["insText"]
+    assert "0/100" not in res["insText"]
+    assert "ej. 2025-12-31" in res["peText"]
+    assert "Insuficiente" in res["compactHeaderText"]
+    assert "0.0/100" not in res["compactHeaderText"]
+    assert "ANUAL" in res["diagAnnualInsufText"]
+    assert "7 días" in res["diagAnnualInsufText"]
+    assert "0.0 / 100" not in res["diagAnnualInsufText"]
+    assert "0 %" not in res["diagAnnualInsufText"]
+    assert "Sin diagnóstico trimestral elegible" in res["diagQuarterlyUnavailText"]
+    assert "ej. 2025-12-31 · precio 2026-11-10" in res["valuationText"]

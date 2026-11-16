@@ -152,23 +152,25 @@ def _persist_observation(
     as_of: datetime,
     value: Decimal = Decimal("102"),
     field_name: str = "close",
+    asset_id: str = AAPL_ASSET_ID,
+    source_id: str = AAPL_SOURCE_ID,
+    available_at: datetime = METRIC_AVAILABLE_AT,
     record_id: UUID | None = None,
     observation_id: UUID | None = None,
     execution_offset: timedelta = timedelta(),
 ) -> NormalizedObservation:
     raw_id = record_id or uuid4()
     identifier = observation_id or uuid4()
-    available_at = METRIC_AVAILABLE_AT
     execution_time = available_at + execution_offset
     reference = SourceReference(
-        source_id=AAPL_SOURCE_ID,
-        record_key=f"AAPL:{as_of.isoformat()}:{field_name}",
+        source_id=source_id,
+        record_key=f"{asset_id}:{as_of.isoformat()}:{field_name}",
         retrieved_at=execution_time,
     )
     storage.raw_records.save(
         RawRecord(
             record_id=raw_id,
-            asset_id=AAPL_ASSET_ID,
+            asset_id=asset_id,
             source=reference,
             event_time=as_of,
             available_at=available_at,
@@ -180,7 +182,7 @@ def _persist_observation(
     observation = NormalizedObservation(
         observation_id=identifier,
         raw_record_id=raw_id,
-        asset_id=AAPL_ASSET_ID,
+        asset_id=asset_id,
         field_name=field_name,
         value=value,
         unit="USD" if field_name == "close" else "shares",
@@ -1094,3 +1096,450 @@ def test_fundamental_selection_surfaces_ambiguity_and_frequency_isolation(tmp_pa
             )
         )
         assert annual.status is ConsolidatedSectionStatus.NOT_FOUND
+
+
+def test_generic_issuer_selects_generic_version_and_rejects_apple_version(tmp_path) -> None:
+    from investment_analyst.analytics.consolidated_diagnostic_models import (
+        ListedCompanyDiagnosticRequest,
+    )
+    from investment_analyst.analytics.consolidated_diagnostic_service import (
+        ListedCompanyConsolidatedDiagnosticService,
+    )
+    from investment_analyst.providers.fundamentals.sec_diagnostic_rules import (
+        GENERIC_ALGORITHM_VERSION,
+    )
+
+    known_at = datetime(2026, 7, 14, tzinfo=UTC)
+    amd_metric = _metric(
+        key="fundamental.net_margin",
+        as_of=datetime(2025, 12, 31, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+        asset_id="equity:us:amd",
+    )
+    aapl_metric = _metric(
+        key="fundamental.net_margin",
+        as_of=datetime(2025, 9, 27, tzinfo=UTC),
+        frequency=DataFrequency.ANNUAL,
+        asset_id=AAPL_ASSET_ID,
+    )
+    apple_v12_on_amd = _diagnostic(
+        mode=DiagnosticMode.FUNDAMENTAL,
+        metric_id=amd_metric.result_id,
+        as_of=amd_metric.as_of,
+        algorithm=FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION,
+        score=Decimal("51"),
+    ).model_copy(update={"asset_id": "equity:us:amd"})
+    generic_on_amd = _diagnostic(
+        mode=DiagnosticMode.FUNDAMENTAL,
+        metric_id=amd_metric.result_id,
+        as_of=amd_metric.as_of,
+        algorithm=GENERIC_ALGORITHM_VERSION,
+        score=Decimal("84"),
+    ).model_copy(update={"asset_id": "equity:us:amd"})
+    generic_on_aapl = _diagnostic(
+        mode=DiagnosticMode.FUNDAMENTAL,
+        metric_id=aapl_metric.result_id,
+        as_of=aapl_metric.as_of,
+        algorithm=GENERIC_ALGORITHM_VERSION,
+        score=Decimal("99"),
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "negative_amd")) as storage:
+        storage.metric_results.save(amd_metric)
+        storage.diagnostics.save(apple_v12_on_amd)
+        view = ListedCompanyConsolidatedDiagnosticService(storage).query(
+            ListedCompanyDiagnosticRequest(
+                asset_id="equity:us:amd",
+                known_at=known_at,
+                fundamental_frequency=DataFrequency.ANNUAL,
+            )
+        )
+        assert view.fundamental.status is ConsolidatedSectionStatus.NOT_FOUND
+        assert view.ignored_algorithm_versions == 1
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "both")) as storage:
+        storage.metric_results.save_many((amd_metric, aapl_metric))
+        storage.diagnostics.save_many((apple_v12_on_amd, generic_on_amd, generic_on_aapl))
+
+        amd_view = ListedCompanyConsolidatedDiagnosticService(storage).query(
+            ListedCompanyDiagnosticRequest(
+                asset_id="equity:us:amd",
+                known_at=known_at,
+                fundamental_frequency=DataFrequency.ANNUAL,
+            )
+        )
+        assert amd_view.fundamental.status is ConsolidatedSectionStatus.AVAILABLE
+        assert amd_view.fundamental.diagnostic == generic_on_amd
+        assert amd_view.ignored_algorithm_versions == 1
+
+        aapl_view = ListedCompanyConsolidatedDiagnosticService(storage).query(
+            ListedCompanyDiagnosticRequest(
+                asset_id=AAPL_ASSET_ID,
+                known_at=known_at,
+                fundamental_frequency=DataFrequency.ANNUAL,
+            )
+        )
+        assert aapl_view.fundamental.status is ConsolidatedSectionStatus.NOT_FOUND
+        assert aapl_view.ignored_algorithm_versions == 1
+
+
+def test_insufficient_fundamental_diagnostics_surface_per_frequency_without_leaking(
+    tmp_path,
+) -> None:
+    from investment_analyst.analytics.consolidated_diagnostic_models import (
+        ListedCompanyDiagnosticRequest,
+    )
+    from investment_analyst.analytics.consolidated_diagnostic_service import (
+        ListedCompanyConsolidatedDiagnosticService,
+        MixedFundamentalFrequencyError,
+    )
+    from investment_analyst.providers.fundamentals.sec_diagnostic_rules import (
+        GENERIC_ALGORITHM_VERSION,
+    )
+
+    known_at = datetime(2026, 7, 14, tzinfo=UTC)
+
+    def _insufficient(as_of: datetime, summary: str) -> DiagnosticResult:
+        return DiagnosticResult(
+            asset_id="equity:us:amd",
+            mode=DiagnosticMode.FUNDAMENTAL,
+            verdict=DiagnosticVerdict.INSUFFICIENT_DATA,
+            final_score=Decimal("0"),
+            confidence=Decimal("0"),
+            as_of=as_of,
+            available_at=datetime(2026, 7, 1, tzinfo=UTC),
+            computed_at=datetime(2026, 7, 20, tzinfo=UTC),
+            components=[],
+            evidence=[],
+            algorithm_version=GENERIC_ALGORITHM_VERSION,
+            summary=summary,
+            quality=DataQuality.PARTIAL,
+        )
+
+    annual_real = _insufficient(
+        datetime(2025, 12, 31, tzinfo=UTC),
+        "AMD annual fundamental diagnostic for 2025-12-31 has insufficient data: "
+        "fundamental.net_margin.",
+    )
+    annual_no_period = _insufficient(
+        datetime(2026, 7, 13, tzinfo=UTC),
+        "AMD annual fundamental diagnostic for no eligible period has insufficient data: "
+        "no complete period.",
+    )
+    quarterly_only = _insufficient(
+        datetime(2026, 6, 30, tzinfo=UTC),
+        "AMD quarterly fundamental diagnostic for 2026-06-30 has insufficient data: "
+        "fundamental.liabilities_to_assets.",
+    )
+    untyped = _insufficient(
+        datetime(2025, 12, 31, tzinfo=UTC),
+        "Unstructured insufficient summary without canonical marker.",
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "per_freq")) as storage:
+        storage.diagnostics.save_many((annual_real, annual_no_period, quarterly_only))
+        service = ListedCompanyConsolidatedDiagnosticService(storage)
+
+        annual_section, _ = service.query_fundamental_selection(
+            ListedCompanyDiagnosticRequest(
+                asset_id="equity:us:amd",
+                known_at=known_at,
+                fundamental_frequency=DataFrequency.ANNUAL,
+            )
+        )
+        quarterly_section, _ = service.query_fundamental_selection(
+            ListedCompanyDiagnosticRequest(
+                asset_id="equity:us:amd",
+                known_at=known_at,
+                fundamental_frequency=DataFrequency.QUARTERLY,
+            )
+        )
+        assert annual_section.status is ConsolidatedSectionStatus.AVAILABLE
+        assert annual_section.diagnostic == annual_real
+        assert quarterly_section.status is ConsolidatedSectionStatus.AVAILABLE
+        assert quarterly_section.diagnostic == quarterly_only
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "untyped")) as storage:
+        storage.diagnostics.save(untyped)
+        service = ListedCompanyConsolidatedDiagnosticService(storage)
+        section, _ = service.query_fundamental_selection(
+            ListedCompanyDiagnosticRequest(
+                asset_id="equity:us:amd",
+                known_at=known_at,
+                fundamental_frequency=DataFrequency.ANNUAL,
+            )
+        )
+        assert section.status is ConsolidatedSectionStatus.NOT_FOUND
+
+    mixed = _insufficient(
+        datetime(2025, 12, 31, tzinfo=UTC),
+        "AMD annual fundamental diagnostic for and quarterly fundamental diagnostic for mixed.",
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path / "mixed")) as storage:
+        storage.diagnostics.save(mixed)
+        with pytest.raises(MixedFundamentalFrequencyError):
+            ListedCompanyConsolidatedDiagnosticService(storage).query_fundamental_selection(
+                ListedCompanyDiagnosticRequest(
+                    asset_id="equity:us:amd",
+                    known_at=known_at,
+                    fundamental_frequency=DataFrequency.ANNUAL,
+                )
+            )
+
+
+def test_microsecond_pit_cut_and_exact_date_skip_off_date_hydration(tmp_path) -> None:
+    from datetime import timedelta
+
+    from investment_analyst.analytics.consolidated_diagnostic_models import (
+        ConsolidatedDiagnosticRequest,
+    )
+    from investment_analyst.analytics.consolidated_diagnostic_service import (
+        AaplConsolidatedDiagnosticService,
+    )
+
+    known_at = datetime(2026, 7, 14, 12, 0, 0, 500, tzinfo=UTC)
+    exact_metric = _metric(
+        key=SIMPLE_RETURN_KEY,
+        as_of=datetime(2026, 7, 10, tzinfo=UTC),
+        available_at=known_at,
+        computed_at=known_at,
+    )
+    exact_diag = _diagnostic(
+        mode=DiagnosticMode.MARKET,
+        metric_id=exact_metric.result_id,
+        as_of=exact_metric.as_of,
+        algorithm=MARKET_ALGORITHM_VERSION,
+        available_at=known_at,
+        computed_at=known_at,
+    )
+    other_date_metric_missing_id = uuid4()
+    other_date_diag = _diagnostic(
+        mode=DiagnosticMode.MARKET,
+        metric_id=other_date_metric_missing_id,
+        as_of=datetime(2026, 7, 9, tzinfo=UTC),
+        algorithm=MARKET_ALGORITHM_VERSION,
+        available_at=datetime(2026, 7, 10, tzinfo=UTC),
+    )
+    one_us_late_ts = known_at + timedelta(microseconds=1)
+    one_us_late_metric = _metric(
+        key=SIMPLE_RETURN_KEY,
+        as_of=datetime(2026, 7, 11, tzinfo=UTC),
+        available_at=one_us_late_ts,
+        computed_at=one_us_late_ts,
+    )
+    one_us_late_diag = _diagnostic(
+        mode=DiagnosticMode.MARKET,
+        metric_id=one_us_late_metric.result_id,
+        as_of=one_us_late_metric.as_of,
+        algorithm=MARKET_ALGORITHM_VERSION,
+        available_at=one_us_late_ts,
+        computed_at=one_us_late_ts,
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.metric_results.save_many((exact_metric, one_us_late_metric))
+        storage.diagnostics.save_many((exact_diag, other_date_diag, one_us_late_diag))
+        recorder = _RecordingMetricResults(storage.metric_results)
+        storage.metric_results = recorder  # type: ignore[method-assign]
+
+        view = AaplConsolidatedDiagnosticService(storage).query(
+            ConsolidatedDiagnosticRequest(
+                known_at=known_at,
+                fundamental_frequency=DataFrequency.ANNUAL,
+                market_as_of=datetime(2026, 7, 10, tzinfo=UTC).date(),
+            )
+        )
+        assert view.market.status is ConsolidatedSectionStatus.AVAILABLE
+        assert view.market.diagnostic == exact_diag
+        assert view.metric_results_examined == 1
+        assert recorder.get_existing_calls == 1
+
+
+def test_unconfigured_sec_asset_ignores_fundamental_diagnostic_without_error(tmp_path) -> None:
+    from investment_analyst.analytics.consolidated_diagnostic_models import (
+        ListedCompanyDiagnosticRequest,
+    )
+    from investment_analyst.analytics.consolidated_diagnostic_service import (
+        ListedCompanyConsolidatedDiagnosticService,
+    )
+
+    known_at = datetime(2026, 7, 14, tzinfo=UTC)
+    market_metric = _metric(
+        key=SIMPLE_RETURN_KEY,
+        as_of=datetime(2026, 7, 10, tzinfo=UTC),
+        asset_id="etf:us:qqq",
+    )
+    market_diag = _diagnostic(
+        mode=DiagnosticMode.MARKET,
+        metric_id=market_metric.result_id,
+        as_of=market_metric.as_of,
+        algorithm=MARKET_ALGORITHM_VERSION,
+    ).model_copy(update={"asset_id": "etf:us:qqq"})
+    spurious_fund = _diagnostic(
+        mode=DiagnosticMode.FUNDAMENTAL,
+        metric_id=uuid4(),
+        as_of=datetime(2026, 6, 30, tzinfo=UTC),
+        algorithm=FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION,
+    ).model_copy(update={"asset_id": "etf:us:qqq"})
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.metric_results.save(market_metric)
+        storage.diagnostics.save_many((market_diag, spurious_fund))
+        view = ListedCompanyConsolidatedDiagnosticService(storage).query(
+            ListedCompanyDiagnosticRequest(
+                asset_id="etf:us:qqq",
+                known_at=known_at,
+                fundamental_frequency=DataFrequency.ANNUAL,
+            )
+        )
+        assert view.market.status is ConsolidatedSectionStatus.AVAILABLE
+        assert view.fundamental.status is ConsolidatedSectionStatus.NOT_FOUND
+        assert view.ignored_algorithm_versions == 1
+
+
+def test_fundamental_recency_decay_converges_while_arbitrary_confidence_fails(
+    tmp_path,
+) -> None:
+    from investment_analyst.analytics.consolidated_diagnostic_models import (
+        ListedCompanyDiagnosticRequest,
+    )
+    from investment_analyst.analytics.consolidated_diagnostic_service import (
+        ListedCompanyConsolidatedDiagnosticService,
+    )
+    from investment_analyst.providers.fundamentals.sec_diagnostic_rules import (
+        GENERIC_ALGORITHM_VERSION,
+        confidence_for,
+        coverage_for,
+        quality_for,
+        recency_factor,
+    )
+
+    as_of = datetime(2024, 12, 31, tzinfo=UTC)
+    avail = datetime(2025, 5, 1, 1, 0, tzinfo=UTC)
+    known_at = datetime(2027, 2, 1, tzinfo=UTC)
+    keys = (
+        "fundamental.net_margin",
+        "fundamental.liabilities_to_assets",
+        "fundamental.liabilities_to_equity",
+        "fundamental.revenue_yoy_growth",
+        "fundamental.net_income_yoy_change_rate",
+    )
+    obs_a_id = uuid4()
+    obs_b_id = uuid4()
+    raw_a_id = uuid4()
+    raw_b_id = uuid4()
+
+    def _seed_inputs(storage: LocalStorage) -> None:
+        _persist_observation(
+            storage,
+            as_of=as_of,
+            value=Decimal("100"),
+            field_name="net_income",
+            asset_id="equity:us:bvn",
+            source_id="sec-edgar:company-facts:bvn",
+            available_at=avail,
+            record_id=raw_a_id,
+            observation_id=obs_a_id,
+        )
+        _persist_observation(
+            storage,
+            as_of=as_of,
+            value=Decimal("500"),
+            field_name="revenue",
+            asset_id="equity:us:bvn",
+            source_id="sec-edgar:company-facts:bvn",
+            available_at=avail,
+            record_id=raw_b_id,
+            observation_id=obs_b_id,
+        )
+
+    metrics = [
+        _metric(
+            key=k,
+            as_of=as_of,
+            frequency=DataFrequency.ANNUAL,
+            asset_id="equity:us:bvn",
+            available_at=avail,
+            computed_at=avail,
+            input_observation_ids=(obs_a_id, obs_b_id),
+        )
+        for k in keys
+    ]
+    components = [
+        DiagnosticComponent(
+            component_key=k,
+            score=Decimal("80"),
+            weight=Decimal("0.2"),
+            weighted_contribution=Decimal("16"),
+            metric_result_ids=[m.result_id],
+            explanation="Metric score.",
+        )
+        for k, m in zip(keys, metrics, strict=True)
+    ]
+    evidence = [
+        DiagnosticEvidence(
+            metric_result_id=m.result_id,
+            direction=EvidenceDirection.SUPPORTS,
+            contribution=Decimal("0.6"),
+            reason="Metric evidence.",
+        )
+        for m in metrics
+    ]
+
+    def _fund_diag(computed_at: datetime, conf_override: Decimal | None = None) -> DiagnosticResult:
+        cov = coverage_for(keys)
+        rec = recency_factor(computed_at, avail, DataFrequency.ANNUAL)
+        return DiagnosticResult(
+            diagnostic_id=uuid4(),
+            asset_id="equity:us:bvn",
+            mode=DiagnosticMode.FUNDAMENTAL,
+            verdict=DiagnosticVerdict.POSITIVE,
+            final_score=Decimal("80"),
+            confidence=conf_override if conf_override is not None else confidence_for(cov, rec),
+            as_of=as_of,
+            available_at=avail,
+            computed_at=computed_at,
+            components=components,
+            evidence=evidence,
+            algorithm_version=GENERIC_ALGORITHM_VERSION,
+            summary="BVN annual fundamental diagnostic.",
+            quality=quality_for(sufficient=True, coverage=cov, recency=rec),
+        )
+
+    earlier = _fund_diag(datetime(2026, 10, 1, 12, tzinfo=UTC))
+    decayed = _fund_diag(datetime(2027, 1, 10, 12, tzinfo=UTC))
+    assert earlier.quality is DataQuality.VALID
+    assert decayed.quality is DataQuality.PARTIAL
+    assert earlier.confidence != decayed.confidence
+
+    with LocalStorage(StoragePaths.from_root(tmp_path / "recency_ok")) as storage:
+        _seed_inputs(storage)
+        storage.metric_results.save_many(metrics)
+        storage.diagnostics.save_many((earlier, decayed))
+        view = ListedCompanyConsolidatedDiagnosticService(storage).query(
+            ListedCompanyDiagnosticRequest(
+                asset_id="equity:us:bvn",
+                known_at=known_at,
+                fundamental_frequency=DataFrequency.ANNUAL,
+            )
+        )
+        assert view.fundamental.status is ConsolidatedSectionStatus.AVAILABLE
+        assert view.fundamental.diagnostic == earlier
+        assert view.fundamental.revisions_superseded == 1
+
+    corrupt = _fund_diag(
+        datetime(2027, 1, 10, 12, tzinfo=UTC),
+        conf_override=Decimal("0.50"),
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path / "arbitrary_fail")) as storage:
+        _seed_inputs(storage)
+        storage.metric_results.save_many(metrics)
+        storage.diagnostics.save_many((earlier, corrupt))
+        with pytest.raises(AmbiguousStoredDiagnosticRevisionError):
+            ListedCompanyConsolidatedDiagnosticService(storage).query(
+                ListedCompanyDiagnosticRequest(
+                    asset_id="equity:us:bvn",
+                    known_at=known_at,
+                    fundamental_frequency=DataFrequency.ANNUAL,
+                )
+            )

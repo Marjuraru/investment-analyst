@@ -106,3 +106,17 @@ ejecutando trabajos Coinbase diarios después de completar el arranque:
 La unidad no tenía `MemoryAccounting=yes`, por lo que su `602.9M memory peak` no era evidencia
 comparable con el `anon-rss` del kernel. La captura por intento y la cota cgroup corrigen esa
 carencia de atribución y contención sin afirmar todavía qué objeto del refresh consume la memoria.
+
+## Alcance SEC por frecuencia y aislamiento de lectura consolidada (`FUNDAMENTAL-READ-COMPATIBILITY-AND-REFRESH`)
+
+- **Coste del scheduler por frecuencia fundamental:** los emisores SEC US GAAP programados que
+  soportan frecuencias `annual` y `quarterly` en catálogo emiten dos trabajos secuenciales escalonados
+  (`+15` min primaria y `+20` min secundaria, +1 ejecución SEC = 2 documentos `submissions`/
+  `companyfacts` reutilizables o incrementales por ciclo diario). Los emisores IFRS conservan
+  exclusivamente el trabajo anual (+0 trabajos adicionales) y los ETF o criptoactivos no emiten
+  trabajos SEC. Todos los trabajos comparten el bloqueo único de escritura secuencial del scheduler.
+- **Acotación de lectura consolidada:** `ListedCompanyConsolidatedDiagnosticService` prefiltra
+  diagnósticos por `asset_id`, `available_at <= known_at`, `as_of <= known_at` y `exact_date`
+  antes de hidratar `metric_results` y valida versión esperada por emisor y equivalencia por decaimiento
+  de recencia sin materializar observaciones o métricas de otros activos en peticiones de vista o
+  diagnóstico individual.

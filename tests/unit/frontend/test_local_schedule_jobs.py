@@ -113,13 +113,27 @@ def _config(*asset_ids: str) -> LocalWatchlistScheduleConfig:
 
 
 def test_watchlist_jobs_are_derived_by_capability_not_symbol() -> None:
+    from investment_analyst.core.models import DataFrequency
+
     universe = _universe()
 
     jobs = build_local_watchlist_jobs(_UnusedController(), universe, _config())
 
+    expected_fundamentals = sum(
+        len(
+            tuple(
+                freq
+                for freq in item.fundamental_frequencies
+                if freq in (DataFrequency.ANNUAL, DataFrequency.QUARTERLY)
+            )
+        )
+        for item in universe.assets
+        if item.has_fundamentals
+    )
     expected = (
         len(universe.assets)
-        + (3 * sum(item.has_fundamentals for item in universe.assets))
+        + (2 * sum(item.has_fundamentals for item in universe.assets))
+        + expected_fundamentals
         + sum(item.supports_intraday for item in universe.assets)
     )
     assert len(jobs) == expected
@@ -1206,3 +1220,129 @@ def test_market_daily_execution_distinguishes_analytical_inputs() -> None:
     )
     assert quiet.evidence_changed is True
     assert quiet.analytical_inputs_changed is False
+
+
+def test_us_gaap_ifrs_etf_and_empty_watchlist_fundamental_job_composition() -> None:
+    from investment_analyst.core.models import DataFrequency
+
+    universe = _universe()
+    us_gaap = build_local_watchlist_jobs(
+        _UnusedController(),
+        universe,
+        LocalWatchlistScheduleConfig(
+            timezone="America/Lima",
+            run_at=time(hour=7),
+            market_start=date(2025, 1, 1),
+            fundamental_frequency=DataFrequency.QUARTERLY,
+            selected_asset_ids=("equity:us:aapl", "equity:us:tsm", "etf:us:qqq"),
+        ),
+    )
+    by_id = {job.definition.job_id: job for job in us_gaap}
+    assert by_id["sec:equity:us:aapl:fundamentals-quarterly"].definition.run_at == time(
+        hour=7, minute=15
+    )
+    assert by_id["sec:equity:us:aapl:fundamentals-annual"].definition.run_at == time(
+        hour=7, minute=20
+    )
+    assert "sec:equity:us:tsm:fundamentals-annual" in by_id
+    assert by_id["sec:equity:us:tsm:fundamentals-annual"].definition.run_at == time(
+        hour=7, minute=15
+    )
+    assert "sec:equity:us:tsm:fundamentals-quarterly" not in by_id
+    assert not any(
+        job.definition.asset_id == "etf:us:qqq"
+        and job.definition.domain is ScheduledJobDomain.FUNDAMENTALS
+        for job in us_gaap
+    )
+
+    flipped = build_local_watchlist_jobs(
+        _UnusedController(),
+        universe,
+        LocalWatchlistScheduleConfig(
+            timezone="America/Lima",
+            run_at=time(hour=7),
+            market_start=date(2025, 1, 1),
+            fundamental_frequency=DataFrequency.ANNUAL,
+            selected_asset_ids=("equity:us:aapl",),
+        ),
+    )
+    flipped_by_id = {job.definition.job_id: job for job in flipped}
+    assert flipped_by_id["sec:equity:us:aapl:fundamentals-annual"].definition.run_at == time(
+        hour=7, minute=15
+    )
+    assert flipped_by_id["sec:equity:us:aapl:fundamentals-quarterly"].definition.run_at == time(
+        hour=7, minute=20
+    )
+
+    with pytest.raises(ValueError, match="at least one job"):
+        build_local_watchlist_jobs(
+            _UnusedController(),
+            universe,
+            LocalWatchlistScheduleConfig(
+                timezone="America/Lima",
+                run_at=time(hour=7),
+                market_start=date(2025, 1, 1),
+                selected_asset_ids=(),
+                selection_is_explicit=True,
+                include_smv_registry=False,
+                include_macro=False,
+            ),
+        )
+
+
+def test_annual_fundamental_job_failure_leaves_quarterly_job_independent() -> None:
+    from investment_analyst.application.sec_fundamental_refresh import (
+        SecIssuerFundamentalRefreshError,
+    )
+    from investment_analyst.core.models import DataFrequency
+
+    class _PartialFailingController(_UnusedController):
+        def sec_fundamental_refresh_request(self, request):
+            if request.frequency is DataFrequency.ANNUAL:
+                raise SecIssuerFundamentalRefreshError("transient annual failure")
+            return SimpleNamespace(
+                effective_known_at=datetime(2026, 8, 11, 12, tzinfo=UTC),
+                source_id="sec-edgar:aapl:companyfacts",
+                raw_records_created=1,
+                raw_records_reused=0,
+                observations_created=2,
+                observations_reused=0,
+                metric_results_created=1,
+                metric_results_reused=0,
+                diagnostics_created=1,
+                diagnostics_reused=0,
+            )
+
+    jobs = build_local_watchlist_jobs(
+        _PartialFailingController(),
+        _universe(),
+        LocalWatchlistScheduleConfig(
+            timezone="America/Lima",
+            run_at=time(hour=7),
+            market_start=date(2025, 1, 1),
+            selected_asset_ids=("equity:us:aapl",),
+        ),
+    )
+    by_id = {job.definition.job_id: job for job in jobs}
+    with pytest.raises(ScheduledJobRunError):
+        by_id["sec:equity:us:aapl:fundamentals-annual"].run(
+            ScheduledJobInvocation(
+                definition=by_id["sec:equity:us:aapl:fundamentals-annual"].definition,
+                local_date=date(2026, 8, 11),
+                scheduled_for=datetime(2026, 8, 11, 12, 20, tzinfo=UTC),
+                started_at=datetime(2026, 8, 11, 12, 20, tzinfo=UTC),
+                attempt_number=1,
+            )
+        )
+    quarterly = by_id["sec:equity:us:aapl:fundamentals-quarterly"].run(
+        ScheduledJobInvocation(
+            definition=by_id["sec:equity:us:aapl:fundamentals-quarterly"].definition,
+            local_date=date(2026, 8, 11),
+            scheduled_for=datetime(2026, 8, 11, 12, 15, tzinfo=UTC),
+            started_at=datetime(2026, 8, 11, 12, 15, tzinfo=UTC),
+            attempt_number=1,
+        )
+    )
+    assert quarterly.job_id == "sec:equity:us:aapl:fundamentals-quarterly"
+    assert quarterly.evidence_changed is True
+    assert quarterly.created_count == 5

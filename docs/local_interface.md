@@ -1561,3 +1561,17 @@ refresh y sin agregar puntuaciones, veredictos ni rankings:
   explícitamente «Sin diagnóstico anual elegible» / «Sin diagnóstico anual elegible al corte» y
   nunca los presenta como «Sin fundamentales» ni sugiere inexistencia de hechos SEC, sin relajar ni
   alterar las reglas de `sec_diagnostic_rules.py`.
+- **Compatibilidad fundamental y alcance programado (`FUNDAMENTAL-READ-COMPATIBILITY-AND-REFRESH`):**
+  - **Programación por frecuencia (`local_schedule_jobs.py`):** cada emisor SEC programado emite un
+    trabajo independiente por cada frecuencia soportada en catálogo (`sec:<asset>:fundamentals-annual`
+    y/o `sec:<asset>:fundamentals-quarterly`, escalonados a `+15` min para primaria/única y `+20` min
+    para secundaria; emisores IFRS sólo anual y ETF/cripto sin trabajos SEC). El ahorro de preferencias
+    muestra `scheduled_job_count` derivado y aclara de forma visible que los activos no programados se
+    actualizan mediante recuperación puntual y no forman parte todavía de la automatización automática
+    de familia.
+  - **Mesa, análisis y valoración:** las tarjetas y tablas traducen `positive`, `negative` e
+    `insufficient_data` sin mostrar puntuaciones ni confianzas sintéticas (`—` en lugar de `0.0 / 100`
+    o `0 %`), muestran fechas de referencia y periodos compactos apilados bajo cierre/P/E sin marcar
+    `not_applicable`, leen `availability_age_days` con respaldo de nivel superior y separan explícitamente
+    «Anual» / «Trimestral» (`Sin diagnóstico anual elegible` / `Sin diagnóstico trimestral elegible`) y
+    la referencia periodo vs fecha de precio (`ej. YYYY-MM-DD · precio YYYY-MM-DD`).

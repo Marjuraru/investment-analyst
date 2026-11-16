@@ -3300,12 +3300,19 @@ function renderValuation(payload) {
       value.title = `Valor exacto: ${metric.value} ${definition.unit}`;
     }
     const formula = createElement("small", "valuation-formula", definition.formula);
+    const periodTag = payload.annual_period_end
+      ? `ej. ${String(payload.annual_period_end).slice(0, 10)}`
+      : "";
+    const priceTag = payload.valuation_as_of
+      ? `precio ${String(payload.valuation_as_of).slice(0, 10)}`
+      : "";
+    const valuationRef = [periodTag, priceTag].filter(Boolean).join(" · ");
     const evidence = createElement(
       "small",
       "valuation-input-summary",
       metric.status === "evaluated"
-        ? `${formatInteger(metric.input_observation_ids.length)} inputs · disponible ${formatInstant(metric.available_at)}`
-        : `${formatInteger(metric.input_observation_ids.length)} inputs elegibles`,
+        ? `${formatInteger(metric.input_observation_ids.length)} inputs · disponible ${formatInstant(metric.available_at)}${valuationRef ? ` · ${valuationRef}` : ""}`
+        : `${formatInteger(metric.input_observation_ids.length)} inputs elegibles${valuationRef ? ` · ${valuationRef}` : ""}`,
     );
     card.append(header, value, formula, evidence);
     metrics.append(card);
@@ -3427,39 +3434,49 @@ function appendMetadata(list, label, value) {
 function diagnosticSummary(mode, diagnostic, report) {
   const verdict = translated(diagnostic.verdict, VERDICT_LABELS, diagnostic.verdict).toLocaleLowerCase(LOCALE);
   if (mode === "market") {
+    if (diagnostic.verdict === "insufficient_data") {
+      return `El diagnóstico de mercado al ${formatCalendarDate(diagnostic.as_of)} reporta datos insuficientes; no se emite puntuación ni recomendación.`;
+    }
     return `Las reglas deterministas describen una condición de mercado ${verdict} al ${formatCalendarDate(diagnostic.as_of)}. La lectura usa datos diarios IEX y no representa una recomendación.`;
   }
-  const frequency = report.query?.fundamental_frequency === "annual" ? "anual" : "trimestral";
+  const frequency = report?.query?.fundamental_frequency === "annual" ? "anual" : "trimestral";
+  if (diagnostic.verdict === "insufficient_data") {
+    return `El diagnóstico fundamental ${frequency} para el período terminado el ${formatCalendarDate(diagnostic.as_of)} tiene datos insuficientes en el algoritmo vigente; no se emite puntuación ni recomendación.`;
+  }
   return `Las reglas deterministas describen una condición fundamental ${verdict} para el período ${frequency} terminado el ${formatCalendarDate(diagnostic.as_of)}. La confianza refleja cobertura y vigencia, no probabilidad.`;
 }
 
-function renderUnavailable(target, title, section) {
+function renderUnavailable(target, title, section, report = null) {
   const heading = createElement("div", "diagnostic-heading");
   const titleGroup = createElement("div");
   titleGroup.append(createElement("p", "", "DIMENSIÓN INDEPENDIENTE"), createElement("h3", "", title));
   const isFundamental = title === "Fundamentales";
-  const badgeText = isFundamental ? "Sin diagnóstico anual elegible" : "No disponible";
+  const freqLabel = report?.query?.fundamental_frequency === "quarterly" ? "trimestral" : "anual";
+  const badgeText = isFundamental ? `Sin diagnóstico ${freqLabel} elegible` : "No disponible";
   heading.append(titleGroup, createElement("span", "diagnostic-verdict insufficient_data", badgeText));
   const messageText = isFundamental
-    ? "Sin diagnóstico fundamental elegible en el algoritmo vigente al corte y frecuencia solicitados; los hechos SEC disponibles siguen consultables en la serie fundamental inferior."
+    ? `Sin diagnóstico fundamental ${freqLabel} elegible en el algoritmo vigente al corte solicitado; los hechos SEC disponibles siguen consultables en la serie fundamental inferior.`
     : "No existe un diagnóstico de mercado elegible para el corte y las fechas de referencia solicitadas. Ajusta los filtros o actualiza las fuentes.";
   const message = createElement("p", "empty-state", messageText);
   target.append(heading, message);
-  target.dataset.status = section.status;
+  target.dataset.status = typeof section === "string" ? "unavailable" : (section?.status || "not_found");
 }
 
 function renderDiagnostic(target, title, mode, section, report) {
   target.replaceChildren();
   if (section.status !== "available" || !section.diagnostic) {
-    renderUnavailable(target, title, section);
+    renderUnavailable(target, title, section, report);
     return;
   }
 
   const diagnostic = section.diagnostic;
   const heading = createElement("div", "diagnostic-heading");
   const titleGroup = createElement("div");
+  const freqEyebrow = mode === "fundamental"
+    ? `DIMENSIÓN FUNDAMENTAL · ${report?.query?.fundamental_frequency === "annual" ? "ANUAL" : "TRIMESTRAL"}`
+    : "DIMENSIÓN DE MERCADO";
   titleGroup.append(
-    createElement("p", "", mode === "market" ? "DIMENSIÓN DE MERCADO" : "DIMENSIÓN FUNDAMENTAL"),
+    createElement("p", "", freqEyebrow),
     createElement("h3", "", title),
   );
   const verdict = createElement(
@@ -3473,17 +3490,32 @@ function renderDiagnostic(target, title, mode, section, report) {
   const scoreRow = createElement("div", "score-row");
   const scoreBlock = createElement("div", "score-block");
   scoreBlock.appendChild(createElement("span", "", "Puntuación independiente"));
-  const scoreValue = createElement("p", "score-value");
-  scoreValue.append(document.createTextNode(formatScore(diagnostic.final_score)));
-  scoreValue.appendChild(createElement("small", "", " / 100"));
-  if (diagnostic.final_score !== null && diagnostic.final_score !== undefined) {
-    scoreValue.title = `Puntuación exacta: ${formatExactDecimalText(diagnostic.final_score)} / 100`;
-    scoreValue.setAttribute("aria-label", `${formatScore(diagnostic.final_score)} / 100 (exacto ${formatExactDecimalText(diagnostic.final_score)})`);
+  const isInsufficient = diagnostic.verdict === "insufficient_data";
+  const scoreValue = createElement("p", `score-value${isInsufficient ? " is-insufficient" : ""}`);
+  if (isInsufficient) {
+    scoreValue.append(document.createTextNode("—"));
+    scoreValue.appendChild(createElement("small", "", " sin puntuación"));
+    scoreValue.title = "Datos insuficientes para puntuar este período.";
+    scoreValue.setAttribute("aria-label", "Sin puntuación por datos insuficientes");
+  } else {
+    scoreValue.append(document.createTextNode(formatScore(diagnostic.final_score)));
+    scoreValue.appendChild(createElement("small", "", " / 100"));
+    if (diagnostic.final_score !== null && diagnostic.final_score !== undefined) {
+      scoreValue.title = `Puntuación exacta: ${formatExactDecimalText(diagnostic.final_score)} / 100`;
+      scoreValue.setAttribute("aria-label", `${formatScore(diagnostic.final_score)} / 100 (exacto ${formatExactDecimalText(diagnostic.final_score)})`);
+    }
   }
   scoreBlock.appendChild(scoreValue);
   const confidenceBlock = createElement("div", "confidence-block");
-  const confidenceValue = createElement("strong", "", formatConfidence(diagnostic.confidence));
-  if (diagnostic.confidence !== null && diagnostic.confidence !== undefined) {
+  const confidenceValue = createElement(
+    "strong",
+    isInsufficient ? "is-insufficient" : "",
+    isInsufficient ? "—" : formatConfidence(diagnostic.confidence),
+  );
+  if (isInsufficient) {
+    confidenceValue.title = "Cobertura insuficiente para emitir puntuación.";
+    confidenceValue.setAttribute("aria-label", "Cobertura insuficiente para emitir puntuación");
+  } else if (diagnostic.confidence !== null && diagnostic.confidence !== undefined) {
     confidenceValue.title = `Cobertura exacta: ${formatExactDecimalText(diagnostic.confidence)}`;
     confidenceValue.setAttribute("aria-label", `${formatConfidence(diagnostic.confidence)} (exacto ${formatExactDecimalText(diagnostic.confidence)})`);
   }
@@ -3501,7 +3533,7 @@ function renderDiagnostic(target, title, mode, section, report) {
   appendMetadata(
     metadata,
     "Evidencia publicada",
-    formatAge(section.freshness?.availability_age_days),
+    formatAge(section.availability_age_days ?? section.freshness?.availability_age_days),
   );
 
   const metricsHeading = createElement("div", "metrics-heading");
@@ -3524,7 +3556,15 @@ function renderDiagnostic(target, title, mode, section, report) {
     metrics.appendChild(item);
   }
   if (!metrics.childElementCount) {
-    metrics.appendChild(createElement("li", "empty-state", "No se resolvieron métricas para este diagnóstico."));
+    metrics.appendChild(
+      createElement(
+        "li",
+        "empty-state",
+        isInsufficient
+          ? "Diagnóstico persistido sin componentes puntuables por falta de métricas requeridas para este período."
+          : "No se resolvieron métricas para este diagnóstico.",
+      ),
+    );
   }
 
   body.append(scoreRow, summary, metadata, metricsHeading, metrics);

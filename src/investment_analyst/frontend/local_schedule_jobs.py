@@ -322,7 +322,7 @@ def build_local_watchlist_jobs(
         if descriptor.asset_id in config.crypto_derivatives_asset_ids:
             jobs.append(_crypto_derivatives_job(controller, descriptor, config))
         if descriptor.has_fundamentals:
-            jobs.append(_fundamental_job(controller, descriptor, config))
+            jobs.extend(_fundamental_jobs(controller, descriptor, config))
             jobs.append(_primary_document_job(controller, descriptor, config))
             jobs.append(_declared_activity_job(controller, descriptor, config))
         if descriptor.supports_intraday and config.include_intraday:
@@ -658,16 +658,53 @@ def _crypto_derivatives_job(
     return RegisteredScheduledJob(definition, run)
 
 
+_SCHEDULED_FUNDAMENTAL_FREQUENCIES = (
+    DataFrequency.ANNUAL,
+    DataFrequency.QUARTERLY,
+)
+
+
+def _fundamental_jobs(
+    controller: _LocalScheduledOperations,
+    descriptor: MarketAssetDescriptor,
+    config: LocalWatchlistScheduleConfig,
+) -> tuple[RegisteredScheduledJob, ...]:
+    supported = tuple(
+        dict.fromkeys(
+            frequency
+            for frequency in descriptor.fundamental_frequencies
+            if frequency in _SCHEDULED_FUNDAMENTAL_FREQUENCIES
+        )
+    )
+    if not supported:
+        return ()
+    primary = (
+        config.fundamental_frequency if config.fundamental_frequency in supported else supported[0]
+    )
+    ordered = (
+        (primary, 15),
+        *((frequency, 20) for frequency in supported if frequency is not primary),
+    )
+    return tuple(
+        _fundamental_job(
+            controller,
+            descriptor,
+            config,
+            frequency=frequency,
+            offset_minutes=offset_minutes,
+        )
+        for frequency, offset_minutes in ordered
+    )
+
+
 def _fundamental_job(
     controller: _LocalScheduledOperations,
     descriptor: MarketAssetDescriptor,
     config: LocalWatchlistScheduleConfig,
+    *,
+    frequency: DataFrequency,
+    offset_minutes: int,
 ) -> RegisteredScheduledJob:
-    frequency = (
-        config.fundamental_frequency
-        if config.fundamental_frequency in descriptor.fundamental_frequencies
-        else descriptor.fundamental_frequencies[0]
-    )
     definition = ScheduledJobDefinition(
         job_id=f"sec:{descriptor.asset_id}:fundamentals-{frequency.value}",
         asset_id=descriptor.asset_id,
@@ -675,7 +712,7 @@ def _fundamental_job(
         domain=ScheduledJobDomain.FUNDAMENTALS,
         data_frequency=frequency.value,
         timezone=config.timezone,
-        run_at=_offset_minute(config.run_at, 15),
+        run_at=_offset_minute(config.run_at, offset_minutes),
     )
 
     def run(invocation: ScheduledJobInvocation) -> ScheduledJobExecution:

@@ -255,3 +255,102 @@ def test_consolidated_query_skips_unrelated_metric_history(tmp_path) -> None:
         assert recorder.list_calls == 0
         assert recorder.get_calls == 0
         assert recorder.get_existing_calls == 1
+
+
+def test_generic_issuer_annual_and_quarterly_parity_without_foreign_hydration(tmp_path) -> None:
+    from investment_analyst.analytics.consolidated_diagnostic_models import (
+        ConsolidatedSectionStatus,
+        ListedCompanyDiagnosticRequest,
+    )
+    from investment_analyst.analytics.consolidated_diagnostic_service import (
+        ListedCompanyConsolidatedDiagnosticService,
+    )
+    from investment_analyst.providers.fundamentals.sec_diagnostic_rules import (
+        GENERIC_ALGORITHM_VERSION,
+    )
+
+    known_at = datetime(2026, 7, 14, tzinfo=UTC)
+    available_at = datetime(2026, 7, 1, tzinfo=UTC)
+    computed_at = datetime(2026, 7, 12, tzinfo=UTC)
+
+    def _fund_metric(asset_id: str, frequency: DataFrequency, as_of: datetime) -> MetricResult:
+        return _metric("fundamental.net_margin", as_of, frequency=frequency).model_copy(
+            update={
+                "asset_id": asset_id,
+                "available_at": available_at,
+                "computed_at": computed_at,
+            }
+        )
+
+    def _fund_diag(asset_id: str, metric: MetricResult, algorithm_version: str) -> DiagnosticResult:
+        return DiagnosticResult(
+            asset_id=asset_id,
+            mode=DiagnosticMode.FUNDAMENTAL,
+            verdict=DiagnosticVerdict.POSITIVE,
+            final_score=Decimal("81"),
+            confidence=Decimal("0.9"),
+            as_of=metric.as_of,
+            available_at=available_at,
+            computed_at=computed_at,
+            components=[
+                DiagnosticComponent(
+                    component_key="margin",
+                    score=Decimal("81"),
+                    weight=Decimal("1"),
+                    weighted_contribution=Decimal("81"),
+                    metric_result_ids=[metric.result_id],
+                    explanation="Generic issuer score.",
+                )
+            ],
+            evidence=[
+                DiagnosticEvidence(
+                    metric_result_id=metric.result_id,
+                    direction=EvidenceDirection.SUPPORTS,
+                    contribution=Decimal("0.5"),
+                    reason="Generic issuer evidence.",
+                )
+            ],
+            algorithm_version=algorithm_version,
+            summary="Generic issuer fundamental diagnostic.",
+            quality=DataQuality.VALID,
+        )
+
+    amd_annual = _fund_metric(
+        "equity:us:amd", DataFrequency.ANNUAL, datetime(2025, 12, 31, tzinfo=UTC)
+    )
+    amd_quarterly = _fund_metric(
+        "equity:us:amd", DataFrequency.QUARTERLY, datetime(2026, 6, 30, tzinfo=UTC)
+    )
+    aapl_foreign = _fund_metric(
+        "equity:us:aapl", DataFrequency.ANNUAL, datetime(2025, 9, 27, tzinfo=UTC)
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.metric_results.save_many((amd_annual, amd_quarterly, aapl_foreign))
+        storage.diagnostics.save_many(
+            (
+                _fund_diag("equity:us:amd", amd_annual, GENERIC_ALGORITHM_VERSION),
+                _fund_diag("equity:us:amd", amd_quarterly, GENERIC_ALGORITHM_VERSION),
+                _fund_diag(
+                    "equity:us:aapl",
+                    aapl_foreign,
+                    FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION,
+                ),
+            )
+        )
+        service = ListedCompanyConsolidatedDiagnosticService(storage)
+        for freq, expected_metric in (
+            (DataFrequency.ANNUAL, amd_annual),
+            (DataFrequency.QUARTERLY, amd_quarterly),
+        ):
+            req = ListedCompanyDiagnosticRequest(
+                asset_id="equity:us:amd",
+                known_at=known_at,
+                fundamental_frequency=freq,
+            )
+            full = service.query(req)
+            section, index = service.query_fundamental_selection(req)
+            assert full.fundamental.status is ConsolidatedSectionStatus.AVAILABLE
+            assert full.fundamental == section
+            assert section.selected_metric_result_ids == (expected_metric.result_id,)
+            assert aapl_foreign.result_id not in index

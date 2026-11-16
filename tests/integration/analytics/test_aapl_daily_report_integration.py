@@ -40,6 +40,9 @@ from investment_analyst.core.models import (
     EvidenceDirection,
     MetricResult,
 )
+from investment_analyst.providers.fundamentals.sec_diagnostic_rules import (
+    GENERIC_ALGORITHM_VERSION,
+)
 from investment_analyst.providers.fundamentals.sec_metric_models import (
     SEC_FUNDAMENTAL_METRIC_DEFINITIONS,
 )
@@ -92,9 +95,10 @@ def _diagnostic(
     metric: MetricResult,
     *,
     available_at: datetime | None = None,
+    algorithm_version: str | None = None,
 ) -> DiagnosticResult:
     score = Decimal("68") if mode is DiagnosticMode.MARKET else Decimal("72")
-    algorithm = (
+    algorithm = algorithm_version or (
         MARKET_DIAGNOSTIC_ALGORITHM_VERSION
         if mode is DiagnosticMode.MARKET
         else FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION
@@ -261,7 +265,13 @@ def test_generic_report_selects_amd_evidence_without_cross_asset_reads(tmp_path)
         storage.metric_results.save(market_metric)
         storage.metric_results.save(fundamental_metric)
         storage.diagnostics.save(_diagnostic(DiagnosticMode.MARKET, market_metric))
-        storage.diagnostics.save(_diagnostic(DiagnosticMode.FUNDAMENTAL, fundamental_metric))
+        storage.diagnostics.save(
+            _diagnostic(
+                DiagnosticMode.FUNDAMENTAL,
+                fundamental_metric,
+                algorithm_version=GENERIC_ALGORITHM_VERSION,
+            )
+        )
         report = ListedCompanyReportService(storage).query(
             request,
             symbol="AMD",
@@ -273,8 +283,50 @@ def test_generic_report_selects_amd_evidence_without_cross_asset_reads(tmp_path)
     assert payload["asset"]["asset_id"] == "equity:us:amd"
     assert payload["query"]["asset_id"] == "equity:us:amd"
     assert payload["status"] == "complete"
+    assert payload["fundamental"]["diagnostic"]["algorithm_version"] == GENERIC_ALGORITHM_VERSION
     assert payload["traceability"]["verified"] is True
     assert "combined_score" not in payload
+
+
+def test_generic_report_ignores_apple_algorithm_version_on_amd(tmp_path) -> None:
+    market_metric = _metric(
+        SIMPLE_RETURN_KEY,
+        datetime(2026, 7, 10, tzinfo=UTC),
+        asset_id="equity:us:amd",
+    )
+    fundamental_metric = _metric(
+        "fundamental.net_margin",
+        datetime(2026, 6, 30, tzinfo=UTC),
+        frequency=DataFrequency.QUARTERLY,
+        asset_id="equity:us:amd",
+    )
+    request = ListedCompanyReportRequest(
+        asset_id="equity:us:amd",
+        known_at=KNOWN_AT,
+        fundamental_frequency=DataFrequency.QUARTERLY,
+    )
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.metric_results.save(market_metric)
+        storage.metric_results.save(fundamental_metric)
+        storage.diagnostics.save(_diagnostic(DiagnosticMode.MARKET, market_metric))
+        storage.diagnostics.save(
+            _diagnostic(
+                DiagnosticMode.FUNDAMENTAL,
+                fundamental_metric,
+                algorithm_version=FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION,
+            )
+        )
+        report = ListedCompanyReportService(storage).query(
+            request,
+            symbol="AMD",
+            name="Advanced Micro Devices",
+            source_ids=("alpaca:amd", "sec:companyfacts", "sec:submissions"),
+        )
+
+    payload = report.to_json_dict()
+    assert payload["status"] == "partial"
+    assert payload["fundamental"]["status"] == "not_found"
+    assert payload["traceability"]["ignored_algorithm_versions"] == 1
 
 
 def test_report_rejects_selected_metric_unavailable_at_known_at(tmp_path) -> None:

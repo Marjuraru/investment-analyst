@@ -88,3 +88,24 @@ records, observations, record keys, and complete metric documents.
 
 The diagnostic is descriptive, uses fixed uncalibrated heuristics, is not a recommendation, and does
 not execute operations. A unified market-and-fundamental diagnostic is not implemented yet.
+
+## Consolidated query compatibility and version resolution
+
+`ListedCompanyConsolidatedDiagnosticService` resolves the expected fundamental algorithm version from the
+central asset catalog rather than assuming the Apple-only version string across all issuers
+(`sec-aapl-fundamental-diagnostic-v1.2-decimal34` for Apple vs
+`sec-fundamental-diagnostic-v3-decimal34` for generic SEC issuers, ignoring older un-current rows
+append-only):
+
+- Pre-filters stored diagnostics in storage before hydrating metrics (`asset_id`, `available_at <= known_at`,
+  `as_of <= known_at`, and `exact_date` when requested) so foreign assets or unrequested dates do not
+  trigger unnecessary metric reads.
+- Distinguishes explicit `INSUFFICIENT_DATA` diagnostics by reporting frequency (`annual` vs `quarterly`)
+  from the canonical summary, rejecting mixed-frequency ambiguity rather than discarding valid periods.
+- Prefers period-specific diagnostics over `"no eligible period"` insufficient fallbacks when both exist at
+  the cut.
+- Converges append-only fundamental recomputations across different evaluation days when all core semantic
+  evidence (`as_of`, `available_at`, components, evidence, metric lineage, and rules) matches and the
+  confidence/quality difference matches `recency_factor(computed_at, available_at, frequency)`
+  exactly, while still rejecting contradictory or unverified revisions with
+  `AmbiguousStoredDiagnosticRevisionError`.

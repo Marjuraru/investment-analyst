@@ -119,6 +119,7 @@ _PRIOR_ASSET_SHA256 = {
 
 _JOB_SUFFIXES = (
     "market-daily",
+    "fundamentals-annual",
     "fundamentals-quarterly",
     "primary-documents",
     "declared-activity",
@@ -292,7 +293,7 @@ def test_prior_catalog_entries_are_preserved_exactly() -> None:
     assert _catalog().catalog_version == 1
 
 
-def test_new_equities_create_four_jobs_each_without_global_duplicates() -> None:
+def test_new_equities_create_five_jobs_each_without_global_duplicates() -> None:
     jobs = build_local_watchlist_jobs(
         _UnusedController(),
         _universe(),
@@ -307,19 +308,21 @@ def test_new_equities_create_four_jobs_each_without_global_duplicates() -> None:
         scoped = tuple(job for job in jobs if job.definition.asset_id == asset_id)
         assert {job.definition.job_id for job in scoped} == {
             f"alpaca:{asset_id}:{_JOB_SUFFIXES[0]}",
-            f"sec:{asset_id}:{_JOB_SUFFIXES[1]}",
-            f"sec:{asset_id}:{_JOB_SUFFIXES[2]}",
-            f"sec:{asset_id}:{_JOB_SUFFIXES[3]}",
+            *(f"sec:{asset_id}:{suffix}" for suffix in _JOB_SUFFIXES[1:]),
         }
-        assert len(scoped) == 4
+        assert len(scoped) == 5
         domains = [job.definition.domain for job in scoped]
         assert domains.count(ScheduledJobDomain.MARKET_DAILY) == 1
-        assert domains.count(ScheduledJobDomain.FUNDAMENTALS) == 1
+        assert domains.count(ScheduledJobDomain.FUNDAMENTALS) == 2
         assert domains.count(ScheduledJobDomain.EVENTS) == 2
-        fundamental = next(
-            job for job in scoped if job.definition.domain is ScheduledJobDomain.FUNDAMENTALS
-        )
-        assert fundamental.definition.data_frequency == "quarterly"
+        fundamentals = {
+            job.definition.data_frequency: job
+            for job in scoped
+            if job.definition.domain is ScheduledJobDomain.FUNDAMENTALS
+        }
+        assert set(fundamentals) == {"annual", "quarterly"}
+        assert fundamentals["quarterly"].definition.run_at == time(hour=7, minute=15)
+        assert fundamentals["annual"].definition.run_at == time(hour=7, minute=20)
 
     institutional = [job_id for job_id in by_id if job_id.startswith("sec:institutional:")]
     assert institutional == [

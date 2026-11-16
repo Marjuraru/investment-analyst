@@ -1469,13 +1469,17 @@ function renderAssetPreferences(payload) {
   byId("asset-preferences-summary").textContent =
     `${formatInteger(payload.watchlist_count)} en watchlist · `
     + `${formatInteger(payload.favorite_count)} favoritos · `
-    + `${formatInteger(payload.scheduled_asset_count)} programados efectivos`;
+    + `${formatInteger(payload.scheduled_asset_count)} programados efectivos`
+    + (payload.scheduler_enabled
+      ? ` · ${formatInteger(payload.scheduled_job_count)} trabajos activos`
+      : "");
   const revisionStatus = payload.source === "persisted"
     ? `Revisión ${payload.revision_id.slice(0, 8)} · ${formatInstant(payload.created_at)}`
     : "Valores efectivos de la configuración CLI; aún no se escribió una revisión.";
-  byId("asset-preferences-status").textContent = payload.scheduler_enabled
-    ? revisionStatus
-    : `${revisionStatus} Scheduler desactivado; la selección programada se conserva.`;
+  const scopeNotice = payload.scheduler_enabled
+    ? ` · Solo los ${formatInteger(payload.scheduled_asset_count)} activos marcados se actualizan en automático diario (con anual y trimestral independientes cuando la SEC los soporta). El refresco del resto del catálogo es recuperación puntual y la automatización por familia pertenece al siguiente bloque.`
+    : " Scheduler desactivado; la selección programada se conserva.";
+  byId("asset-preferences-status").textContent = `${revisionStatus}${scopeNotice}`;
   renderAssetPreferencesWindow();
   prioritizeAssetSelector(payload);
 }
