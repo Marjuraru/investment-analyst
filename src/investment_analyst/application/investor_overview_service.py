@@ -93,7 +93,10 @@ class InvestorOverviewService:
         self._catalog = catalog
         self._resolver = resolver
         self._coverage = UniverseCoverageService(storage, catalog, resolver)
-        self._diagnostics = ListedCompanyConsolidatedDiagnosticService(storage)
+        self._diagnostics = ListedCompanyConsolidatedDiagnosticService(
+            storage,
+            resolver=resolver,
+        )
 
     def query(self, request: InvestorOverviewRequest) -> InvestorOverviewResult:
         """Return one stable-ordered projection for the explicit asset batch."""

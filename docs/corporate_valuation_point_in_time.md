@@ -283,3 +283,12 @@ TSM y `ec2067c4…3e8dd` para BVN) y la valoración selecciona la revisión poin
 - La repetición de las lecturas de investigación y valoración conservó IDs, valores y orden; el
   archivo DuckDB no cambió de tamaño ni de `mtime` y no apareció WAL. La reapertura fría/caliente se
   registra en [`v2_operational_readiness.md`](v2_operational_readiness.md).
+
+## Presentación parcial y selector explícito de filing
+
+En la vista de valoración parcial, las métricas evaluadas como `P/E` o `P/B` permanecen visibles con
+sus datos de procedencia junto a las métricas `not_evaluable` y su motivo explícito (`missing_input`,
+`ebitda_unavailable`, etc.), sin completar ausencias. Cada tarjeta distingue visualmente la fecha del
+ejercicio fundamental y la fecha del corte de precio (`ej. YYYY-MM-DD · precio YYYY-MM-DD`), mientras
+que el selector explícito `selected_annual_filing` para ADR/emisores con múltiples filings anuales
+conserva intacta su semántica de contrato y precedencia point-in-time.

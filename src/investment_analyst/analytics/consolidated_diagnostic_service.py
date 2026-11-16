@@ -5,6 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from functools import lru_cache
 from hashlib import sha256
 from typing import Protocol
 from uuid import UUID
@@ -27,6 +28,12 @@ from investment_analyst.analytics.market.statistics_definitions import (
     SMA_KEY,
     VOLATILITY_KEY,
 )
+from investment_analyst.catalog.provider_configuration import resolve_sec_configuration
+from investment_analyst.catalog.provider_context import (
+    ProviderAssetContextError,
+    ProviderAssetContextResolver,
+)
+from investment_analyst.catalog.service import AssetCatalogError, AssetCatalogService
 from investment_analyst.core.models import (
     DataFrequency,
     DiagnosticMode,
@@ -38,8 +45,18 @@ from investment_analyst.core.models import (
     SourceReference,
 )
 from investment_analyst.core.models.diagnostic import DECIMAL_TOLERANCE
+from investment_analyst.providers.fundamentals.sec_diagnostic_engine import (
+    sec_fundamental_diagnostic_version,
+)
 from investment_analyst.providers.fundamentals.sec_diagnostic_rules import (
     ALGORITHM_VERSION as FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION,
+)
+from investment_analyst.providers.fundamentals.sec_diagnostic_rules import (
+    SecFundamentalDiagnosticRuleError,
+    confidence_for,
+    coverage_for,
+    quality_for,
+    recency_factor,
 )
 from investment_analyst.providers.fundamentals.sec_metric_models import (
     SEC_FUNDAMENTAL_METRIC_DEFINITIONS,
@@ -422,6 +439,8 @@ class _SemanticTraceabilityResolver:
 def _semantic_identity(
     candidate: _Candidate,
     resolver: _SemanticTraceabilityResolver,
+    *,
+    include_freshness: bool = True,
 ) -> str:
     diagnostic = candidate.diagnostic
     components: list[JsonValue] = []
@@ -451,19 +470,64 @@ def _semantic_identity(
         "mode": diagnostic.mode.value,
         "verdict": diagnostic.verdict.value,
         "final_score": str(diagnostic.final_score),
-        "confidence": str(diagnostic.confidence),
         "as_of": diagnostic.as_of.isoformat(),
         "available_at": diagnostic.available_at.isoformat(),
         "components": sorted(components, key=_canonical_json),
         "evidence": sorted(evidence, key=_canonical_json),
         "algorithm_version": diagnostic.algorithm_version,
         "summary": diagnostic.summary,
-        "quality": diagnostic.quality.value,
         "fundamental_frequency": (
             candidate.fundamental_frequency.value if candidate.fundamental_frequency else None
         ),
     }
+    if include_freshness:
+        payload["confidence"] = str(diagnostic.confidence)
+        payload["quality"] = diagnostic.quality.value
     return _semantic_digest(payload)
+
+
+def _matches_fundamental_recency_rule(
+    candidate: _Candidate,
+    metric_index: dict[UUID, MetricResult],
+) -> bool:
+    diagnostic = candidate.diagnostic
+    if (
+        diagnostic.mode is not DiagnosticMode.FUNDAMENTAL
+        or diagnostic.verdict is DiagnosticVerdict.INSUFFICIENT_DATA
+        or candidate.fundamental_frequency is None
+        or not candidate.metric_ids
+    ):
+        return False
+    metrics = tuple(metric_index[identifier] for identifier in candidate.metric_ids)
+    names = tuple(item.metric_key for item in metrics)
+    if len(set(names)) != len(names):
+        return False
+    latest_available = max(item.available_at for item in metrics)
+    try:
+        coverage = coverage_for(names)
+        recency = recency_factor(
+            diagnostic.computed_at,
+            latest_available,
+            candidate.fundamental_frequency,
+        )
+    except SecFundamentalDiagnosticRuleError:
+        return False
+    return diagnostic.confidence == confidence_for(coverage, recency) and (
+        diagnostic.quality == quality_for(sufficient=True, coverage=coverage, recency=recency)
+    )
+
+
+def _all_recency_equivalent_fundamental(
+    latest: list[_Candidate],
+    resolver: _SemanticTraceabilityResolver,
+    metric_index: dict[UUID, MetricResult],
+) -> bool:
+    core_identities = {
+        _semantic_identity(item, resolver, include_freshness=False) for item in latest
+    }
+    if len(core_identities) != 1:
+        return False
+    return all(_matches_fundamental_recency_rule(item, metric_index) for item in latest)
 
 
 def _validate_diagnostic_math(diagnostic: DiagnosticResult) -> None:
@@ -492,6 +556,41 @@ def _validate_diagnostic_math(diagnostic: DiagnosticResult) -> None:
         raise MalformedStoredDiagnosticError(
             "diagnostic final score does not match weighted contributions"
         )
+
+
+_NO_ELIGIBLE_PERIOD_MARKER = "for no eligible period has insufficient data:"
+_ANNUAL_INSUFFICIENT_MARKER = " annual fundamental diagnostic for "
+_QUARTERLY_INSUFFICIENT_MARKER = " quarterly fundamental diagnostic for "
+
+
+@lru_cache(maxsize=1)
+def _default_asset_resolver() -> ProviderAssetContextResolver:
+    """Return one bounded default catalog resolver for zero-arg diagnostic callers."""
+    return ProviderAssetContextResolver(AssetCatalogService.load_default())
+
+
+def _insufficient_fundamental_frequency(summary: str) -> DataFrequency | None:
+    """Infer the explicit fundamental frequency from canonical insufficient summaries."""
+    has_annual = _ANNUAL_INSUFFICIENT_MARKER in summary
+    has_quarterly = _QUARTERLY_INSUFFICIENT_MARKER in summary
+    if has_annual and has_quarterly:
+        raise MixedFundamentalFrequencyError(
+            "insufficient fundamental diagnostic summary declares mixed frequencies"
+        )
+    if has_annual:
+        return DataFrequency.ANNUAL
+    if has_quarterly:
+        return DataFrequency.QUARTERLY
+    return None
+
+
+def _has_specific_period(candidate: _Candidate) -> bool:
+    if (
+        candidate.diagnostic.mode is DiagnosticMode.FUNDAMENTAL
+        and candidate.diagnostic.verdict is DiagnosticVerdict.INSUFFICIENT_DATA
+    ):
+        return _NO_ELIGIBLE_PERIOD_MARKER not in candidate.diagnostic.summary
+    return True
 
 
 def _validate_diagnostic_common(
@@ -527,7 +626,12 @@ def _validate_diagnostic_common(
             raise MalformedStoredDiagnosticError(
                 "insufficient diagnostic score and confidence must be zero"
             )
-        return _Candidate(diagnostic, metric_ids, None)
+        fundamental_frequency = (
+            _insufficient_fundamental_frequency(diagnostic.summary)
+            if diagnostic.mode is DiagnosticMode.FUNDAMENTAL
+            else None
+        )
+        return _Candidate(diagnostic, metric_ids, fundamental_frequency)
 
     metrics: list[MetricResult] = []
     for identifier in metric_ids:
@@ -556,11 +660,20 @@ def _validate_diagnostic_common(
     return _Candidate(diagnostic, metric_ids, fundamental_frequency)
 
 
-def _current_version(mode: DiagnosticMode) -> str:
+def _current_version(
+    mode: DiagnosticMode,
+    *,
+    asset_id: str,
+    asset_resolver: ProviderAssetContextResolver,
+) -> str | None:
     if mode is DiagnosticMode.MARKET:
         return MARKET_DIAGNOSTIC_ALGORITHM_VERSION
     if mode is DiagnosticMode.FUNDAMENTAL:
-        return FUNDAMENTAL_DIAGNOSTIC_ALGORITHM_VERSION
+        try:
+            configuration = resolve_sec_configuration(asset_resolver, asset_id=asset_id)
+        except (ProviderAssetContextError, AssetCatalogError):
+            return None
+        return sec_fundamental_diagnostic_version(configuration)
     raise ValueError("unsupported diagnostic mode")
 
 
@@ -569,6 +682,7 @@ def _select_revision(
     *,
     mode: DiagnosticMode,
     resolver: _SemanticTraceabilityResolver,
+    metric_index: dict[UUID, MetricResult],
 ) -> tuple[list[_Candidate], int]:
     grouped: dict[tuple[DiagnosticMode, str, DataFrequency | None, datetime], list[_Candidate]]
     grouped = defaultdict(list)
@@ -589,7 +703,10 @@ def _select_revision(
         latest = [item for item in revisions if item.diagnostic.available_at == latest_available]
         if len(latest) > 1:
             identities = {_semantic_identity(item, resolver) for item in latest}
-            if len(identities) != 1:
+            if len(identities) != 1 and not (
+                mode is DiagnosticMode.FUNDAMENTAL
+                and _all_recency_equivalent_fundamental(latest, resolver, metric_index)
+            ):
                 raise AmbiguousStoredDiagnosticRevisionError(
                     f"ambiguous {mode.value} diagnostic revisions at {key[3].isoformat()}"
                 )
@@ -635,7 +752,8 @@ def _choose_period(
     superseded: int,
 ) -> ConsolidatedDiagnosticSection:
     if exact_date is None:
-        chosen = max(candidates, key=lambda item: item.diagnostic.as_of)
+        dated = [item for item in candidates if _has_specific_period(item)] or candidates
+        chosen = max(dated, key=lambda item: item.diagnostic.as_of)
     else:
         matches = [item for item in candidates if item.diagnostic.as_of.date() == exact_date]
         if not matches:
@@ -646,11 +764,12 @@ def _choose_period(
                 eligible=eligible,
                 superseded=superseded,
             )
-        if len(matches) != 1:
+        dated = [item for item in matches if _has_specific_period(item)] or matches
+        if len(dated) != 1:
             raise AmbiguousStoredDiagnosticRevisionError(
                 f"multiple selected {mode.value} diagnostics remain for {exact_date.isoformat()}"
             )
-        chosen = matches[0]
+        chosen = dated[0]
     return ConsolidatedDiagnosticSection(
         status=ConsolidatedSectionStatus.AVAILABLE,
         mode=mode,
@@ -666,9 +785,23 @@ def _choose_period(
 class ListedCompanyConsolidatedDiagnosticService:
     """Select independent current-version diagnostics without recomputation or persistence."""
 
-    def __init__(self, storage: LocalStorage) -> None:
+    def __init__(
+        self,
+        storage: LocalStorage,
+        *,
+        catalog: AssetCatalogService | None = None,
+        resolver: ProviderAssetContextResolver | None = None,
+    ) -> None:
         storage.require_open()
+        if catalog is not None and resolver is not None:
+            raise ValueError("pass either catalog or resolver, not both")
         self._storage = storage
+        if resolver is not None:
+            self._resolver = resolver
+        elif catalog is not None:
+            self._resolver = ProviderAssetContextResolver(catalog)
+        else:
+            self._resolver = _default_asset_resolver()
 
     def query(self, request: _ConsolidatedRequest) -> ConsolidatedDiagnosticView:
         """Return one compact point-in-time view from diagnoses plus referenced metrics."""
@@ -695,6 +828,7 @@ class ListedCompanyConsolidatedDiagnosticService:
                 request=request,
                 metric_index=metric_index,
                 resolver=semantic_resolver,
+                asset_resolver=self._resolver,
             )
             sections[mode] = section
             ignored_versions += ignored
@@ -754,6 +888,7 @@ class ListedCompanyConsolidatedDiagnosticService:
             request=request,
             metric_index=metric_index,
             resolver=resolver,
+            asset_resolver=self._resolver,
         )
         self._verify_sections((section,), request.known_at, metric_index)
         return section, metric_index
@@ -767,18 +902,27 @@ class ListedCompanyConsolidatedDiagnosticService:
         request: _ConsolidatedRequest,
         metric_index: dict[UUID, MetricResult],
         resolver: _SemanticTraceabilityResolver,
+        asset_resolver: ProviderAssetContextResolver,
     ) -> tuple[ConsolidatedDiagnosticSection, int]:
         mode_results = [item for item in diagnostics if item.mode is mode]
-        current_version = _current_version(mode)
+        current_version = _current_version(
+            mode,
+            asset_id=request.asset_id,
+            asset_resolver=asset_resolver,
+        )
         ignored_versions = 0
+        other_date_eligible = 0
         current = []
         for diagnostic in mode_results:
-            if diagnostic.algorithm_version != current_version:
+            if current_version is None or diagnostic.algorithm_version != current_version:
                 ignored_versions += 1
                 continue
             if diagnostic.available_at > request.known_at:
                 continue
             if diagnostic.as_of > request.known_at:
+                continue
+            if exact_date is not None and diagnostic.as_of.date() != exact_date:
+                other_date_eligible += 1
                 continue
             candidate = _validate_diagnostic_common(
                 diagnostic,
@@ -793,6 +937,19 @@ class ListedCompanyConsolidatedDiagnosticService:
             current.append(candidate)
 
         if not current:
+            if exact_date is not None and other_date_eligible > 0:
+                return (
+                    _not_found_section(
+                        mode,
+                        reason=(
+                            f"no eligible {mode.value} diagnostic exists "
+                            f"for {exact_date.isoformat()}"
+                        ),
+                        examined=len(mode_results),
+                        eligible=other_date_eligible,
+                    ),
+                    ignored_versions,
+                )
             return (
                 _not_found_section(
                     mode,
@@ -809,6 +966,7 @@ class ListedCompanyConsolidatedDiagnosticService:
             current,
             mode=mode,
             resolver=resolver,
+            metric_index=metric_index,
         )
         return (
             _choose_period(
@@ -834,14 +992,25 @@ class ListedCompanyConsolidatedDiagnosticService:
             if diagnostic.asset_id != request.asset_id:
                 continue
             try:
-                current_version = _current_version(diagnostic.mode)
+                current_version = _current_version(
+                    diagnostic.mode,
+                    asset_id=request.asset_id,
+                    asset_resolver=self._resolver,
+                )
             except ValueError:
                 continue
-            if diagnostic.algorithm_version != current_version:
+            if current_version is None or diagnostic.algorithm_version != current_version:
                 continue
             if diagnostic.available_at > request.known_at:
                 continue
             if diagnostic.as_of > request.known_at:
+                continue
+            exact_date = (
+                request.market_as_of
+                if diagnostic.mode is DiagnosticMode.MARKET
+                else request.fundamental_as_of
+            )
+            if exact_date is not None and diagnostic.as_of.date() != exact_date:
                 continue
             referenced.update(_referenced_metric_ids(diagnostic))
         ordered = tuple(sorted(referenced, key=str))

@@ -218,3 +218,152 @@ def test_foreign_corpus_growth_does_not_change_the_selected_projection(tmp_path:
         grown = _get(root, _query(AAPL))
     assert grown == baseline
     assert date(2026, 8, 28).isoformat() in json.dumps(grown[1]["windows"])
+
+
+def test_endpoint_exposes_generic_annual_and_insufficient_data_without_zero_score(
+    tmp_path: Path,
+) -> None:
+    from investment_analyst.core.models import (
+        DiagnosticComponent,
+        DiagnosticEvidence,
+        DiagnosticMode,
+        DiagnosticResult,
+        DiagnosticVerdict,
+        EvidenceDirection,
+        MetricResult,
+    )
+    from investment_analyst.providers.fundamentals.sec_diagnostic_rules import (
+        GENERIC_ALGORITHM_VERSION,
+    )
+    from investment_analyst.providers.fundamentals.sec_metric_models import (
+        SEC_FUNDAMENTAL_METRIC_DEFINITIONS,
+    )
+
+    amd = "equity:us:amd"
+    nvda = "equity:us:nvda"
+    period_end = datetime(2025, 12, 31, tzinfo=UTC)
+    available_at = datetime(2026, 2, 1, tzinfo=UTC)
+    computed_at = datetime(2026, 2, 2, tzinfo=UTC)
+    definition = next(
+        item
+        for item in SEC_FUNDAMENTAL_METRIC_DEFINITIONS
+        if item.metric_name == "fundamental.net_margin"
+    )
+    source = SourceReference(
+        source_id="sec-edgar:amd:companyfacts",
+        record_key="amd:fy2025:net-income",
+        retrieved_at=available_at,
+    )
+    raw = RawRecord(
+        record_id=uuid4(),
+        asset_id=amd,
+        source=source,
+        event_time=period_end,
+        available_at=available_at,
+        received_at=available_at,
+        payload={"value": "210"},
+        schema_version="sec-companyfacts-v1",
+    )
+    obs = NormalizedObservation(
+        observation_id=uuid4(),
+        raw_record_id=raw.record_id,
+        asset_id=amd,
+        field_name="net_income",
+        value=Decimal("210"),
+        unit="USD",
+        frequency=DataFrequency.ANNUAL,
+        observed_at=period_end,
+        available_at=available_at,
+        normalized_at=computed_at,
+        source=source,
+        quality=DataQuality.VALID,
+        transformation_version="sec-normalizer-v1",
+    )
+    amd_metric = MetricResult(
+        asset_id=amd,
+        metric_key="fundamental.net_margin",
+        value=Decimal("0.21"),
+        unit=definition.unit,
+        as_of=period_end,
+        available_at=available_at,
+        computed_at=computed_at,
+        parameters={
+            "frequency": DataFrequency.ANNUAL.value,
+            "period_end": period_end.isoformat(),
+            "formula": definition.formula,
+            "input_roles": [
+                {"role": "current_net_income", "observation_id": str(obs.observation_id)}
+            ],
+        },
+        input_observation_ids=[obs.observation_id],
+        algorithm_version=definition.algorithm_version,
+        quality=DataQuality.VALID,
+    )
+    workspace, paths = _workspace(tmp_path)
+    with LocalStorage(paths) as storage:
+        storage.raw_records.save(raw)
+        storage.observations.save(obs)
+        storage.metric_results.save(amd_metric)
+        storage.diagnostics.save_many(
+            (
+                DiagnosticResult(
+                    asset_id=amd,
+                    mode=DiagnosticMode.FUNDAMENTAL,
+                    verdict=DiagnosticVerdict.POSITIVE,
+                    final_score=Decimal("87.00"),
+                    confidence=Decimal("0.9"),
+                    as_of=period_end,
+                    available_at=available_at,
+                    computed_at=computed_at,
+                    components=[
+                        DiagnosticComponent(
+                            component_key="margin",
+                            score=Decimal("87.00"),
+                            weight=Decimal("1"),
+                            weighted_contribution=Decimal("87.00"),
+                            metric_result_ids=[amd_metric.result_id],
+                            explanation="AMD annual.",
+                        )
+                    ],
+                    evidence=[
+                        DiagnosticEvidence(
+                            metric_result_id=amd_metric.result_id,
+                            direction=EvidenceDirection.SUPPORTS,
+                            contribution=Decimal("0.4"),
+                            reason="AMD annual.",
+                        )
+                    ],
+                    algorithm_version=GENERIC_ALGORITHM_VERSION,
+                    summary="AMD annual fundamental diagnostic.",
+                    quality=DataQuality.VALID,
+                ),
+                DiagnosticResult(
+                    asset_id=nvda,
+                    mode=DiagnosticMode.FUNDAMENTAL,
+                    verdict=DiagnosticVerdict.INSUFFICIENT_DATA,
+                    final_score=Decimal("0"),
+                    confidence=Decimal("0"),
+                    as_of=period_end,
+                    available_at=available_at,
+                    computed_at=computed_at,
+                    components=[],
+                    evidence=[],
+                    algorithm_version=GENERIC_ALGORITHM_VERSION,
+                    summary=(
+                        "NVDA annual fundamental diagnostic for 2025-12-31 "
+                        "has insufficient data: fundamental.net_margin."
+                    ),
+                    quality=DataQuality.PARTIAL,
+                ),
+            )
+        )
+    with _server(_web(workspace)) as root:
+        status, payload = _get(root, _query(amd, nvda))
+    assert status == 200
+    by_id = {item["asset_id"]: item for item in payload["assets"]}
+    assert by_id[amd]["fundamental"]["score"]["state"] == "available"
+    assert by_id[amd]["fundamental"]["score"]["value"] == "87.00"
+    assert by_id[amd]["fundamental"]["verdict"] == "positive"
+    assert by_id[nvda]["fundamental"]["score"]["state"] == "insufficient_data"
+    assert by_id[nvda]["fundamental"]["score"]["value"] is None
+    assert by_id[nvda]["fundamental"]["verdict"] == "insufficient_data"

@@ -2,6 +2,7 @@
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -296,3 +297,98 @@ def test_ambiguous_one_day_return_revisions_raise_instead_of_choosing(
         storage.metric_results.save(result("0.0200"))
         with pytest.raises(InvestorOverviewIntegrityError):
             _service(storage).query(_request(AAPL))
+
+
+def test_generic_annual_diagnostic_and_insufficient_data_are_projected_honestly(
+    tmp_path: Path,
+) -> None:
+    from investment_analyst.core.models import (
+        DiagnosticComponent,
+        DiagnosticEvidence,
+        DiagnosticMode,
+        DiagnosticResult,
+        DiagnosticVerdict,
+        EvidenceDirection,
+    )
+    from investment_analyst.providers.fundamentals.sec_diagnostic_rules import (
+        GENERIC_ALGORITHM_VERSION,
+    )
+
+    amd = "equity:us:amd"
+    nvda = "equity:us:nvda"
+    period_end = datetime(2025, 12, 31, tzinfo=UTC)
+    available_at = datetime(2026, 2, 1, tzinfo=UTC)
+    computed_at = datetime(2026, 2, 2, tzinfo=UTC)
+
+    amd_metric = _fundamental_metric("fundamental.net_margin", "0.18", period_end).model_copy(
+        update={
+            "asset_id": amd,
+            "available_at": available_at,
+            "computed_at": computed_at,
+        }
+    )
+    amd_diag = DiagnosticResult(
+        asset_id=amd,
+        mode=DiagnosticMode.FUNDAMENTAL,
+        verdict=DiagnosticVerdict.POSITIVE,
+        final_score=Decimal("82.50"),
+        confidence=Decimal("0.9"),
+        as_of=period_end,
+        available_at=available_at,
+        computed_at=computed_at,
+        components=[
+            DiagnosticComponent(
+                component_key="margin",
+                score=Decimal("82.50"),
+                weight=Decimal("1"),
+                weighted_contribution=Decimal("82.50"),
+                metric_result_ids=[amd_metric.result_id],
+                explanation="AMD annual component.",
+            )
+        ],
+        evidence=[
+            DiagnosticEvidence(
+                metric_result_id=amd_metric.result_id,
+                direction=EvidenceDirection.SUPPORTS,
+                contribution=Decimal("0.4"),
+                reason="AMD annual evidence.",
+            )
+        ],
+        algorithm_version=GENERIC_ALGORITHM_VERSION,
+        summary="AMD annual fundamental diagnostic.",
+        quality=DataQuality.VALID,
+    )
+    nvda_insufficient = DiagnosticResult(
+        asset_id=nvda,
+        mode=DiagnosticMode.FUNDAMENTAL,
+        verdict=DiagnosticVerdict.INSUFFICIENT_DATA,
+        final_score=Decimal("0"),
+        confidence=Decimal("0"),
+        as_of=period_end,
+        available_at=available_at,
+        computed_at=computed_at,
+        components=[],
+        evidence=[],
+        algorithm_version=GENERIC_ALGORITHM_VERSION,
+        summary=(
+            "NVDA annual fundamental diagnostic for 2025-12-31 "
+            "has insufficient data: fundamental.net_margin."
+        ),
+        quality=DataQuality.PARTIAL,
+    )
+
+    with LocalStorage(StoragePaths.from_root(tmp_path)) as storage:
+        storage.metric_results.save(amd_metric)
+        storage.diagnostics.save_many((amd_diag, nvda_insufficient))
+        overview = _service(storage).query(_request(amd, nvda))
+
+    by_id = {item.asset_id: item for item in overview.assets}
+    assert by_id[amd].fundamental.score.state is InvestorValueState.AVAILABLE
+    assert by_id[amd].fundamental.score.value == Decimal("82.50")
+    assert by_id[amd].fundamental.verdict == "positive"
+    assert by_id[amd].fundamental.algorithm_version == GENERIC_ALGORITHM_VERSION
+
+    assert by_id[nvda].fundamental.score.state is InvestorValueState.INSUFFICIENT_DATA
+    assert by_id[nvda].fundamental.score.value is None
+    assert by_id[nvda].fundamental.verdict == "insufficient_data"
+    assert by_id[nvda].fundamental.score.reason_codes == ("diagnostic_insufficient_data",)

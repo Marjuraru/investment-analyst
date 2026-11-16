@@ -980,10 +980,26 @@ function resetMesaNavigationContext({ clearOverviewCache = true } = {}) {
 }
 
 const MESA_VERDICT_LABELS = Object.freeze({
-  favorable: "Favorable",
+  positive: "Favorable",
   neutral: "Neutral",
+  negative: "Desfavorable",
+  insufficient_data: "Insuficiente",
+  favorable: "Favorable",
   unfavorable: "Desfavorable",
 });
+
+function mesaVerdictToneClass(verdictKey) {
+  if (verdictKey === "positive" || verdictKey === "favorable") return " is-good";
+  if (verdictKey === "negative" || verdictKey === "unfavorable") return " is-error";
+  if (verdictKey === "insufficient_data") return " is-warn";
+  return "";
+}
+
+function mesaDateOnly(value) {
+  if (!value) return "";
+  const text = String(value).trim();
+  return text.length >= 10 ? text.slice(0, 10) : "";
+}
 
 const MESA_VALUE_STATE_LABELS = Object.freeze({
   available: "Disponible",
@@ -1146,6 +1162,7 @@ function mesaPendingStatusPill(rowState, rowError = "") {
 }
 
 function renderInvestorValueCell(val, options = {}) {
+  const subtitleText = typeof options.subtitleText === "string" ? options.subtitleText.trim() : "";
   const wrap = createElement("div", "mesa-value-cell");
   if (!val) {
     wrap.append(mesaPendingStatusPill(options.rowState || "pending", options.rowError || ""));
@@ -1187,6 +1204,10 @@ function renderInvestorValueCell(val, options = {}) {
       primary.title = exactTitle;
     }
     wrap.append(primary);
+    if (subtitleText) {
+      wrap.className = "mesa-value-cell is-stacked";
+      wrap.append(createElement("span", "mesa-ref-date", subtitleText));
+    }
     return wrap;
   }
   if (val.state === "not_applicable") {
@@ -1225,6 +1246,10 @@ function renderInvestorValueCell(val, options = {}) {
   infoMark.setAttribute("aria-hidden", "true");
   dash.append("—", infoMark);
   wrap.append(dash);
+  if (subtitleText) {
+    wrap.className = "mesa-value-cell is-stacked";
+    wrap.append(createElement("span", "mesa-ref-date", subtitleText));
+  }
   return wrap;
 }
 
@@ -1247,42 +1272,82 @@ function formatMesaExactDetailValue(val, kind, currency = "USD") {
   return mesaFullAbsenceDescription(val) || mesaBriefStateLabel(val);
 }
 
+function mesaCloseCellOptions(ov, { rowCurrency, isDifferentPriceDate, priceDate, rowState, rowError } = {}) {
+  const subtitleText = ov?.market?.close?.state === "available" && priceDate ? priceDate : "";
+  return {
+    formatValue: (raw) => formatDecimalPrice(raw, rowCurrency),
+    unitSuffix: ` ${rowCurrency}`,
+    isDifferentPriceDate,
+    priceDate,
+    subtitleText,
+    rowState,
+    rowError,
+  };
+}
+
+function mesaPeCellOptions(ov, { rowState, rowError } = {}) {
+  const metric = ov?.valuation?.price_to_earnings;
+  const peDate = mesaDateOnly(ov?.valuation?.annual_period_end || metric?.reference_at);
+  let subtitleText = "";
+  if (metric?.state === "available" && peDate) {
+    subtitleText = `ej. ${peDate}`;
+  } else if (metric?.state === "insufficient_data") {
+    subtitleText = peDate ? `Insuficiente · ${peDate}` : "Insuficiente";
+  } else if (metric && metric.state !== "not_applicable" && metric.state !== "error") {
+    subtitleText = mesaBriefStateLabel(metric);
+  }
+  return {
+    formatValue: (raw) => formatDecimalMultiple(raw, 2),
+    subtitleText,
+    rowState,
+    rowError,
+  };
+}
+
 function renderMesaScoreCellNode(ov, { rowState, rowError } = {}) {
-  if (ov?.fundamental?.score?.state === "available" && ov.fundamental.score.value !== null) {
-    const scoreVal = ov.fundamental.score.value;
+  const score = ov?.fundamental?.score;
+  const refDate = mesaDateOnly(score?.reference_at);
+  if (score?.state === "available" && score.value !== null) {
+    const scoreVal = score.value;
     const verdictKey = ov.fundamental.verdict || "";
     const verdict = MESA_VERDICT_LABELS[verdictKey] || verdictKey;
     const wrap = createElement("div", "mesa-score-cell");
     const scorePrimary = createElement("strong", "mesa-value-primary", formatDecimalScore(scoreVal, 1));
-    scorePrimary.title = `Score exacto: ${formatExactDecimalText(scoreVal)}/100`;
+    scorePrimary.title = `Score exacto: ${formatExactDecimalText(scoreVal)}/100${refDate ? ` · período ${refDate}` : ""}`;
     wrap.append(scorePrimary, createElement("span", "mesa-value-sub", "/100"));
     if (verdict) {
-      const verdictTone = verdictKey === "favorable"
-        ? " is-good"
-        : verdictKey === "unfavorable"
-          ? " is-error"
-          : "";
-      wrap.append(createElement("span", `mesa-status-pill${verdictTone}`, verdict));
+      wrap.append(createElement("span", `mesa-status-pill${mesaVerdictToneClass(verdictKey)}`, verdict));
     }
-    return wrap;
+    if (!refDate) return wrap;
+    const stack = createElement("div", "mesa-cell-stack");
+    stack.append(wrap, createElement("span", "mesa-ref-date", `per. ${refDate}`));
+    return stack;
   }
-  return renderInvestorValueCell(ov?.fundamental?.score, {
+  let subtitleText = "";
+  if (score?.state === "insufficient_data") {
+    subtitleText = refDate ? `Insuficiente · ${refDate}` : "Insuficiente";
+  } else if (score && score.state !== "not_applicable" && score.state !== "error") {
+    subtitleText = mesaBriefStateLabel(score);
+  }
+  return renderInvestorValueCell(score, {
     rowState,
     rowError,
+    subtitleText,
   });
 }
 
 function buildMesaDetailCellNodes(entry, ov, { assetId, classLabel, exchangeLabel, rowCurrency, rowPriceDate, knownAt, rowState, rowError } = {}) {
   const grid = createElement("div", "mesa-detail-grid");
   if (ov) {
-    const verdictText = ov.fundamental?.verdict
+    const fundDate = mesaDateOnly(ov.fundamental?.score?.reference_at);
+    const verdictText = ov.fundamental?.verdict && ov.fundamental?.score?.state === "available"
       ? ` (${MESA_VERDICT_LABELS[ov.fundamental.verdict] || ov.fundamental.verdict})`
       : "";
     grid.append(
       createElement("span", "", `${entry.name} (${assetId}) · ${classLabel} · ${exchangeLabel}`),
       createElement("span", "", `Cierre: ${formatMesaExactDetailValue(ov.market?.close, "price", rowCurrency)}${rowPriceDate ? ` · fecha precio ${rowPriceDate}` : ""}`),
       createElement("span", "", `Var. 1d: ${formatMesaExactDetailValue(ov.market?.change_1d, "percent")}`),
-      createElement("span", "", `Fund. anual: ${formatMesaExactDetailValue(ov.fundamental?.score, "score")}${verdictText}`),
+      createElement("span", "", `Fund. anual: ${formatMesaExactDetailValue(ov.fundamental?.score, "score")}${fundDate ? ` · período ${fundDate}` : ""}${verdictText}`),
       createElement("span", "", `P/E anual: ${formatMesaExactDetailValue(ov.valuation?.price_to_earnings, "multiple")}${ov.valuation?.annual_period_end ? ` · ejercicio ${String(ov.valuation.annual_period_end).slice(0, 10)}` : ""}`),
       createElement("span", "", `P/B: ${formatMesaExactDetailValue(ov.valuation?.price_to_book, "multiple")}`),
       createElement("span", "", `EV/EBITDA: ${formatMesaExactDetailValue(ov.valuation?.enterprise_value_to_ebitda, "multiple")}`),
@@ -1380,14 +1445,16 @@ function patchMesaRowsInPlace(body, visible, { knownAt, latestPriceDate } = {}) 
     const cells = tr.children || [];
     if (cells[1]) {
       cells[1].replaceChildren(
-        renderInvestorValueCell(ov?.market?.close, {
-          formatValue: (raw) => formatDecimalPrice(raw, rowCurrency),
-          unitSuffix: ` ${rowCurrency}`,
-          isDifferentPriceDate,
-          priceDate: rowPriceDate,
-          rowState,
-          rowError,
-        }),
+        renderInvestorValueCell(
+          ov?.market?.close,
+          mesaCloseCellOptions(ov, {
+            rowCurrency,
+            isDifferentPriceDate,
+            priceDate: rowPriceDate,
+            rowState,
+            rowError,
+          }),
+        ),
       );
     }
     if (cells[2]) {
@@ -1405,11 +1472,10 @@ function patchMesaRowsInPlace(body, visible, { knownAt, latestPriceDate } = {}) 
     }
     if (cells[4]) {
       cells[4].replaceChildren(
-        renderInvestorValueCell(ov?.valuation?.price_to_earnings, {
-          formatValue: (raw) => formatDecimalMultiple(raw, 2),
-          rowState,
-          rowError,
-        }),
+        renderInvestorValueCell(
+          ov?.valuation?.price_to_earnings,
+          mesaPeCellOptions(ov, { rowState, rowError }),
+        ),
       );
     }
 
@@ -1633,14 +1699,16 @@ function renderMesaInvestorTable(options = {}) {
     tdClose.className = "is-numeric";
     const rowCurrency = ov?.market?.currency || entry.quoteCurrency || "USD";
     tdClose.append(
-      renderInvestorValueCell(ov?.market?.close, {
-        formatValue: (raw) => formatDecimalPrice(raw, rowCurrency),
-        unitSuffix: ` ${rowCurrency}`,
-        isDifferentPriceDate,
-        priceDate: rowPriceDate,
-        rowState,
-        rowError,
-      }),
+      renderInvestorValueCell(
+        ov?.market?.close,
+        mesaCloseCellOptions(ov, {
+          rowCurrency,
+          isDifferentPriceDate,
+          priceDate: rowPriceDate,
+          rowState,
+          rowError,
+        }),
+      ),
     );
 
     // 3. Var 1d
@@ -1664,11 +1732,10 @@ function renderMesaInvestorTable(options = {}) {
     const tdPe = document.createElement("td");
     tdPe.className = "is-numeric";
     tdPe.append(
-      renderInvestorValueCell(ov?.valuation?.price_to_earnings, {
-        formatValue: (raw) => formatDecimalMultiple(raw, 2),
-        rowState,
-        rowError,
-      }),
+      renderInvestorValueCell(
+        ov?.valuation?.price_to_earnings,
+        mesaPeCellOptions(ov, { rowState, rowError }),
+      ),
     );
 
     // 6. Detalle
@@ -2246,7 +2313,10 @@ function renderActivoCompactHeader(ov, cutIso = null) {
     }),
   );
   const fundCard = createElement("div", "asset-compact-domain");
-  fundCard.append(createElement("small", "", "Diagnóstico fundamental"));
+  const fundDate = mesaDateOnly(ov.fundamental?.score?.reference_at);
+  fundCard.append(
+    createElement("small", "", `Diagnóstico fundamental${fundDate ? ` (${fundDate})` : ""}`),
+  );
   if (ov.fundamental?.score?.state === "available" && ov.fundamental.score.value !== null) {
     const verdictKey = ov.fundamental.verdict || "";
     const verdict = MESA_VERDICT_LABELS[verdictKey] || verdictKey;
@@ -2255,16 +2325,26 @@ function renderActivoCompactHeader(ov, cutIso = null) {
       createElement("strong", "mesa-value-primary", `${formatDecimalScore(ov.fundamental.score.value, 1)}/100`),
     );
     if (verdict) {
-      const tone = verdictKey === "favorable" ? " is-good" : verdictKey === "unfavorable" ? " is-error" : "";
-      scoreWrap.append(createElement("span", `mesa-status-pill${tone}`, verdict));
+      scoreWrap.append(createElement("span", `mesa-status-pill${mesaVerdictToneClass(verdictKey)}`, verdict));
     }
+    fundCard.append(scoreWrap);
+  } else if (ov.fundamental?.score?.state === "insufficient_data") {
+    const scoreWrap = createElement("div", "mesa-score-cell");
+    const pill = createElement("span", "mesa-status-pill is-warn", "Insuficiente");
+    const desc = mesaFullAbsenceDescription(ov.fundamental.score);
+    if (desc) {
+      pill.title = desc;
+      pill.setAttribute("aria-label", desc);
+    }
+    scoreWrap.append(pill);
     fundCard.append(scoreWrap);
   } else {
     fundCard.append(renderInvestorValueCell(ov.fundamental?.score));
   }
   const valCard = createElement("div", "asset-compact-domain");
+  const valDate = mesaDateOnly(ov.valuation?.annual_period_end || ov.valuation?.price_to_earnings?.reference_at);
   valCard.append(
-    createElement("small", "", "P/E anual"),
+    createElement("small", "", `P/E anual${valDate ? ` (ej. ${valDate})` : ""}`),
     renderInvestorValueCell(ov.valuation?.price_to_earnings, {
       formatValue: (raw) => formatDecimalMultiple(raw, 2),
     }),
